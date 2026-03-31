@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,15 +11,16 @@ from typing import Any
 import polars as pl
 import yaml
 
-from llm_quant.backtest.strategy import StrategyConfig
 from llm_quant.backtest.strategies import create_strategy
+from llm_quant.backtest.strategy import StrategyConfig
 from llm_quant.brain.models import Action, Conviction, TradeSignal
+from llm_quant.config import CONFIG_DIR
 from llm_quant.trading.portfolio import Portfolio
 
 logger = logging.getLogger(__name__)
 
 
-PROMOTED_STRATEGY_SLUGS: list[str] = [
+PROMOTED_DEFAULT_STRATEGY_SLUGS: list[str] = [
     "lqd-spy-credit-lead",
     "agg-spy-credit-lead",
     "spy-overnight-momentum",
@@ -32,6 +34,20 @@ PROMOTED_STRATEGY_SLUGS: list[str] = [
     "soxx-qqq-lead-lag",
 ]
 
+PROMOTED_CRYPTO_STRATEGY_SLUGS: list[str] = [
+    "eth-btc-ratio-mean-reversion",
+]
+
+CANDIDATE_CRYPTO_STRATEGY_SLUGS: list[str] = [
+    "eth-btc-ratio-mean-reversion-v5",
+]
+
+DEFAULT_STRATEGY_SETS: dict[str, list[str]] = {
+    "promoted_default": PROMOTED_DEFAULT_STRATEGY_SLUGS,
+    "promoted_crypto": PROMOTED_CRYPTO_STRATEGY_SLUGS,
+    "candidate_crypto": CANDIDATE_CRYPTO_STRATEGY_SLUGS,
+}
+
 
 @dataclass
 class StrategySpec:
@@ -41,11 +57,48 @@ class StrategySpec:
     group: str = "ungrouped"
 
 
-def load_promoted_specs(base_dir: Path | None = None) -> list[StrategySpec]:
-    """Load the 11 promoted strategy specs from data/strategies."""
+def load_strategy_catalog(config_dir: Path | None = None) -> dict[str, list[str]]:
+    """Load strategy sets from config/strategies/catalog.toml."""
+    cfg_dir = config_dir or CONFIG_DIR
+    catalog_path = cfg_dir / "strategies" / "catalog.toml"
+    if not catalog_path.exists():
+        return DEFAULT_STRATEGY_SETS
+
+    with catalog_path.open("rb") as f:
+        raw = tomllib.load(f)
+    sets = raw.get("sets", {})
+    if not isinstance(sets, dict):
+        logger.warning(
+            "Invalid strategy catalog format at %s; using defaults", catalog_path
+        )
+        return DEFAULT_STRATEGY_SETS
+
+    catalog: dict[str, list[str]] = {}
+    for set_name, slugs in sets.items():
+        if isinstance(slugs, list):
+            catalog[str(set_name)] = [str(slug) for slug in slugs if str(slug).strip()]
+    return {**DEFAULT_STRATEGY_SETS, **catalog}
+
+
+def load_specs_for_set(
+    strategy_set: str,
+    base_dir: Path | None = None,
+    config_dir: Path | None = None,
+) -> list[StrategySpec]:
+    """Load strategy specs for a named set from the strategy catalog."""
     base = base_dir or Path("data/strategies")
+    catalog = load_strategy_catalog(config_dir=config_dir)
+    if strategy_set not in catalog:
+        logger.warning(
+            "Unknown strategy_set '%s'; falling back to promoted_default",
+            strategy_set,
+        )
+        slugs = catalog.get("promoted_default", PROMOTED_DEFAULT_STRATEGY_SLUGS)
+    else:
+        slugs = catalog[strategy_set]
+
     specs: list[StrategySpec] = []
-    for slug in PROMOTED_STRATEGY_SLUGS:
+    for slug in slugs:
         path = base / slug / "research-spec.yaml"
         if not path.exists():
             logger.warning("Strategy spec missing: %s", path)
@@ -73,6 +126,11 @@ def load_promoted_specs(base_dir: Path | None = None) -> list[StrategySpec]:
     return specs
 
 
+def load_promoted_specs(base_dir: Path | None = None) -> list[StrategySpec]:
+    """Backward-compatible default promoted strategy loader."""
+    return load_specs_for_set("promoted_default", base_dir=base_dir)
+
+
 def generate_strategy_signals(
     specs: list[StrategySpec],
     indicators_df: pl.DataFrame,
@@ -90,7 +148,9 @@ def generate_strategy_signals(
         try:
             strategy = create_strategy(spec.strategy_name, config)
         except ValueError as exc:
-            logger.warning("Unknown strategy %s (%s): %s", spec.slug, spec.strategy_name, exc)
+            logger.warning(
+                "Unknown strategy %s (%s): %s", spec.slug, spec.strategy_name, exc
+            )
             continue
 
         try:
@@ -100,8 +160,8 @@ def generate_strategy_signals(
                 portfolio=portfolio,
                 prices=prices,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Strategy %s failed: %s", spec.slug, exc)
+        except Exception:
+            logger.exception("Strategy %s failed", spec.slug)
             continue
 
         for signal in strat_signals:
@@ -122,6 +182,18 @@ def required_symbols(specs: list[StrategySpec]) -> list[str]:
             symbols.add(str(params.get("follower_symbol")))
         if "symbol" in params:
             symbols.add(str(params.get("symbol")))
+        if "symbol_a" in params:
+            symbols.add(str(params.get("symbol_a")))
+        if "symbol_b" in params:
+            symbols.add(str(params.get("symbol_b")))
+        if "symbols" in params and isinstance(params["symbols"], list):
+            symbols.update(str(sym) for sym in params["symbols"])
+        if "symbols_list" in params:
+            raw = params.get("symbols_list")
+            if isinstance(raw, str):
+                symbols.update(sym.strip() for sym in raw.split(","))
+            elif isinstance(raw, list):
+                symbols.update(str(sym) for sym in raw)
     return sorted(sym for sym in symbols if sym)
 
 
@@ -148,9 +220,13 @@ def merge_strategy_signals(
         if action == Action.CLOSE:
             target_weight = 0.0
         elif action == Action.SELL:
-            target_weight = min(g.target_weight for g in group if g.action == Action.SELL)
+            target_weight = min(
+                g.target_weight for g in group if g.action == Action.SELL
+            )
         elif action == Action.BUY:
-            target_weight = sum(g.target_weight for g in group if g.action == Action.BUY)
+            target_weight = sum(
+                g.target_weight for g in group if g.action == Action.BUY
+            )
         else:
             target_weight = 0.0
 
@@ -159,9 +235,7 @@ def merge_strategy_signals(
 
         conviction = _max_conviction([g.conviction for g in group])
         strategy_ids = ",".join(sorted({g.strategy_id for g in group if g.strategy_id}))
-        groups = sorted(
-            {g.metadata.get("strategy_group", "ungrouped") for g in group}
-        )
+        groups = sorted({g.metadata.get("strategy_group", "ungrouped") for g in group})
         reasoning = "; ".join(
             f"{g.strategy_id or 'strategy'}:{g.reasoning}" for g in group
         )

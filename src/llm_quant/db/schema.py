@@ -7,7 +7,7 @@ import duckdb
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 DDL_STATEMENTS = [
     """
@@ -199,9 +199,11 @@ DDL_STATEMENTS = [
     """,
     """
     CREATE TABLE IF NOT EXISTS strategy_rotation_state (
-        strategy_id VARCHAR PRIMARY KEY,
+        pod_id VARCHAR NOT NULL DEFAULT 'default',
+        strategy_id VARCHAR NOT NULL,
         disabled_until DATE,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (pod_id, strategy_id)
     )
     """,
     """
@@ -625,15 +627,15 @@ def _migrate_v8_to_v9(conn: duckdb.DuckDBPyConnection) -> None:
         ).fetchall()
     }
     if "strategy_rotation_state" not in tables:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS strategy_rotation_state (
-                strategy_id VARCHAR PRIMARY KEY,
+                pod_id VARCHAR NOT NULL DEFAULT 'default',
+                strategy_id VARCHAR NOT NULL,
                 disabled_until DATE,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (pod_id, strategy_id)
             )
-            """
-        )
+            """)
 
     if "intraday_order_state" in tables:
         order_cols = {
@@ -649,9 +651,7 @@ def _migrate_v8_to_v9(conn: duckdb.DuckDBPyConnection) -> None:
                 "ADD COLUMN oco_leg_missing_count INTEGER DEFAULT 0"
             )
 
-    logger.info(
-        "Migrated schema to v9: rotation state + OCO leg tracking added."
-    )
+    logger.info("Migrated schema to v9: rotation state + OCO leg tracking added.")
 
 
 def _migrate_v9_to_v10(conn: duckdb.DuckDBPyConnection) -> None:
@@ -663,8 +663,7 @@ def _migrate_v9_to_v10(conn: duckdb.DuckDBPyConnection) -> None:
         ).fetchall()
     }
     if "decision_contexts" not in tables:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS decision_contexts (
                 decision_id INTEGER NOT NULL,
                 pod_id VARCHAR NOT NULL DEFAULT 'default',
@@ -672,22 +671,101 @@ def _migrate_v9_to_v10(conn: duckdb.DuckDBPyConnection) -> None:
                 context_json TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            """
-        )
+            """)
     if "llm_prompt_logs" not in tables:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS llm_prompt_logs (
                 decision_id INTEGER NOT NULL,
                 prompt_type VARCHAR NOT NULL,
                 prompt_text TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            """
+            """)
+    logger.info("Migrated schema to v10: decision contexts + prompt logs added.")
+
+
+def _migrate_v10_to_v11(conn: duckdb.DuckDBPyConnection) -> None:
+    """Scope strategy rotation state by pod_id."""
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    if "strategy_rotation_state" not in tables:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_rotation_state (
+                pod_id VARCHAR NOT NULL DEFAULT 'default',
+                strategy_id VARCHAR NOT NULL,
+                disabled_until DATE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (pod_id, strategy_id)
+            )
+            """)
+        logger.info("Migrated schema to v11: created pod-scoped rotation state.")
+        return
+
+    cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'strategy_rotation_state'"
+        ).fetchall()
+    }
+    if "pod_id" in cols:
+        logger.info("Schema v11 rotation migration skipped; pod_id already present.")
+        return
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS strategy_rotation_state_v11 (
+            pod_id VARCHAR NOT NULL DEFAULT 'default',
+            strategy_id VARCHAR NOT NULL,
+            disabled_until DATE,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (pod_id, strategy_id)
         )
-    logger.info(
-        "Migrated schema to v10: decision contexts + prompt logs added."
+        """)
+    conn.execute("""
+        INSERT INTO strategy_rotation_state_v11
+            (pod_id, strategy_id, disabled_until, updated_at)
+        SELECT
+            'default' AS pod_id,
+            strategy_id,
+            disabled_until,
+            updated_at
+        FROM strategy_rotation_state
+        """)
+    conn.execute("DROP TABLE strategy_rotation_state")
+    conn.execute(
+        "ALTER TABLE strategy_rotation_state_v11 RENAME TO strategy_rotation_state"
     )
+    logger.info("Migrated schema to v11: pod-scoped rotation state enabled.")
+
+
+def _needs_v11_rotation_migration(
+    conn: duckdb.DuckDBPyConnection,
+    old_version: int,
+) -> bool:
+    if old_version < 11:
+        return True
+
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    if "strategy_rotation_state" not in tables:
+        return True
+
+    rotation_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'strategy_rotation_state'"
+        ).fetchall()
+    }
+    return "pod_id" not in rotation_cols
 
 
 def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
@@ -722,6 +800,8 @@ def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
         _migrate_v8_to_v9(conn)
     if old_version < 10:
         _migrate_v9_to_v10(conn)
+    if _needs_v11_rotation_migration(conn, old_version):
+        _migrate_v10_to_v11(conn)
 
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)",
@@ -734,4 +814,6 @@ def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
 
 def get_connection(db_path: str | Path) -> duckdb.DuckDBPyConnection:
     """Open an existing DuckDB database."""
-    return duckdb.connect(str(db_path))
+    # Ensure schema is up-to-date for existing DBs (migrations, new tables).
+    # This is safe to call repeatedly and prevents missing-table crashes.
+    return init_schema(db_path)

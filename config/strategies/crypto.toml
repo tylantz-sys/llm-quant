@@ -1,0 +1,33 @@
+[execution]
+signal_source = "strategy_overlay"
+strategy_set = "promoted_crypto"
+overlay_governor_strict = true
+overlay_max_upscale = 1.25
+overlay_max_downscale = 0.0
+intraday_enabled = true
+intraday_timeframe_minutes = 5
+intraday_lookback_days = 10
+intraday_rth_guard = false
+intraday_use_oco = false
+skip_daily_fetch_when_intraday = true
+asset_class_filter = ["crypto"]
+claude_overlay_only = true
+crypto_order_sizing = "qty"
+crypto_time_in_force = "gtc"
+initial_capital_source = "alpaca_equity"
+
+# Crypto profit-taking (tighter defaults due to higher volatility).
+# These apply because intraday_use_oco = false (synthetic exits).
+profit_take_partial_pct = 0.015
+profit_take_partial_size = 0.50
+profit_take_remainder_tp_mult = 2.0
+trailing_stop_pct = 0.0125
+scale_in_tranches = 2
+reentry_cooldown_bars = 1
+
+[strategy_rotation]
+enabled = true
+window_days = 60
+top_n = 3
+min_trades = 20
+cooldown_days = 5

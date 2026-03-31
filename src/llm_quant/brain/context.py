@@ -570,9 +570,15 @@ def build_market_context(
     raw_positions: list[dict[str, Any]] = portfolio_state.get("positions", [])
 
     # Determine universe symbols from config
-    universe_symbols: list[str] = [
-        asset.symbol for asset in config.universe.assets if asset.tradeable
-    ]
+    asset_filter = getattr(config.execution, "asset_class_filter", []) or []
+    allowed_classes = {cls.lower() for cls in asset_filter} if asset_filter else set()
+    universe_symbols: list[str] = []
+    for asset in config.universe.assets:
+        if not asset.tradeable:
+            continue
+        if allowed_classes and str(asset.asset_class or "").lower() not in allowed_classes:
+            continue
+        universe_symbols.append(asset.symbol)
     if not universe_symbols:
         logger.warning("No tradeable asset symbols found in universe config")
 
@@ -622,6 +628,9 @@ def build_market_context(
 
     # Compute portfolio-level metrics
     cash_pct = (cash / nav * 100.0) if nav > 0 else 100.0
+    reserve_cash = max(float(getattr(config.risk, "min_cash_reserve", 0.0)) * nav, 0.0)
+    deployable_cash = max(cash - reserve_cash, 0.0)
+    decision_capital = min(nav, deployable_cash) if nav > 0 else deployable_cash
 
     long_exposure = sum(
         abs(p.shares * p.current_price) for p in position_rows if p.shares > 0
@@ -676,6 +685,9 @@ def build_market_context(
         cash_pct=round(cash_pct, 2),
         gross_exposure_pct=round(gross_exposure_pct, 2),
         net_exposure_pct=round(net_exposure_pct, 2),
+        decision_capital=round(decision_capital, 2),
+        reserve_cash=round(reserve_cash, 2),
+        deployable_cash=round(deployable_cash, 2),
         positions=position_rows,
         market_data=market_data,
         vix=round(vix, 2),
@@ -692,11 +704,13 @@ def build_market_context(
     )
 
     logger.info(
-        "Market context built: date=%s, nav=%.2f, %d positions, %d market rows, "
-        "VIX=%.2f (pct126d=%.1f, regime=%s), spy_trend=%s, "
-        "credit_oas=%s, credit_z=%s, silent_stress=%s",
+        "Market context built: date=%s, nav=%.2f, cash=%.2f, deployable_cash=%.2f, "
+        "%d positions, %d market rows, VIX=%.2f (pct126d=%.1f, regime=%s), "
+        "spy_trend=%s, credit_oas=%s, credit_z=%s, silent_stress=%s",
         context.date,
         context.nav,
+        context.cash,
+        context.deployable_cash,
         len(context.positions),
         len(context.market_data),
         context.vix,

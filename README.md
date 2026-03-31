@@ -27,15 +27,22 @@ See [research-tracks.md](docs/governance/research-tracks.md),
 2. **Compute** technical indicators (SMA, RSI, MACD, ATR, rolling correlation) using Polars
 3. **Send** market context + portfolio state to Claude as a structured prompt
 4. **Receive** JSON trade decisions with regime analysis and per-signal reasoning
-5. **Execute** paper trades after pre-trade risk checks (7 automated limits)
-6. **Track** everything in DuckDB — trades, decisions, portfolio snapshots, hash chain
+5. **Execute** trades after pre-trade risk checks, using the canonical exit engine to resolve take-profit / trailing / EOD policy
+6. **Realize** exits through the active broker path — synthetic monitoring, native brackets, or native OCO management
+7. **Track** everything in DuckDB — trades, decisions, portfolio snapshots, hash chain, and exit telemetry
 
 ## Hybrid Runtime (Optional)
 
 - **Promoted strategies** in `data/strategies/*` can run as signal pods.
+- **Pod mandates** are explicit: `default` (overlay-only), `commodities` (RTH commodity sleeve), `crypto` (24/7 sleeve).
+- **Signal source is explicit** per pod: `llm` or `strategy_overlay`.
+- **Strategy sets** are catalog-driven via `config/strategies/catalog.toml`.
 - **Claude overlay** scales/blocks strategy signals when `claude_overlay_only = true`.
 - **Intraday mode** uses Alpaca 5‑minute bars + intraday indicators.
-- **Profit-taking** supports partial TP + **OCO remainder** with trailing stop updates.
+- **Canonical exit engine** standardizes exit policy across all runtimes.
+- **Broker realization paths** differ by mode: synthetic monitoring, native brackets, or partial TP + OCO remainder.
+- **Exit telemetry** records policy, runtime mode, and per-position protection metadata for auditability.
+- **Expectancy gate** can auto-throttle BUY weights when recent realized expectancy is negative.
 - Reports include intraday tables, order state, and `decision_type` tagging.
 - Data upserts use a lock + timeout + bulk insert with retries to avoid E2E hangs.
 - See `docs/governance/runtime-truth-table.md` for mode-by-mode behavior.
@@ -177,6 +184,9 @@ pq run --dry-run
 # Execute live paper trades
 pq run
 
+# Run the operational end-of-day flatten override
+pq eod-flat
+
 # Check portfolio status
 pq status
 
@@ -201,7 +211,9 @@ src/llm_quant/
 │   ├── parser.py   # JSON response parser
 │   ├── context.py  # Market context builder
 │   └── models.py   # Domain dataclasses
-├── trading/        # Paper trading
+├── trading/        # Trading runtime
+│   ├── exits.py    # Canonical exit engine
+│   ├── intraday.py # Intraday position state + profit-taking state
 │   ├── portfolio.py # Portfolio state
 │   ├── executor.py # Trade execution
 │   ├── ledger.py   # Trade logging
@@ -240,7 +252,7 @@ All config lives in `config/`:
 
 - **`default.toml`** — General settings (model, capital, lookback)
 - **`universe.toml`** — ETF universe (39 symbols across equities, bonds, commodities, crypto)
-- **`risk.toml`** — Risk limits — Track A (default) and `[track_b]` section
+- **`risk.toml`** — Risk limits and canonical exit policy — Track A (default) and `[track_b]` section
 - **`prompts/`** — Jinja2 templates for the Claude PM persona
 
 ## Risk Constraints

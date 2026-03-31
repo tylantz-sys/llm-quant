@@ -18,6 +18,7 @@ _SYSTEM_TEMPLATE = "trader_system.md"
 _DECISION_TEMPLATE = "trader_decision.md"
 _OVERLAY_SYSTEM_TEMPLATE = "trader_overlay_system.md"
 _OVERLAY_DECISION_TEMPLATE = "trader_overlay_decision.md"
+_CRYPTO_APPEND_TEMPLATE = "crypto_append.md"
 
 
 def _get_prompts_dir(config_dir: Path | None = None) -> Path:
@@ -97,6 +98,22 @@ def load_overlay_system_prompt(config_dir: Path | None = None) -> str:
     content = template_path.read_text(encoding="utf-8")
     logger.debug(
         "Loaded overlay system prompt from %s (%d chars)",
+        template_path,
+        len(content),
+    )
+    return content
+
+
+def load_crypto_append(config_dir: Path | None = None) -> str:
+    """Load the crypto appendix prompt text, if present."""
+    prompts_dir = _get_prompts_dir(config_dir)
+    template_path = prompts_dir / _CRYPTO_APPEND_TEMPLATE
+    if not template_path.is_file():
+        logger.debug("Crypto appendix not found at %s", template_path)
+        return ""
+    content = template_path.read_text(encoding="utf-8")
+    logger.debug(
+        "Loaded crypto appendix from %s (%d chars)",
         template_path,
         len(content),
     )

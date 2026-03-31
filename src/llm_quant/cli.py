@@ -31,6 +31,9 @@ _ET = ZoneInfo("America/New_York")
 pods_app = typer.Typer(name="pods", help="Manage trading pods")
 app.add_typer(pods_app, name="pods")
 
+crypto_app = typer.Typer(name="crypto", help="Crypto pod utilities")
+app.add_typer(crypto_app, name="crypto")
+
 
 def _setup_logging(level: str = "INFO") -> None:
     logging.basicConfig(
@@ -59,11 +62,83 @@ def _get_db_path(config=None):
 
 
 def _parse_eod_time(value: str) -> dt_time:
-    parts = value.split(":")
-    if len(parts) != 2:
-        raise ValueError("EOD time must be HH:MM")
-    hour, minute = (int(p) for p in parts)
-    return dt_time(hour=hour, minute=minute)
+    from llm_quant.trading.exits import parse_eod_time
+
+    return parse_eod_time(value)
+
+
+def _resolve_pod_capital(
+    capital: float | None,
+    capital_source: str,
+    config,
+) -> float:
+    if capital is not None:
+        return float(capital)
+
+    source = (capital_source or "config").lower()
+    if source.startswith("alpaca_"):
+        return _get_alpaca_account_value(source)
+
+    return float(config.general.initial_capital)
+
+
+def _resolve_initial_capital(config, broker: str) -> float:
+    source = getattr(config.execution, "initial_capital_source", "config") or "config"
+    if broker.lower() != "alpaca" or source == "config":
+        return float(config.general.initial_capital)
+
+    return _get_alpaca_account_value(source)
+
+
+def _get_alpaca_account_value(source: str) -> float:
+    try:
+        account = _get_alpaca_account()
+        key_map = {
+            "alpaca_equity": "equity",
+            "alpaca_cash": "cash",
+            "alpaca_buying_power": "buying_power",
+        }
+        key = key_map.get(source, "equity")
+        value = float(account.get(key, 0.0))
+        if value > 0:
+            return value
+        console.print(
+            f"[red]FAIL[/red] Alpaca account returned {key}={value}. "
+            "Cannot use Alpaca account value."
+        )
+        raise typer.Exit(1)
+    except Exception as exc:  # noqa: BLE001
+        console.print(
+            "[red]FAIL[/red] Could not fetch Alpaca account. "
+            "Ensure ALPACA_API_KEY / ALPACA_SECRET_KEY are set (or in .env)."
+        )
+        raise typer.Exit(1) from exc
+
+
+def _get_alpaca_account() -> dict[str, float | str]:
+    from llm_quant.broker.alpaca import AlpacaClient
+
+    client = AlpacaClient.from_env()
+    return client.get_account()
+
+
+def _sync_live_alpaca_cash(portfolio) -> dict[str, float] | None:
+    try:
+        account = _get_alpaca_account()
+    except Exception as exc:  # noqa: BLE001
+        console.print(
+            f"[yellow]WARN[/yellow] Could not sync live Alpaca account cash: {exc}"
+        )
+        return None
+
+    live_cash = float(account.get("cash", portfolio.cash) or portfolio.cash)
+    live_equity = float(account.get("equity", portfolio.nav) or portfolio.nav)
+    portfolio.cash = live_cash
+    console.print(
+        "  [green]OK[/green] Synced live Alpaca account context: "
+        f"cash=${live_cash:,.2f} equity=${live_equity:,.2f}"
+    )
+    return {"cash": live_cash, "equity": live_equity}
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +223,11 @@ def _run_single_pod(
     """Execute a full trading cycle for a single pod."""
     from llm_quant.brain.context import build_market_context
     from llm_quant.brain.engine import SignalEngine
-    from llm_quant.brain.models import Action
+    from llm_quant.brain.governor import (
+        enforce_governor_constraints,
+        fallback_governor_decision,
+    )
+    from llm_quant.brain.models import Action, TradingDecision
     from llm_quant.brain.overlay import OverlayEngine
     from llm_quant.broker.alpaca import AlpacaClient, AlpacaError
     from llm_quant.broker.intraday_orders import (
@@ -158,7 +237,11 @@ def _run_single_pod(
         update_trailing_stops,
         upsert_order_states,
     )
-    from llm_quant.broker.rth import should_run_intraday
+    from llm_quant.broker.rth import should_skip_intraday
+    from llm_quant.data.alpaca_intraday import (
+        fetch_intraday_crypto_ohlcv,
+        fetch_intraday_ohlcv,
+    )
     from llm_quant.data.fetcher import fetch_ohlcv
     from llm_quant.data.indicators import compute_indicators
     from llm_quant.data.store import (
@@ -172,10 +255,15 @@ def _run_single_pod(
     from llm_quant.db.schema import get_connection
     from llm_quant.risk.manager import RiskManager
     from llm_quant.trading.executor import execute_signals
+    from llm_quant.trading.exits import (
+        build_exit_policy,
+        build_exit_runtime,
+        build_exit_telemetry_payload,
+        evaluate_position_exits,
+    )
     from llm_quant.trading.intraday import (
         apply_reentry_cooldown,
         apply_scale_in,
-        generate_profit_taking_signals,
         load_position_states,
         log_intraday_context,
         merge_intraday_signals,
@@ -184,13 +272,20 @@ def _run_single_pod(
         upsert_position_states,
     )
     from llm_quant.trading.telemetry import log_decision_context
+    from llm_quant.trading.runtime_controls import (
+        apply_expectancy_buy_scale,
+        assess_intraday_symbol_freshness,
+        compute_peak_nav,
+        compute_recent_realized_expectancy,
+        filter_signals_by_asset_class,
+    )
     from llm_quant.trading.run_lock import acquire_run_lock, slot_for_time
     from llm_quant.strategies.runtime import (
         apply_group_caps,
         apply_max_position_cap,
         apply_regime_multipliers,
         generate_strategy_signals,
-        load_promoted_specs,
+        load_specs_for_set,
         merge_strategy_signals,
         required_symbols,
     )
@@ -200,7 +295,18 @@ def _run_single_pod(
 
     config = _get_config_for_pod(pod_id)
     db_path = _get_db_path(config)
+    signal_source = str(config.execution.signal_source or "auto").lower()
+    if signal_source == "auto":
+        use_strategy_overlay = bool(config.execution.claude_overlay_only)
+    else:
+        use_strategy_overlay = signal_source == "strategy_overlay"
+    resolved_signal_source = "strategy_overlay" if use_strategy_overlay else "llm"
+    strategy_set = str(config.execution.strategy_set or "promoted_default")
+    asset_class_map = {
+        asset.symbol: asset.asset_class for asset in config.universe.assets
+    }
     run_lock = None
+    global_lock = None
     log_only = False
     if config.execution.intraday_enabled:
         slot = slot_for_time(
@@ -214,79 +320,141 @@ def _run_single_pod(
             )
             return
 
+    global_lock = acquire_file_lock(
+        Path("data") / "locks" / "run_global.lock",
+        timeout_seconds=config.data.db_lock_timeout_seconds,
+        retry_seconds=config.data.db_lock_retry_seconds,
+    )
+    if global_lock is None:
+        console.print(
+            "[yellow]WARN[/yellow] Another run is using the DB; skipping this cycle."
+        )
+        if run_lock:
+            run_lock.release()
+        return
+
     conn = get_connection(db_path)
     today = datetime.now(tz=UTC).date()
 
-    if config.execution.intraday_enabled:
+    if config.execution.intraday_enabled and config.execution.intraday_rth_guard:
         try:
             rth_client = AlpacaClient.from_env()
-            if not should_run_intraday(rth_client.is_market_open()):
+            if should_skip_intraday(rth_client.is_market_open(), True):
                 if config.execution.log_decisions_when_rth_closed:
                     log_only = True
                     console.print(
                         "[yellow]RTH closed — logging decisions only.[/yellow]"
                     )
                 else:
-                    console.print(
-                        "[yellow]RTH closed — skipped intraday run.[/yellow]"
-                    )
+                    console.print("[yellow]RTH closed — skipped intraday run.[/yellow]")
                     conn.close()
+                    if global_lock:
+                        global_lock.release()
                     if run_lock:
                         run_lock.release()
                     return
         except AlpacaError as exc:
             console.print(f"[red]FAIL[/red] Alpaca clock check failed: {exc}")
             conn.close()
+            if global_lock:
+                global_lock.release()
             if run_lock:
                 run_lock.release()
             raise typer.Exit(1) from exc
+    elif config.execution.intraday_enabled and not config.execution.intraday_rth_guard:
+        console.print(
+            "[yellow]RTH guard disabled — running intraday regardless of market hours.[/yellow]"
+        )
 
     # Step 1: Fetch latest data
-    symbols = get_tradeable_symbols(config)
+    overlay_required_symbols: list[str] = []
+    if use_strategy_overlay:
+        # Pre-fetch promoted symbols so overlay has the required intraday inputs.
+        overlay_required_symbols = required_symbols(
+            load_specs_for_set(strategy_set)
+        )
+
+    symbols = get_tradeable_symbols(
+        config,
+        asset_class_filter=config.execution.asset_class_filter,
+    )
+    if overlay_required_symbols:
+        symbols = sorted(set(symbols) | set(overlay_required_symbols))
+
     console.print(
         f"\n[bold]Step 1/5:[/bold] Fetching market data for {len(symbols)} symbols..."
     )
-    df = fetch_ohlcv(symbols, lookback_days=config.data.lookback_days)
-    if not df.is_empty():
-        df = compute_indicators(df)
-        lock = acquire_file_lock(
-            Path("data") / "locks" / "daily_upsert.lock",
-            timeout_seconds=config.data.db_lock_timeout_seconds,
-            retry_seconds=config.data.db_lock_retry_seconds,
-        )
-        if lock is None:
-            console.print(
-                "  [yellow]WARN[/yellow] DB busy; skipping daily upsert this run"
-            )
-        else:
-            try:
-                upsert_market_data_with_retry(
-                    conn,
-                    df,
-                    max_retries=config.data.db_upsert_max_retries,
-                    retry_delay_seconds=config.data.db_upsert_retry_seconds,
-                    timeout_seconds=config.data.db_upsert_timeout_seconds,
-                )
-                console.print(
-                    f"  [green]OK[/green] Updated {df['symbol'].n_unique()} symbols"
-                )
-            except Exception as exc:  # noqa: BLE001
-                console.print(f"  [yellow]WARN[/yellow] Daily upsert failed: {exc}")
-            finally:
-                lock.release()
-    else:
+    skip_daily = (
+        config.execution.intraday_enabled
+        and config.execution.skip_daily_fetch_when_intraday
+    )
+    if skip_daily:
         console.print(
-            "  [yellow]WARN[/yellow] No new data fetched, using existing DB data"
+            "  [yellow]Skipping daily Yahoo fetch (intraday-only mode).[/yellow]"
         )
+    else:
+        df = fetch_ohlcv(symbols, lookback_days=config.data.lookback_days)
+        if not df.is_empty():
+            df = compute_indicators(df)
+            lock = acquire_file_lock(
+                Path("data") / "locks" / "daily_upsert.lock",
+                timeout_seconds=config.data.db_lock_timeout_seconds,
+                retry_seconds=config.data.db_lock_retry_seconds,
+            )
+            if lock is None:
+                console.print(
+                    "  [yellow]WARN[/yellow] DB busy; skipping daily upsert this run"
+                )
+            else:
+                try:
+                    upsert_market_data_with_retry(
+                        conn,
+                        df,
+                        max_retries=config.data.db_upsert_max_retries,
+                        retry_delay_seconds=config.data.db_upsert_retry_seconds,
+                        timeout_seconds=config.data.db_upsert_timeout_seconds,
+                    )
+                    console.print(
+                        f"  [green]OK[/green] Updated {df['symbol'].n_unique()} symbols"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    console.print(f"  [yellow]WARN[/yellow] Daily upsert failed: {exc}")
+                finally:
+                    lock.release()
+        else:
+            console.print(
+                "  [yellow]WARN[/yellow] No new data fetched, using existing DB data"
+            )
 
     if config.execution.intraday_enabled and not log_only:
         console.print("  [bold]Intraday:[/bold] Fetching 5-min bars from Alpaca...")
         try:
-            intraday_df = fetch_intraday_ohlcv(
-                symbols,
-                timeframe_minutes=config.execution.intraday_timeframe_minutes,
-                lookback_days=config.execution.intraday_lookback_days,
-                timeout=config.data.fetch_timeout,
+            import polars as pl
+
+            intraday_frames = []
+            crypto_symbols = [s for s in symbols if asset_class_map.get(s) == "crypto"]
+            equity_symbols = [s for s in symbols if asset_class_map.get(s) != "crypto"]
+            if equity_symbols:
+                intraday_frames.append(
+                    fetch_intraday_ohlcv(
+                        equity_symbols,
+                        timeframe_minutes=config.execution.intraday_timeframe_minutes,
+                        lookback_days=config.execution.intraday_lookback_days,
+                        timeout=config.data.fetch_timeout,
+                    )
+                )
+            if crypto_symbols:
+                intraday_frames.append(
+                    fetch_intraday_crypto_ohlcv(
+                        crypto_symbols,
+                        timeframe_minutes=config.execution.intraday_timeframe_minutes,
+                        lookback_days=config.execution.intraday_lookback_days,
+                        timeout=config.data.fetch_timeout,
+                        symbol_map=config.execution.crypto_symbol_map,
+                    )
+                )
+            intraday_df = (
+                pl.concat(intraday_frames, how="vertical") if intraday_frames else None
             )
         except Exception as exc:
             console.print(f"  [yellow]WARN[/yellow] Intraday fetch failed: {exc}")
@@ -333,27 +501,24 @@ def _run_single_pod(
 
     # Step 2: Load portfolio
     console.print("[bold]Step 2/5:[/bold] Loading portfolio...")
-    portfolio = Portfolio.from_db(conn, config.general.initial_capital, pod_id=pod_id)
+    initial_capital = _resolve_initial_capital(config, broker)
+    portfolio = Portfolio.from_db(conn, initial_capital, pod_id=pod_id)
 
     # Get latest prices for portfolio
     if config.execution.intraday_enabled:
-        latest = conn.execute(
-            """
+        latest = conn.execute("""
             SELECT symbol, close as price FROM market_data_intraday
             WHERE (symbol, timestamp) IN (
                 SELECT symbol, MAX(timestamp) FROM market_data_intraday GROUP BY symbol
             )
-            """
-        ).pl()
+            """).pl()
     else:
-        latest = conn.execute(
-            """
+        latest = conn.execute("""
             SELECT symbol, close as price FROM market_data_daily
             WHERE (symbol, date) IN (
                 SELECT symbol, MAX(date) FROM market_data_daily GROUP BY symbol
             )
-            """
-        ).pl()
+            """).pl()
     prices = dict(
         zip(
             latest["symbol"].to_list(),
@@ -363,9 +528,26 @@ def _run_single_pod(
     )
     portfolio.update_prices(prices)
 
+    live_account_context = None
+    if broker.lower() == "alpaca":
+        live_account_context = _sync_live_alpaca_cash(portfolio)
+
+    peak_nav = compute_peak_nav(conn, pod_id, initial_capital)
+    portfolio.peak_nav = peak_nav
+    current_drawdown_pct = (
+        ((portfolio.nav - peak_nav) / peak_nav * 100.0) if peak_nav > 0 else 0.0
+    )
+
     console.print(
         f"  NAV: ${portfolio.nav:,.2f} | Cash: ${portfolio.cash:,.2f}"
         f" | Positions: {len(portfolio.positions)}"
+    )
+    if live_account_context is not None:
+        console.print(
+            f"  Live Alpaca Equity: ${live_account_context['equity']:,.2f}"
+        )
+    console.print(
+        f"  Peak NAV: ${peak_nav:,.2f} | Drawdown: {current_drawdown_pct:.2f}%"
     )
 
     # Step 3: Build context and get Claude's signals
@@ -375,9 +557,27 @@ def _run_single_pod(
 
     selected_ids: list[str] = []
     selected_specs = []
+    strategy_symbols: list[str] = []
+    governor_audit: dict[str, object] = {
+        "candidate_count": 0,
+        "accepted_count": 0,
+        "rejected_count": 0,
+        "scaled_count": 0,
+        "policy_violations": [],
+        "fallback_required": False,
+        "mode": "llm",
+        "signal_source": resolved_signal_source,
+        "strategy_set": strategy_set if use_strategy_overlay else "",
+    }
+    overlay_skip_info = {
+        "overlay_skipped": False,
+        "overlay_skip_reason": "",
+        "missing_symbols": [],
+        "stale_symbols": [],
+    }
 
-    if config.execution.claude_overlay_only:
-        specs = load_promoted_specs()
+    if use_strategy_overlay:
+        specs = load_specs_for_set(strategy_set)
         selected_specs = specs
         if config.strategy_rotation.enabled:
             specs, selected_ids = select_rotated_specs(
@@ -393,58 +593,163 @@ def _run_single_pod(
                 cooldown_days=config.strategy_rotation.cooldown_days,
             )
             selected_specs = specs
+
         strategy_symbols = required_symbols(specs)
-        if config.execution.intraday_enabled:
-            start_ts = datetime.now(tz=UTC) - timedelta(
-                days=config.execution.intraday_lookback_days
-            )
-            indicators_df = get_intraday_data(conn, strategy_symbols, start_ts)
-            if "timestamp" in indicators_df.columns:
-                indicators_df = indicators_df.with_columns(
-                    indicators_df["timestamp"].alias("date")
+
+        missing_symbols = sorted(set(strategy_symbols) - set(symbols))
+        stale_symbols: list[str] = []
+        if config.execution.intraday_enabled and not log_only and strategy_symbols:
+            stale_age_minutes = max(config.execution.intraday_timeframe_minutes * 2, 1)
+            missing_from_bars, stale_symbols, _latest_by_symbol = (
+                assess_intraday_symbol_freshness(
+                    conn,
+                    strategy_symbols,
+                    datetime.now(tz=UTC),
+                    stale_age_minutes,
                 )
-        else:
-            start_date = datetime.now(tz=UTC).date() - timedelta(
-                days=config.data.lookback_days
             )
-            indicators_df = get_market_data(conn, strategy_symbols, start_date)
+            missing_symbols = sorted(set(missing_symbols) | set(missing_from_bars))
 
-        strategy_signals = generate_strategy_signals(
-            specs,
-            indicators_df,
-            portfolio,
-            prices,
-            datetime.now(tz=UTC).date(),
-        )
-        strategy_signals = apply_regime_multipliers(
-            strategy_signals,
-            config.allocation.regime_weight_mult,
-            context.market_regime.value,
-        )
-        merged = merge_strategy_signals(strategy_signals)
-        merged = apply_group_caps(merged, config.allocation.strategy_group_caps)
-        aggregated = apply_max_position_cap(
-            merged, max_position_weight=config.risk.max_position_weight
-        )
-        candidate_signals = [
-            {
-                "symbol": sig.symbol,
-                "action": sig.action.value,
-                "conviction": sig.conviction.value,
-                "target_weight": sig.target_weight,
-                "stop_loss": sig.stop_loss,
-                "take_profit": sig.take_profit,
-                "strategy_id": sig.strategy_id,
-                "reasoning": sig.reasoning,
+        if missing_symbols or stale_symbols:
+            reason_parts = []
+            if missing_symbols:
+                reason_parts.append("missing symbols: " + ", ".join(missing_symbols))
+            if stale_symbols:
+                reason_parts.append("stale symbols: " + ", ".join(stale_symbols))
+            skip_reason = "; ".join(reason_parts)
+            overlay_skip_info = {
+                "overlay_skipped": True,
+                "overlay_skip_reason": skip_reason,
+                "missing_symbols": missing_symbols,
+                "stale_symbols": stale_symbols,
             }
-            for sig in aggregated
-        ]
+            console.print(
+                "[yellow]WARN[/yellow] Overlay skipped due to symbol availability: "
+                f"{skip_reason}"
+            )
+            decision = TradingDecision(
+                date=today,
+                market_regime=context.market_regime,
+                regime_confidence=0.0,
+                regime_reasoning=f"Overlay skipped ({skip_reason}).",
+                signals=[],
+                portfolio_commentary=(
+                    "Overlay skipped because strategy-set intraday inputs were "
+                    f"missing or stale ({skip_reason}). No new trades for this slot."
+                ),
+                decision_type="overlay",
+            )
+            governor_audit["mode"] = "overlay_skip"
+            decision_logger = SignalEngine(config)
+        else:
+            if config.execution.intraday_enabled:
+                start_ts = datetime.now(tz=UTC) - timedelta(
+                    days=config.execution.intraday_lookback_days
+                )
+                indicators_df = get_intraday_data(conn, strategy_symbols, start_ts)
+                if "timestamp" in indicators_df.columns:
+                    indicators_df = indicators_df.with_columns(
+                        indicators_df["timestamp"].alias("date")
+                    )
+            else:
+                start_date = datetime.now(tz=UTC).date() - timedelta(
+                    days=config.data.lookback_days
+                )
+                indicators_df = get_market_data(conn, strategy_symbols, start_date)
 
-        overlay_engine = OverlayEngine(config)
-        decision = overlay_engine.get_overlay_signals(context, candidate_signals)
-        allowed = {sig.symbol for sig in aggregated}
-        decision.signals = [s for s in decision.signals if s.symbol in allowed]
-        decision_logger = SignalEngine(config)
+            strategy_signals = generate_strategy_signals(
+                specs,
+                indicators_df,
+                portfolio,
+                prices,
+                datetime.now(tz=UTC).date(),
+            )
+            strategy_signals = apply_regime_multipliers(
+                strategy_signals,
+                config.allocation.regime_weight_mult,
+                context.market_regime.value,
+            )
+            merged = merge_strategy_signals(strategy_signals)
+            merged = apply_group_caps(merged, config.allocation.strategy_group_caps)
+            aggregated = apply_max_position_cap(
+                merged, max_position_weight=config.risk.max_position_weight
+            )
+            candidate_signals = [
+                {
+                    "symbol": sig.symbol,
+                    "action": sig.action.value,
+                    "conviction": sig.conviction.value,
+                    "target_weight": sig.target_weight,
+                    "stop_loss": sig.stop_loss,
+                    "take_profit": sig.take_profit,
+                    "strategy_id": sig.strategy_id,
+                    "reasoning": sig.reasoning,
+                }
+                for sig in aggregated
+            ]
+            governor_audit["candidate_count"] = len(candidate_signals)
+
+            overlay_engine = OverlayEngine(config)
+            try:
+                overlay_decision = overlay_engine.get_overlay_signals(
+                    context, candidate_signals
+                )
+                sanitized_signals, overlay_audit, fallback_required = (
+                    enforce_governor_constraints(
+                        decision=overlay_decision,
+                        candidate_signals=candidate_signals,
+                        strict=config.execution.overlay_governor_strict,
+                        max_upscale=config.execution.overlay_max_upscale,
+                        max_downscale=config.execution.overlay_max_downscale,
+                        decision_date=today,
+                    )
+                )
+                governor_audit.update(overlay_audit)
+                if fallback_required:
+                    fallback_reason = (
+                        "strict governor policy violation: "
+                        + ", ".join(overlay_audit.get("policy_violations", []))
+                    )
+                    decision = fallback_governor_decision(
+                        context=context,
+                        candidate_signals=candidate_signals,
+                        reason=fallback_reason,
+                    )
+                    decision.model = overlay_decision.model
+                    decision.prompt_tokens = overlay_decision.prompt_tokens
+                    decision.completion_tokens = overlay_decision.completion_tokens
+                    decision.total_tokens = overlay_decision.total_tokens
+                    decision.cost_usd = overlay_decision.cost_usd
+                    decision.raw_response = overlay_decision.raw_response
+                    decision.system_prompt = overlay_decision.system_prompt
+                    decision.user_prompt = overlay_decision.user_prompt
+                    governor_audit["mode"] = "overlay_fallback"
+                    console.print(
+                        "[yellow]WARN[/yellow] Overlay fallback engaged: "
+                        f"{fallback_reason}"
+                    )
+                else:
+                    decision = overlay_decision
+                    decision.signals = sanitized_signals
+                    governor_audit["mode"] = "overlay_governor"
+            except Exception as exc:  # noqa: BLE001
+                reason = f"overlay_error:{exc}"
+                decision = fallback_governor_decision(
+                    context=context,
+                    candidate_signals=candidate_signals,
+                    reason=reason,
+                )
+                governor_audit.update(
+                    {
+                        "mode": "overlay_fallback",
+                        "fallback_required": True,
+                        "policy_violations": [reason],
+                    }
+                )
+                console.print(
+                    f"[yellow]WARN[/yellow] Overlay call failed; fallback engaged: {exc}"
+                )
+            decision_logger = SignalEngine(config)
     else:
         console.print("[bold]Step 3/5:[/bold] Consulting Claude...")
         engine = SignalEngine(config)
@@ -455,12 +760,25 @@ def _run_single_pod(
     if not getattr(decision, "decision_type", None):
         decision.decision_type = "llm"
 
+    decision.signals, filtered_count = filter_signals_by_asset_class(
+        decision.signals,
+        asset_class_map,
+        config.execution.asset_class_filter,
+    )
+    if filtered_count > 0:
+        console.print(
+            "[yellow]WARN[/yellow] Filtered out "
+            f"{filtered_count} signal(s) outside asset_class_filter."
+        )
+
     # Display decision
     _display_decision(decision)
 
     if dry_run:
         console.print("\n[yellow]DRY RUN[/yellow] -- no trades executed.")
         conn.close()
+        if global_lock:
+            global_lock.release()
         if run_lock:
             run_lock.release()
         return
@@ -468,8 +786,11 @@ def _run_single_pod(
     # Step 4: Risk check and execute
     console.print("[bold]Step 4/5:[/bold] Risk check and execution...")
     risk_mgr = RiskManager(config)
+    exit_policy = build_exit_policy(config.risk, config.execution)
+    exit_runtime = build_exit_runtime(broker, config.execution)
 
     signals = decision.signals
+    context_payload = None
     now_ts = None
     if config.execution.intraday_enabled:
         now_row = conn.execute(
@@ -497,16 +818,24 @@ def _run_single_pod(
             config.execution.reentry_cooldown_bars,
         )
 
-        if broker.lower() == "paper":
-            profit_signals = generate_profit_taking_signals(
-                portfolio,
-                prices,
-                states,
-                now_ts,
-                partial_tp_pct=config.execution.profit_take_partial_pct,
-                partial_tp_size=config.execution.profit_take_partial_size,
-                trailing_stop_pct=config.execution.trailing_stop_pct,
+        profit_signals, exit_telemetry = evaluate_position_exits(
+            portfolio,
+            prices,
+            states,
+            exit_policy,
+            exit_runtime,
+        )
+        if any(item.unprotected for item in exit_telemetry) and exit_policy.fail_on_unprotected_exits:
+            console.print(
+                "[red]FAIL[/red] Canonical exit engine detected unprotected live position(s)."
             )
+            conn.close()
+            if global_lock:
+                global_lock.release()
+            if run_lock:
+                run_lock.release()
+            raise typer.Exit(1)
+        if exit_runtime.exit_mode == "synthetic":
             signals = merge_intraday_signals(
                 entry_signals,
                 other_signals,
@@ -515,7 +844,7 @@ def _run_single_pod(
         else:
             signals = other_signals + entry_signals
 
-        # Log intraday context snapshot for audit
+        # Build intraday context snapshot payload for audit (logged below).
         context_payload = {
             "timestamp": str(now_ts),
             "market_context": dataclasses.asdict(context),
@@ -529,13 +858,71 @@ def _run_single_pod(
                 }
                 for s in signals
             ],
+            **build_exit_telemetry_payload(exit_telemetry, exit_policy, exit_runtime),
         }
-        if config.execution.claude_overlay_only:
+        if use_strategy_overlay:
             context_payload["selected_strategies"] = (
                 selected_ids
                 if selected_ids
-                else [spec.slug for spec in (selected_specs or specs)]
+                else [spec.slug for spec in selected_specs]
             )
+
+    expectancy_value = None
+    expectancy_sample_size = 0
+    expectancy_gate_active = False
+    buy_scale_applied = 1.0
+    if config.execution.expectancy_gate_enabled:
+        expectancy_value, expectancy_sample_size = compute_recent_realized_expectancy(
+            conn,
+            pod_id=pod_id,
+            lookback_closed_trades=config.execution.expectancy_lookback_closed_trades,
+        )
+        if expectancy_value is not None and expectancy_value < 0:
+            buy_scale_applied = config.execution.expectancy_negative_scale
+            scaled_count = apply_expectancy_buy_scale(signals, buy_scale_applied)
+            expectancy_gate_active = scaled_count > 0
+            if expectancy_gate_active:
+                console.print(
+                    "[yellow]WARN[/yellow] Expectancy gate active: "
+                    f"scaled BUY target weights by {buy_scale_applied:.2f}x "
+                    f"(expectancy={expectancy_value:.2f}, n={expectancy_sample_size})."
+                )
+
+    if context_payload is not None and now_ts is not None:
+        context_payload["signals"] = [
+            {
+                "symbol": s.symbol,
+                "action": s.action.value,
+                "target_weight": s.target_weight,
+                "strategy_id": s.strategy_id,
+                "exit_reason": s.exit_reason,
+            }
+            for s in signals
+        ]
+        context_payload["overlay_skipped"] = overlay_skip_info["overlay_skipped"]
+        context_payload["overlay_skip_reason"] = overlay_skip_info[
+            "overlay_skip_reason"
+        ]
+        context_payload["missing_symbols"] = overlay_skip_info["missing_symbols"]
+        context_payload["stale_symbols"] = overlay_skip_info["stale_symbols"]
+        context_payload["signal_source"] = resolved_signal_source
+        context_payload["strategy_set"] = strategy_set if use_strategy_overlay else ""
+        context_payload["governor_mode"] = governor_audit.get("mode", "llm")
+        context_payload["candidate_count"] = governor_audit.get("candidate_count", 0)
+        context_payload["accepted_count"] = governor_audit.get("accepted_count", 0)
+        context_payload["rejected_count"] = governor_audit.get("rejected_count", 0)
+        context_payload["scaled_count"] = governor_audit.get("scaled_count", 0)
+        context_payload["policy_violations"] = governor_audit.get(
+            "policy_violations", []
+        )
+        context_payload["peak_nav"] = peak_nav
+        context_payload["current_drawdown_pct"] = round(current_drawdown_pct, 4)
+        context_payload["expectancy_gate_active"] = expectancy_gate_active
+        context_payload["expectancy_value"] = (
+            round(expectancy_value, 6) if expectancy_value is not None else None
+        )
+        context_payload["expectancy_sample_size"] = expectancy_sample_size
+        context_payload["buy_scale_applied"] = buy_scale_applied
         log_intraday_context(conn, pod_id, now_ts, context_payload)
 
     approved, rejected = risk_mgr.filter_signals(signals, portfolio, prices)
@@ -551,7 +938,20 @@ def _run_single_pod(
 
     # Log decision + context (always)
     decision_id = decision_logger.log_decision(conn, decision)
-    log_decision_context(conn, decision_id, pod_id, context)
+    log_decision_context(
+        conn,
+        decision_id,
+        pod_id,
+        context,
+        extra={
+            "signal_source": signal_source,
+            "resolved_signal_source": resolved_signal_source,
+            "strategy_set": strategy_set if use_strategy_overlay else "",
+            "overlay_skipped": overlay_skip_info["overlay_skipped"],
+            "overlay_skip_reason": overlay_skip_info["overlay_skip_reason"],
+            "governor_audit": governor_audit,
+        },
+    )
 
     alpaca_client = None
     if not log_only and broker.lower() == "alpaca":
@@ -560,12 +960,26 @@ def _run_single_pod(
         except AlpacaError as exc:
             console.print(f"[red]FAIL[/red] Alpaca client init failed: {exc}")
             conn.close()
+            if global_lock:
+                global_lock.release()
             raise typer.Exit(1) from exc
     executed = []
     if log_only:
-        console.print("  [yellow]RTH closed — decisions logged, no trades executed.[/yellow]")
+        console.print(
+            "  [yellow]RTH closed — decisions logged, no trades executed.[/yellow]"
+        )
     elif approved:
-        executed = execute_signals(portfolio, approved, prices, portfolio.nav)
+        executed = execute_signals(
+            portfolio,
+            approved,
+            prices,
+            portfolio.nav,
+            asset_class_map=asset_class_map,
+            reserve_cash=max(
+                float(getattr(config.risk, "min_cash_reserve", 0.0)) * portfolio.nav,
+                0.0,
+            ),
+        )
         console.print(f"  [green]OK[/green] Executed {len(executed)} trades")
 
         if config.execution.intraday_enabled and now_ts is not None:
@@ -590,10 +1004,14 @@ def _run_single_pod(
                     stop_losses,
                     config.risk,
                     use_brackets=not config.execution.intraday_enabled,
+                    asset_class_map=asset_class_map,
+                    execution=config.execution,
                 )
             except AlpacaError as exc:
                 console.print(f"[red]FAIL[/red] Alpaca execution failed: {exc}")
                 conn.close()
+                if global_lock:
+                    global_lock.release()
                 raise typer.Exit(1) from exc
 
         # Log trades
@@ -602,7 +1020,12 @@ def _run_single_pod(
     else:
         console.print("  No trades to execute.")
 
-    if config.execution.intraday_enabled and alpaca_client and not log_only:
+    if (
+        config.execution.intraday_enabled
+        and alpaca_client
+        and not log_only
+        and config.execution.intraday_use_oco
+    ):
         order_states = load_order_states(conn, pod_id)
         try:
             positions = {
@@ -633,10 +1056,11 @@ def _run_single_pod(
                 order_states,
                 executed,
                 stop_losses,
-                partial_tp_pct=config.execution.profit_take_partial_pct,
-                partial_tp_size=config.execution.profit_take_partial_size,
-                remainder_tp_mult=config.execution.profit_take_remainder_tp_mult,
+                partial_tp_pct=exit_policy.partial_take_profit_pct,
+                partial_tp_size=exit_policy.partial_take_profit_size,
+                remainder_tp_mult=exit_policy.remainder_take_profit_mult,
                 default_stop_loss_pct=config.risk.default_stop_loss_pct,
+                fail_on_unprotected=exit_policy.fail_on_unprotected_exits,
             )
 
         upsert_order_states(conn, pod_id, order_states)
@@ -647,6 +1071,8 @@ def _run_single_pod(
     console.print(f"  [green]OK[/green] Snapshot #{snap_id} saved")
 
     conn.close()
+    if global_lock:
+        global_lock.release()
     if run_lock:
         run_lock.release()
     console.print(f"\n[bold green]Done.[/bold green] NAV: ${portfolio.nav:,.2f}")
@@ -716,38 +1142,38 @@ def eod_flat(
     from llm_quant.brain.models import Action, Conviction, TradeSignal
     from llm_quant.db.schema import get_connection
     from llm_quant.trading.executor import execute_signals
+    from llm_quant.trading.exits import assess_eod_flatten, build_exit_policy
     from llm_quant.trading.ledger import log_trades, save_portfolio_snapshot
     from llm_quant.trading.portfolio import Portfolio
 
     config = _get_config_for_pod(pod)
     limits = config.risk
+    exit_policy = build_exit_policy(config.risk, config.execution)
 
-    if not getattr(limits, "eod_flatten_enabled", False):
+    if not exit_policy.eod_flatten_enabled:
         console.print("[yellow]EOD flatten disabled in config.[/yellow]")
         return
 
     try:
-        target_time = _parse_eod_time(getattr(limits, "eod_flatten_time", "15:55"))
-    except ValueError as exc:
-        console.print(f"[red]FAIL[/red] Invalid eod_flatten_time: {exc}")
-        raise typer.Exit(1) from exc
-
-    try:
         client = AlpacaClient.from_env()
         now_et = client.clock_timestamp_et()
-        if not client.is_market_open():
+        flatten_decision = assess_eod_flatten(
+            exit_policy,
+            now_et=now_et,
+            market_is_open=client.is_market_open(),
+        )
+        if flatten_decision.reason == "market_closed":
             console.print("[yellow]Market closed — skipping EOD flatten.[/yellow]")
+            return
+        if not flatten_decision.due:
+            console.print(
+                f"[yellow]EOD flatten scheduled for {flatten_decision.target_time} ET; "
+                f"current time {now_et.time().strftime('%H:%M')} ET.[/yellow]"
+            )
             return
     except AlpacaError as exc:
         console.print(f"[red]FAIL[/red] Alpaca clock check failed: {exc}")
         raise typer.Exit(1) from exc
-
-    if now_et.time() < target_time:
-        console.print(
-            f"[yellow]EOD flatten scheduled for {target_time} ET; "
-            f"current time {now_et.time().strftime('%H:%M')} ET.[/yellow]"
-        )
-        return
 
     try:
         client.cancel_all_orders()
@@ -781,8 +1207,7 @@ def eod_flat(
     portfolio = Portfolio.from_db(conn, config.general.initial_capital, pod_id=pod)
 
     prices = {
-        pos.get("symbol", ""): float(pos.get("current_price", 0.0))
-        for pos in positions
+        pos.get("symbol", ""): float(pos.get("current_price", 0.0)) for pos in positions
     }
     portfolio.update_prices(prices)
 
@@ -802,7 +1227,17 @@ def eod_flat(
             )
         )
 
-    executed = execute_signals(portfolio, close_signals, prices, portfolio.nav)
+    asset_class_map = {
+        asset.symbol: asset.asset_class for asset in config.universe.assets
+    }
+    executed = execute_signals(
+        portfolio,
+        close_signals,
+        prices,
+        portfolio.nav,
+        asset_class_map=asset_class_map,
+        reserve_cash=0.0,
+    )
     today = now_et.date()
     if executed:
         log_trades(conn, executed, today, decision_id=None, pod_id=pod)
@@ -1214,7 +1649,14 @@ def pods_create(
     pod_id: str = typer.Argument(..., help="Unique pod identifier (lowercase slug)"),
     name: str = typer.Option(None, "--name", "-n", help="Display name"),
     strategy: str = typer.Option("custom", "--strategy", "-s", help="Strategy type"),
-    capital: float = typer.Option(100_000.0, "--capital", "-c", help="Initial capital"),
+    capital: float | None = typer.Option(
+        None, "--capital", "-c", help="Initial capital override"
+    ),
+    capital_source: str = typer.Option(
+        "alpaca_equity",
+        "--capital-source",
+        help="capital source: alpaca_equity | alpaca_cash | alpaca_buying_power | config",
+    ),
 ):
     """Register a new trading pod."""
     _setup_logging("WARNING")
@@ -1235,17 +1677,23 @@ def pods_create(
 
     conn = get_connection(db_path)
 
+    resolved_capital = _resolve_pod_capital(
+        capital,
+        capital_source,
+        config,
+    )
+
     try:
         conn.execute(
             "INSERT INTO pods "
             "(pod_id, display_name, strategy_type, "
             "initial_capital, status, created_at) "
             "VALUES (?, ?, ?, ?, 'active', NOW())",
-            [pod_id, name or pod_id, strategy, capital],
+            [pod_id, name or pod_id, strategy, resolved_capital],
         )
         console.print(
             f"[green]OK[/green] Pod [bold]{pod_id}[/bold] created "
-            f"(strategy={strategy}, capital=${capital:,.2f})"
+            f"(strategy={strategy}, capital=${resolved_capital:,.2f})"
         )
     except duckdb.ConstraintException:
         console.print(f"[red]FAIL[/red] Pod '{pod_id}' already exists.")
@@ -1297,6 +1745,58 @@ def pods_delete(
         conn.close()
 
 
+@pods_app.command("sync-capital")
+def pods_sync_capital(
+    pod: str = typer.Option("default", "--pod", "-p", help="Pod to update"),
+    all_pods: bool = typer.Option(False, "--all", "-a", help="Update all active pods"),
+    source: str = typer.Option(
+        "alpaca_equity",
+        "--source",
+        help="capital source: alpaca_equity | alpaca_cash | alpaca_buying_power | config",
+    ),
+):
+    """Sync pod initial_capital from Alpaca account values."""
+    _setup_logging("WARNING")
+    config = _get_config()
+    db_path = _get_db_path(config)
+
+    from llm_quant.db.schema import get_connection
+
+    conn = get_connection(db_path)
+    try:
+        if all_pods:
+            rows = conn.execute(
+                "SELECT pod_id FROM pods WHERE status = 'active' ORDER BY pod_id"
+            ).fetchall()
+            pods = [r[0] for r in rows]
+        else:
+            pods = [pod]
+
+        if not pods:
+            console.print("[yellow]No active pods found.[/yellow]")
+            return
+
+        if len(pods) > 1:
+            console.print(
+                "[yellow]WARN[/yellow] Updating multiple pods with the same Alpaca "
+                "account value. Ensure this is intended to avoid over-allocation."
+            )
+
+        new_capital = _resolve_pod_capital(None, source, config)
+        for pod_id in pods:
+            conn.execute(
+                "UPDATE pods SET initial_capital = ? WHERE pod_id = ?",
+                [new_capital, pod_id],
+            )
+        conn.commit()
+        console.print(
+            f"[green]OK[/green] Synced capital ${new_capital:,.2f} "
+            f"for {len(pods)} pod(s)."
+        )
+    finally:
+        conn.close()
+
+
 @pods_app.command("status")
 def pods_status():
     """Show comparative dashboard across all pods."""
@@ -1308,6 +1808,126 @@ def pods_status():
 
     conn = get_connection(db_path)
     _show_all_pods_dashboard(conn)
+
+
+@crypto_app.command("status")
+def crypto_status(
+    pod: str = typer.Option("crypto", "--pod", "-p", help="Pod ID"),
+    stale_minutes: int = typer.Option(
+        15, "--stale-minutes", help="Warn if latest bar is older than this"
+    ),
+):
+    """Show crypto pod status (last run, last trade, bar freshness, next run)."""
+    _setup_logging("WARNING")
+    config = _get_config_for_pod(pod)
+    db_path = _get_db_path(config)
+
+    import duckdb
+
+    try:
+        conn = duckdb.connect(str(db_path), read_only=True)
+    except duckdb.Error as exc:
+        console.print(f"[red]FAIL[/red] Could not open DB: {exc}")
+        raise typer.Exit(1) from exc
+
+    from llm_quant.trading.run_lock import slot_for_time
+
+    try:
+        last_run_row = conn.execute(
+            """
+            SELECT timestamp
+            FROM intraday_context_snapshots
+            WHERE pod_id = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """,
+            [pod],
+        ).fetchone()
+        last_run = last_run_row[0] if last_run_row else None
+
+        last_trade_row = conn.execute(
+            """
+            SELECT trade_id, date, symbol, action, shares, price, exit_reason
+            FROM trades
+            WHERE pod_id = ?
+            ORDER BY trade_id DESC
+            LIMIT 1
+            """,
+            [pod],
+        ).fetchone()
+
+        from llm_quant.data.universe import get_tradeable_symbols
+
+        symbols = get_tradeable_symbols(
+            config, asset_class_filter=config.execution.asset_class_filter
+        )
+        latest_bar = None
+        if symbols:
+            placeholders = ", ".join(["?"] * len(symbols))
+            latest_row = conn.execute(
+                f"""
+                SELECT MAX(timestamp)
+                FROM market_data_intraday
+                WHERE symbol IN ({placeholders})
+                """,
+                symbols,
+            ).fetchone()
+            latest_bar = latest_row[0] if latest_row else None
+
+    finally:
+        conn.close()
+
+    now = datetime.now(tz=UTC)
+    slot = slot_for_time(now, config.execution.intraday_timeframe_minutes)
+    try:
+        slot_dt = datetime.fromisoformat(slot)
+    except ValueError:
+        slot_dt = now
+    next_run = slot_dt + timedelta(minutes=config.execution.intraday_timeframe_minutes)
+
+    console.print(f"[bold]Crypto Pod:[/bold] {pod}")
+    console.print(
+        f"  [bold]Intraday Enabled:[/bold] {config.execution.intraday_enabled}"
+        f" | [bold]RTH Guard:[/bold] {config.execution.intraday_rth_guard}"
+    )
+
+    def _as_utc(ts):
+        if ts is None:
+            return None
+        if getattr(ts, "tzinfo", None) is None:
+            return ts.replace(tzinfo=UTC)
+        return ts.astimezone(UTC)
+
+    if last_run:
+        last_run_utc = _as_utc(last_run)
+        age = now - last_run_utc if last_run_utc else None
+        console.print(f"  [bold]Last Run:[/bold] {last_run} (age {age})")
+    else:
+        console.print("  [bold]Last Run:[/bold] -")
+
+    if latest_bar:
+        latest_bar_utc = _as_utc(latest_bar)
+        bar_age = now - latest_bar_utc if latest_bar_utc else None
+        console.print(f"  [bold]Latest Bar:[/bold] {latest_bar} (age {bar_age})")
+        if bar_age and bar_age > timedelta(minutes=stale_minutes):
+            console.print(
+                f"  [yellow]WARN[/yellow] Latest bar is stale (> {stale_minutes} min)."
+            )
+    else:
+        console.print("  [bold]Latest Bar:[/bold] -")
+
+    console.print(f"  [bold]Next Slot:[/bold] {next_run.isoformat()}")
+
+    if last_trade_row:
+        trade_id, date, symbol, action, shares, price, exit_reason = last_trade_row
+        console.print(
+            "  [bold]Last Trade:[/bold] "
+            f"#{trade_id} {date} {symbol} {action} "
+            f"{shares} @ {price} "
+            f"{'(exit=' + exit_reason + ')' if exit_reason else ''}"
+        )
+    else:
+        console.print("  [bold]Last Trade:[/bold] -")
     conn.close()
 
 

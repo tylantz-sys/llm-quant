@@ -52,6 +52,8 @@ def execute_signals(
     signals: list[TradeSignal],
     prices: dict[str, float],
     nav: float,
+    asset_class_map: dict[str, str] | None = None,
+    reserve_cash: float = 0.0,
 ) -> list[ExecutedTrade]:
     """Execute a batch of trade signals against *portfolio*.
 
@@ -92,9 +94,16 @@ def execute_signals(
         trade: ExecutedTrade | None = None
 
         if signal.action == Action.BUY:
-            trade = _execute_buy(portfolio, signal, price, nav)
+            trade = _execute_buy(
+                portfolio,
+                signal,
+                price,
+                nav,
+                asset_class_map,
+                reserve_cash=reserve_cash,
+            )
         elif signal.action == Action.SELL:
-            trade = _execute_sell(portfolio, signal, price, nav)
+            trade = _execute_sell(portfolio, signal, price, nav, asset_class_map)
         elif signal.action == Action.CLOSE:
             trade = _execute_close(portfolio, signal, price)
         elif signal.action == Action.HOLD:
@@ -128,15 +137,17 @@ def _execute_buy(
     signal: TradeSignal,
     price: float,
     nav: float,
+    asset_class_map: dict[str, str] | None = None,
+    reserve_cash: float = 0.0,
 ) -> ExecutedTrade | None:
     """Buy (or add to) a position."""
-    target_notional = signal.target_weight * nav
     current_notional = 0.0
 
     existing = portfolio.positions.get(signal.symbol)
     if existing is not None:
         current_notional = existing.market_value
 
+    target_notional = min(signal.target_weight * nav, current_notional + max(portfolio.cash - reserve_cash, 0.0))
     additional_notional = target_notional - current_notional
     if additional_notional <= 0.0:
         logger.debug(
@@ -145,7 +156,12 @@ def _execute_buy(
         )
         return None
 
-    shares_to_buy = math.floor(additional_notional / price)
+    asset_class = (asset_class_map or {}).get(signal.symbol, "equity")
+    allow_fractional = str(asset_class).lower() == "crypto"
+    if allow_fractional:
+        shares_to_buy = round(additional_notional / price, 6)
+    else:
+        shares_to_buy = math.floor(additional_notional / price)
     if shares_to_buy <= 0:
         logger.debug(
             "BUY %s: computed 0 shares (notional=%.2f, price=%.4f) – skipping.",
@@ -157,16 +173,22 @@ def _execute_buy(
 
     cost = shares_to_buy * price
 
-    # Ensure we have enough cash
-    if cost > portfolio.cash:
-        # Buy as many as cash allows
-        shares_to_buy = math.floor(portfolio.cash / price)
+    max_spend = max(portfolio.cash - reserve_cash, 0.0)
+
+    # Ensure we have enough deployable cash after preserving reserve
+    if cost > max_spend:
+        # Buy as many shares as deployable cash allows
+        if allow_fractional:
+            shares_to_buy = round(max_spend / price, 6)
+        else:
+            shares_to_buy = math.floor(max_spend / price)
         if shares_to_buy <= 0:
             logger.warning(
-                "BUY %s: insufficient cash (need=%.2f, have=%.2f).",
+                "BUY %s: insufficient deployable cash (need=%.2f, have=%.2f, reserve=%.2f).",
                 signal.symbol,
                 cost,
-                portfolio.cash,
+                max_spend,
+                reserve_cash,
             )
             return None
         cost = shares_to_buy * price
@@ -207,6 +229,7 @@ def _execute_sell(
     signal: TradeSignal,
     price: float,
     nav: float,
+    asset_class_map: dict[str, str] | None = None,
 ) -> ExecutedTrade | None:
     """Reduce a position toward a target weight."""
     existing = portfolio.positions.get(signal.symbol)
@@ -225,7 +248,12 @@ def _execute_sell(
         )
         return None
 
-    shares_to_sell = math.floor(reduce_notional / price)
+    asset_class = (asset_class_map or {}).get(signal.symbol, "equity")
+    allow_fractional = str(asset_class).lower() == "crypto"
+    if allow_fractional:
+        shares_to_sell = round(reduce_notional / price, 6)
+    else:
+        shares_to_sell = math.floor(reduce_notional / price)
     shares_to_sell = min(shares_to_sell, existing.shares)
 
     if shares_to_sell <= 0:

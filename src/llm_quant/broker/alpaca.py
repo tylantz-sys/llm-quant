@@ -29,6 +29,9 @@ class AlpacaClient:
 
     @classmethod
     def from_env(cls) -> "AlpacaClient":
+        from llm_quant.utils.env import load_dotenv_if_present
+
+        load_dotenv_if_present()
         api_key = os.environ.get("ALPACA_API_KEY")
         api_secret = os.environ.get("ALPACA_SECRET_KEY")
         base_url = os.environ.get("ALPACA_PAPER_URL", "https://paper-api.alpaca.markets")
@@ -80,6 +83,9 @@ class AlpacaClient:
     def list_positions(self) -> list[dict[str, Any]]:
         return self._request("GET", "/v2/positions")
 
+    def get_account(self) -> dict[str, Any]:
+        return self._request("GET", "/v2/account")
+
     def cancel_all_orders(self) -> None:
         self._request("DELETE", "/v2/orders")
 
@@ -103,14 +109,27 @@ class AlpacaClient:
     def replace_order(self, order_id: str, **params: Any) -> dict[str, Any]:
         return self._request("PATCH", f"/v2/orders/{order_id}", json=params)
 
-    def submit_market_order(self, symbol: str, qty: float, side: str) -> dict[str, Any]:
+    def submit_market_order(
+        self,
+        symbol: str,
+        qty: float,
+        side: str,
+        time_in_force: str = "day",
+        notional: float | None = None,
+        allow_fractional: bool = False,
+    ) -> dict[str, Any]:
         payload = {
             "symbol": symbol,
-            "qty": str(int(qty)),
             "side": side,
             "type": "market",
-            "time_in_force": "day",
+            "time_in_force": time_in_force,
         }
+        if notional is not None:
+            payload["notional"] = f"{notional:.2f}"
+        else:
+            payload["qty"] = (
+                str(qty) if allow_fractional else str(int(qty))
+            )
         return self._request("POST", "/v2/orders", json=payload)
 
     def submit_limit_order(

@@ -397,3 +397,29 @@ def test_risk_manager_drawdown_allows_sell(
     assert len(dd_check) == 1
     assert dd_check[0].passed
     assert dd_check[0].message == "Sell/close not blocked by drawdown limit."
+
+
+def test_risk_manager_drawdown_uses_injected_peak_nav(sample_config, sample_prices):
+    """Injected persisted peak NAV should drive drawdown check for BUY signals."""
+    from llm_quant.trading.portfolio import Portfolio
+
+    p = Portfolio(initial_capital=100_000.0)
+    p.cash = 100_000.0
+    # Simulate persisted historical peak > initial capital.
+    p.peak_nav = 120_000.0
+
+    mgr = RiskManager(sample_config)
+    signal = TradeSignal(
+        symbol="GLD",
+        action=Action.BUY,
+        conviction=Conviction.HIGH,
+        target_weight=0.01,
+        stop_loss=170.0,
+        reasoning="buy in drawdown",
+    )
+    approved, rejected = mgr.filter_signals([signal], p, sample_prices)
+    assert len(approved) == 0
+    assert len(rejected) == 1
+    dd_check = [c for c in rejected[0][1] if c.rule == "drawdown_limit"]
+    assert len(dd_check) == 1
+    assert dd_check[0].passed is False

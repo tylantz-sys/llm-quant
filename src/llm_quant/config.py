@@ -59,9 +59,19 @@ class DataConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     """Execution and runtime behavior flags (intraday + profit-taking)."""
 
+    signal_source: str = "auto"  # auto | llm | strategy_overlay
+    strategy_set: str = "promoted_default"
+    overlay_governor_strict: bool = True
+    overlay_max_upscale: float = 1.25
+    overlay_max_downscale: float = 0.0
     intraday_enabled: bool = False
     intraday_timeframe_minutes: int = 5
     intraday_lookback_days: int = 10
+    intraday_rth_guard: bool = True
+    asset_class_filter: list[str] = Field(default_factory=list)
+    intraday_use_oco: bool = True
+    skip_daily_fetch_when_intraday: bool = False
+    initial_capital_source: str = "config"
     claude_overlay_only: bool = True
     log_decisions_when_rth_closed: bool = True
     profit_take_partial_pct: float = 0.02
@@ -70,6 +80,12 @@ class ExecutionConfig(BaseModel):
     trailing_stop_pct: float = 0.015
     scale_in_tranches: int = 3
     reentry_cooldown_bars: int = 1
+    expectancy_gate_enabled: bool = True
+    expectancy_lookback_closed_trades: int = 20
+    expectancy_negative_scale: float = 0.50
+    crypto_order_sizing: str = "qty"
+    crypto_time_in_force: str = "gtc"
+    crypto_symbol_map: dict[str, str] = Field(default_factory=dict)
 
 
 class StrategyRotationConfig(BaseModel):
@@ -110,6 +126,13 @@ class RiskLimits(BaseModel):
     take_profit_mode: str = "pct"    # pct | rr
     take_profit_pct: float = 0.03    # fixed take-profit percent (3%)
     take_profit_rr: float = 2.0      # risk-reward multiple (if mode = rr)
+    partial_take_profit_enabled: bool = True
+    partial_take_profit_pct: float = 0.02
+    partial_take_profit_size: float = 0.50
+    remainder_take_profit_mult: float = 2.0
+    trailing_stop_enabled: bool = True
+    trailing_stop_pct: float = 0.015
+    fail_on_unprotected_exits: bool = True
     # End-of-day flatten control
     eod_flatten_enabled: bool = True
     eod_flatten_time: str = "15:55"  # US/Eastern
@@ -146,6 +169,13 @@ class TrackBLimits(BaseModel):
     take_profit_mode: str = "pct"
     take_profit_pct: float = 0.03
     take_profit_rr: float = 2.0
+    partial_take_profit_enabled: bool = True
+    partial_take_profit_pct: float = 0.02
+    partial_take_profit_size: float = 0.50
+    remainder_take_profit_mult: float = 2.0
+    trailing_stop_enabled: bool = True
+    trailing_stop_pct: float = 0.015
+    fail_on_unprotected_exits: bool = True
     # End-of-day flatten control
     eod_flatten_enabled: bool = True
     eod_flatten_time: str = "15:55"

@@ -12,7 +12,10 @@ from llm_quant.config import AppConfig
 logger = logging.getLogger(__name__)
 
 
-def get_tradeable_symbols(config: AppConfig) -> list[str]:
+def get_tradeable_symbols(
+    config: AppConfig,
+    asset_class_filter: list[str] | None = None,
+) -> list[str]:
     """Return a sorted list of tradeable ticker symbols from the universe config.
 
     Parameters
@@ -25,7 +28,15 @@ def get_tradeable_symbols(config: AppConfig) -> list[str]:
     list[str]
         Sorted list of ticker symbol strings where ``tradeable`` is True.
     """
-    symbols = [asset.symbol for asset in config.universe.assets if asset.tradeable]
+    assets = config.universe.assets
+    if asset_class_filter:
+        allowed = {cls.lower() for cls in asset_class_filter}
+        assets = [
+            asset
+            for asset in assets
+            if str(asset.asset_class or "").lower() in allowed
+        ]
+    symbols = [asset.symbol for asset in assets if asset.tradeable]
     symbols.sort()
     logger.info(
         "Resolved %d tradeable symbols from universe '%s'",

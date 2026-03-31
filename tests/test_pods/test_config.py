@@ -45,3 +45,53 @@ def test_load_config_for_pod_missing(tmp_path):
     # Should fall back to defaults
     base = load_config(config_dir=config_dir)
     assert cfg.risk.max_position_weight == base.risk.max_position_weight
+
+
+def test_default_pod_overlay_mandate():
+    """Default pod remains promoted overlay-only for equity/fixed-income sleeves."""
+    cfg = load_config_for_pod("default")
+    assert cfg.execution.claude_overlay_only is True
+    assert cfg.execution.signal_source == "strategy_overlay"
+    assert cfg.execution.strategy_set == "promoted_default"
+    assert cfg.execution.asset_class_filter == ["equity", "fixed_income"]
+    assert cfg.execution.intraday_rth_guard is True
+
+
+def test_commodities_pod_mandate():
+    """Commodities pod has explicit commodity-only intraday settings."""
+    cfg = load_config_for_pod("commodities")
+    assert cfg.execution.intraday_enabled is True
+    assert cfg.execution.signal_source == "llm"
+    assert cfg.execution.asset_class_filter == ["commodity"]
+    assert cfg.execution.claude_overlay_only is False
+    assert cfg.execution.intraday_use_oco is True
+    assert cfg.execution.profit_take_partial_pct == 0.015
+    assert cfg.execution.trailing_stop_pct == 0.010
+    assert cfg.execution.scale_in_tranches == 2
+
+
+def test_crypto_pod_mandate():
+    """Crypto pod remains 24/7 with synthetic exits and faster scale-in."""
+    cfg = load_config_for_pod("crypto")
+    assert cfg.execution.intraday_enabled is True
+    assert cfg.execution.signal_source == "strategy_overlay"
+    assert cfg.execution.strategy_set == "promoted_crypto"
+    assert cfg.execution.asset_class_filter == ["crypto"]
+    assert cfg.execution.claude_overlay_only is True
+    assert cfg.execution.intraday_rth_guard is False
+    assert cfg.execution.intraday_use_oco is False
+    assert cfg.execution.scale_in_tranches == 2
+
+
+def test_crypto_ethbtc_paper_pod_mandate():
+    """Dedicated ETH/BTC paper pod uses candidate set with conservative risk."""
+    cfg = load_config_for_pod("crypto-ethbtc-paper")
+    assert cfg.execution.signal_source == "strategy_overlay"
+    assert cfg.execution.strategy_set == "candidate_crypto"
+    assert cfg.execution.claude_overlay_only is True
+    assert cfg.execution.asset_class_filter == ["crypto"]
+    assert cfg.execution.intraday_enabled is True
+    assert cfg.execution.intraday_rth_guard is False
+    assert cfg.execution.intraday_use_oco is False
+    assert cfg.risk.max_trade_size == 0.02
+    assert cfg.risk.crypto_max_position_weight == 0.025

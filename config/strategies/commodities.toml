@@ -1,0 +1,21 @@
+[execution]
+signal_source = "llm"
+strategy_set = "promoted_default"
+overlay_governor_strict = true
+overlay_max_upscale = 1.25
+overlay_max_downscale = 0.0
+intraday_enabled = true
+intraday_timeframe_minutes = 5
+intraday_lookback_days = 10
+intraday_rth_guard = true
+intraday_use_oco = true
+asset_class_filter = ["commodity"]
+claude_overlay_only = false
+skip_daily_fetch_when_intraday = false
+initial_capital_source = "alpaca_equity"
+profit_take_partial_pct = 0.015
+profit_take_partial_size = 0.50
+profit_take_remainder_tp_mult = 2.0
+trailing_stop_pct = 0.010
+scale_in_tranches = 2
+reentry_cooldown_bars = 1

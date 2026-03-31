@@ -143,8 +143,22 @@ sector = "international"
 asset_class = "equity"
 
 [[assets]]
+symbol = "SOXX"
+name = "iShares Semiconductor ETF"
+category = "equity"
+sector = "technology"
+asset_class = "equity"
+
+[[assets]]
 symbol = "TLT"
 name = "20+ Year Treasury Bond"
+category = "fixed_income"
+sector = "bonds"
+asset_class = "fixed_income"
+
+[[assets]]
+symbol = "AGG"
+name = "Core US Aggregate Bond"
 category = "fixed_income"
 sector = "bonds"
 asset_class = "fixed_income"
@@ -171,8 +185,22 @@ sector = "bonds"
 asset_class = "fixed_income"
 
 [[assets]]
+symbol = "VCIT"
+name = "Intermediate-Term Corporate Bond"
+category = "fixed_income"
+sector = "bonds"
+asset_class = "fixed_income"
+
+[[assets]]
 symbol = "HYG"
 name = "High Yield Corporate"
+category = "fixed_income"
+sector = "bonds"
+asset_class = "fixed_income"
+
+[[assets]]
+symbol = "EMB"
+name = "Emerging Markets USD Bond"
 category = "fixed_income"
 sector = "bonds"
 asset_class = "fixed_income"

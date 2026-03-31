@@ -9,7 +9,11 @@ import anthropic
 
 from llm_quant.brain.models import MarketContext, TradingDecision
 from llm_quant.brain.parser import parse_trading_decision
-from llm_quant.brain.prompts import load_overlay_system_prompt, render_overlay_prompt
+from llm_quant.brain.prompts import (
+    load_crypto_append,
+    load_overlay_system_prompt,
+    render_overlay_prompt,
+)
 from llm_quant.config import CONFIG_DIR, AppConfig
 
 logger = logging.getLogger(__name__)
@@ -45,6 +49,11 @@ class OverlayEngine:
         user_prompt = render_overlay_prompt(
             context, candidate_signals, self._config_dir
         )
+        asset_filter = getattr(self._config.execution, "asset_class_filter", []) or []
+        if any(cls.lower() == "crypto" for cls in asset_filter):
+            crypto_append = load_crypto_append(self._config_dir)
+            if crypto_append:
+                user_prompt = f"{user_prompt}\n\n{crypto_append.strip()}\n"
         response = self._call_api(user_prompt)
 
         raw_text: str = response.content[0].text

@@ -17,8 +17,12 @@ def log_decision_context(
     decision_id: int,
     pod_id: str,
     context: MarketContext,
+    extra: dict[str, Any] | None = None,
 ) -> None:
-    payload = json.dumps(asdict(context), default=str)
+    payload_dict: dict[str, Any] = asdict(context)
+    if extra:
+        payload_dict["runtime"] = extra
+    payload = json.dumps(payload_dict, default=str)
     conn.execute(
         """
         INSERT INTO decision_contexts (

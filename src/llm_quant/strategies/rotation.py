@@ -130,18 +130,23 @@ def _compute_rotation_metrics(
 
 def load_rotation_state(
     conn: duckdb.DuckDBPyConnection,
+    pod_id: str,
 ) -> dict[str, date | None]:
     rows = conn.execute(
         """
         SELECT strategy_id, disabled_until
         FROM strategy_rotation_state
+        WHERE pod_id = ?
         """
+        ,
+        [pod_id],
     ).fetchall()
     return {row[0]: row[1] for row in rows}
 
 
 def upsert_rotation_state(
     conn: duckdb.DuckDBPyConnection,
+    pod_id: str,
     state: dict[str, date | None],
 ) -> None:
     if not state:
@@ -152,10 +157,10 @@ def upsert_rotation_state(
     conn.executemany(
         """
         INSERT OR REPLACE INTO strategy_rotation_state (
-            strategy_id, disabled_until, updated_at
-        ) VALUES (?, ?, CURRENT_TIMESTAMP)
+            pod_id, strategy_id, disabled_until, updated_at
+        ) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
         """,
-        rows,
+        [[pod_id, row[0], row[1]] for row in rows],
     )
     conn.commit()
 
@@ -184,7 +189,7 @@ def select_rotated_specs(
         pod_id=pod_id,
         initial_capital=initial_capital,
     )
-    state = load_rotation_state(conn)
+    state = load_rotation_state(conn, pod_id=pod_id)
 
     eligible: list[tuple[StrategySpec, StrategyMetric]] = []
     for spec in specs:
@@ -213,7 +218,7 @@ def select_rotated_specs(
         else:
             rotation_state[spec.slug] = as_of_date + timedelta(days=cooldown_days)
 
-    upsert_rotation_state(conn, rotation_state)
+    upsert_rotation_state(conn, pod_id=pod_id, state=rotation_state)
     return selected, sorted(selected_ids)
 
 

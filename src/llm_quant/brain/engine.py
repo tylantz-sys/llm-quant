@@ -10,7 +10,11 @@ import duckdb
 
 from llm_quant.brain.models import MarketContext, TradingDecision
 from llm_quant.brain.parser import parse_trading_decision
-from llm_quant.brain.prompts import load_system_prompt, render_decision_prompt
+from llm_quant.brain.prompts import (
+    load_crypto_append,
+    load_system_prompt,
+    render_decision_prompt,
+)
 from llm_quant.config import CONFIG_DIR, AppConfig
 
 logger = logging.getLogger(__name__)
@@ -98,6 +102,11 @@ class SignalEngine:
 
         # Step 1: Render prompt
         user_prompt = render_decision_prompt(context, self._config_dir)
+        asset_filter = getattr(self._config.execution, "asset_class_filter", []) or []
+        if any(cls.lower() == "crypto" for cls in asset_filter):
+            crypto_append = load_crypto_append(self._config_dir)
+            if crypto_append:
+                user_prompt = f"{user_prompt}\n\n{crypto_append.strip()}\n"
         logger.debug("Decision prompt rendered (%d chars)", len(user_prompt))
 
         # Step 2: Call Claude API

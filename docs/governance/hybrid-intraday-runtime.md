@@ -1,8 +1,13 @@
-# Hybrid Strategy Runtime (Claude Overlay + Intraday Profit-Taking)
+# Hybrid Strategy Runtime (Multi-Sleeve + Intraday Profit-Taking)
 
 ## What Changed
-- Promoted strategy specs in `data/strategies/*` now generate live signals.
-- Claude acts as a **risk/size overlay** when `claude_overlay_only = true`.
+- Promoted strategy specs in `data/strategies/*` now generate live signals for
+  strategy-overlay sleeves.
+- Claude acts as a **risk/size overlay** when `claude_overlay_only = true`
+  and can be configured as a strict governor.
+- Runtime source selection is explicit per pod via
+  `execution.signal_source = llm | strategy_overlay`.
+- Strategy sets are catalog-driven via `config/strategies/catalog.toml`.
 - Strategy rotation can enable only the **Top‑N** performers (configurable).
 - Intraday bars (Alpaca) are stored in `market_data_intraday` and used for
   real-time context + profit-taking.
@@ -11,6 +16,17 @@
   - **Trailing stop** after partial (updated via order replace)
   - **Scale-in** entries
   - **1-bar re-entry cooldown**
+- Expectancy gate throttles new BUY sizes when recent realized expectancy is
+  negative (pod-level).
+
+## Sleeve Mandates
+
+- `default`: promoted equity/fixed-income overlay only, RTH guard on.
+- `commodities`: dedicated commodity sleeve (`DBA`, `GLD`, `SLV`, `USO`),
+  independent Claude signals, RTH guard on.
+- `crypto`: 24/7 **strategy-first** sleeve (`signal_source=strategy_overlay`,
+  `strategy_set=promoted_crypto`) with Claude as strict governor and synthetic
+  intraday exits (`intraday_use_oco=false`).
 
 ## RTH Guard + Native Orders
 - Intraday runs **skip** when Alpaca clock reports market closed.
@@ -29,6 +45,11 @@ Edit `config/default.toml`:
 
 ```
 [execution]
+signal_source = "strategy_overlay"
+strategy_set = "promoted_default"
+overlay_governor_strict = true
+overlay_max_upscale = 1.25
+overlay_max_downscale = 0.0
 intraday_enabled = true
 intraday_timeframe_minutes = 5
 intraday_lookback_days = 10
@@ -43,6 +64,7 @@ reentry_cooldown_bars = 1
 
 **Rollback:**
 - Set `claude_overlay_only = false` to return to Claude-only trading.
+- Or set `signal_source = "llm"` to bypass strategy-overlay mode.
 - Set `intraday_enabled = false` to disable intraday runs.
 - Set `profit_take_partial_pct = 0` and `trailing_stop_pct = 0` to disable
   profit-taking exits.
@@ -52,6 +74,21 @@ reentry_cooldown_bars = 1
 - Strategy signals are merged and capped by `risk.max_position_weight`.
 - Strategy group caps + regime multipliers can scale weights before execution.
 - Intraday runs are de-duped per 5‑minute slot via `data/locks/intraday_{pod}.lock`.
+- Overlay starvation guard skips overlay model calls when promoted-required bars
+  are missing/stale during RTH and logs a deterministic no-trade overlay
+  decision with explicit reason.
+- Strict governor invariants are enforced post-LLM:
+  symbol subset only, no side flips, no stop/take-profit drift, bounded sizing.
+- On governor policy violation or overlay failure, run falls back to all-HOLD
+  for candidate signals and logs policy violations in context telemetry.
+- Drawdown uses persisted `peak_nav` from `portfolio_snapshots`.
+- Expectancy gate telemetry is written into intraday context snapshots:
+  `expectancy_gate_active`, `expectancy_value`, `expectancy_sample_size`,
+  `buy_scale_applied`.
+- Validate crypto promotion readiness with:
+  `python scripts/validate_crypto_promotion.py --set promoted_crypto`.
+- Promotion criteria checklist:
+  `docs/governance/crypto-strategy-promotion.md`.
 - See `docs/governance/runtime-truth-table.md` for mode-by-mode behavior.
 
 ## Data Upsert Guardrails

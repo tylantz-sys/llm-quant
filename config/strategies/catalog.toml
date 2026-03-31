@@ -1,0 +1,24 @@
+[sets]
+promoted_default = [
+  "lqd-spy-credit-lead",
+  "agg-spy-credit-lead",
+  "spy-overnight-momentum",
+  "agg-qqq-credit-lead",
+  "vcit-qqq-credit-lead",
+  "lqd-qqq-credit-lead",
+  "emb-spy-credit-lead",
+  "hyg-spy-5d-credit-lead",
+  "agg-efa-credit-lead",
+  "hyg-qqq-credit-lead",
+  "soxx-qqq-lead-lag",
+]
+
+# Candidate crypto set is used for validation + paper shadow only.
+candidate_crypto = [
+  "eth-btc-ratio-mean-reversion-v5",
+]
+
+# Promoted crypto set is intentionally empty until strict validation passes.
+# Move slugs from candidate_crypto to promoted_crypto only after:
+# 1) backtest pass, 2) robustness pass, 3) walk-forward pass, 4) paper gate pass.
+promoted_crypto = []

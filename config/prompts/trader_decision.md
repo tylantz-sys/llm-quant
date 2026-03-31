@@ -3,6 +3,9 @@
 ## Current Portfolio State
 - **NAV**: ${{ "%.2f"|format(nav) }}
 - **Cash**: ${{ "%.2f"|format(cash) }} ({{ "%.1f"|format(cash_pct) }}%)
+- **Reserve Cash Floor**: ${{ "%.2f"|format(reserve_cash) }}
+- **Deployable Cash**: ${{ "%.2f"|format(deployable_cash) }}
+- **Decision Capital**: ${{ "%.2f"|format(decision_capital) }}
 - **Gross Exposure**: {{ "%.1f"|format(gross_exposure_pct) }}%
 - **Net Exposure**: {{ "%.1f"|format(net_exposure_pct) }}%
 - **Positions**: {{ positions|length }}
@@ -59,7 +62,9 @@ Analyze the data above and provide your trading decisions as JSON following the 
 2. Sector rotation signals from momentum and RSI
 3. Existing position management (stop-loss triggers, profit-taking)
 4. New opportunities aligned with the regime
-5. All hard constraints from your mandate
-6. Governance status — respect halt restrictions, note warnings in analysis
-7. **VIX percentile sizing rule**: when VIX percentile > 80, scale down target position sizes by 50% to reduce vol exposure
-8. **Silent stress alert**: when silent_stress=True, treat as risk_off even if VIX appears benign — credit markets are leading equity stress indicators
+5. For new BUY decisions, size from **deployable cash / decision capital**, not from total portfolio NAV alone. Existing positions can still be managed relative to portfolio weights.
+6. Keep the reserve cash floor intact unless a sell/close action frees capital first.
+7. All hard constraints from your mandate
+8. Governance status — respect halt restrictions, note warnings in analysis
+9. **VIX percentile sizing rule**: when VIX percentile > 80, scale down target position sizes by 50% to reduce vol exposure
+10. **Silent stress alert**: when silent_stress=True, treat as risk_off even if VIX appears benign — credit markets are leading equity stress indicators

@@ -1,9 +1,11 @@
 from llm_quant.brain.models import Action, Conviction, TradeSignal
 from llm_quant.strategies.runtime import (
+    StrategySpec,
     aggregate_strategy_signals,
     apply_group_caps,
     apply_regime_multipliers,
     merge_strategy_signals,
+    required_symbols,
 )
 
 
@@ -128,3 +130,19 @@ def test_regime_multipliers_and_group_caps():
     qqq = next(s for s in capped if s.symbol == "QQQ")
     assert spy.target_weight == 0.12
     assert qqq.target_weight == 0.08
+
+
+def test_required_symbols_supports_pair_and_list_fields():
+    specs = [
+        StrategySpec(
+            slug="pairs",
+            strategy_name="pairs_ratio",
+            parameters={"symbol_a": "ETH-USD", "symbol_b": "BTC-USD"},
+        ),
+        StrategySpec(
+            slug="rotation",
+            strategy_name="asset_rotation",
+            parameters={"symbols_list": "BTC-USD, ETH-USD, SOL-USD"},
+        ),
+    ]
+    assert required_symbols(specs) == ["BTC-USD", "ETH-USD", "SOL-USD"]

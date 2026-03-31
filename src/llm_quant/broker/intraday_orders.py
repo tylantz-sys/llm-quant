@@ -216,6 +216,7 @@ def place_oco_exits_for_buys(
     partial_tp_size: float,
     remainder_tp_mult: float,
     default_stop_loss_pct: float,
+    fail_on_unprotected: bool = False,
 ) -> None:
     """Submit partial TP + OCO remainder orders for newly bought positions."""
     for trade in trades:
@@ -262,6 +263,8 @@ def place_oco_exits_for_buys(
                 )
                 partial_tp_order_id = tp_order.get("id")
             except AlpacaError as exc:
+                if fail_on_unprotected:
+                    raise
                 logger.warning("TP order failed for %s: %s", symbol, exc)
 
         oco_order_id = None
@@ -283,14 +286,20 @@ def place_oco_exits_for_buys(
                     oco_order,
                 )
                 if oco_order_id and not oco_stop_order_id:
-                    logger.warning(
-                        "OCO legs unresolved for %s (order=%s); trailing stop disabled",
-                        symbol,
-                        oco_order_id,
+                    message = (
+                        f"OCO legs unresolved for {symbol} (order={oco_order_id}); "
+                        "trailing stop disabled"
                     )
+                    if fail_on_unprotected:
+                        raise AlpacaError(message)
+                    logger.warning(message)
             except AlpacaError as exc:
+                if fail_on_unprotected:
+                    raise
                 logger.warning("OCO order failed for %s: %s", symbol, exc)
 
+        if fail_on_unprotected and qty_remainder > 0 and not oco_stop_order_id:
+            raise AlpacaError(f"Protective stop missing for {symbol} after OCO placement")
         states[symbol] = IntradayOrderState(
             symbol=symbol,
             partial_tp_order_id=partial_tp_order_id,

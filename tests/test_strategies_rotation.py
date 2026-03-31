@@ -1,6 +1,10 @@
 from datetime import date
 
-from llm_quant.strategies.rotation import select_rotated_specs
+from llm_quant.strategies.rotation import (
+    load_rotation_state,
+    select_rotated_specs,
+    upsert_rotation_state,
+)
 from llm_quant.strategies.runtime import StrategySpec
 
 
@@ -56,3 +60,21 @@ def test_rotation_selects_top_n(tmp_db):
 
     assert [s.slug for s in selected] == ["strat_a"]
     assert selected_ids == ["strat_a"]
+
+
+def test_rotation_state_is_pod_scoped(tmp_db):
+    upsert_rotation_state(
+        tmp_db,
+        pod_id="default",
+        state={"strat_a": date(2026, 1, 10)},
+    )
+    upsert_rotation_state(
+        tmp_db,
+        pod_id="crypto",
+        state={"strat_a": date(2026, 1, 20)},
+    )
+
+    default_state = load_rotation_state(tmp_db, pod_id="default")
+    crypto_state = load_rotation_state(tmp_db, pod_id="crypto")
+    assert default_state["strat_a"] == date(2026, 1, 10)
+    assert crypto_state["strat_a"] == date(2026, 1, 20)

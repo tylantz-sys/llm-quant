@@ -100,6 +100,9 @@ class MarketContext:
     cash_pct: float
     gross_exposure_pct: float
     net_exposure_pct: float
+    decision_capital: float = 0.0
+    reserve_cash: float = 0.0
+    deployable_cash: float = 0.0
     positions: list[PositionRow] = field(default_factory=list)
     market_data: list[MarketRow] = field(default_factory=list)
     vix: float = 0.0

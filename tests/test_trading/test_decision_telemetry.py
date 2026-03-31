@@ -42,8 +42,15 @@ def test_log_decision_context(tmp_db):
         gross_exposure_pct=0.5,
         net_exposure_pct=0.5,
     )
-    log_decision_context(tmp_db, decision_id=1, pod_id="default", context=context)
+    log_decision_context(
+        tmp_db,
+        decision_id=1,
+        pod_id="default",
+        context=context,
+        extra={"governor_audit": {"candidate_count": 1}},
+    )
     row = tmp_db.execute(
-        "SELECT decision_id FROM decision_contexts WHERE decision_id = 1"
+        "SELECT context_json FROM decision_contexts WHERE decision_id = 1"
     ).fetchone()
     assert row is not None
+    assert "governor_audit" in row[0]
