@@ -52,10 +52,20 @@ def test_indexes_created(pod_db):
     assert "idx_decisions_pod_date" in indexes
 
 
-def test_schema_version_is_8(pod_db):
-    """Verify schema_meta shows version 8 (intraday + decision_type upgrades)."""
+def test_schema_version_is_9(pod_db):
+    """Verify schema_meta shows version 9 (rotation state + OCO tracking)."""
     row = pod_db.execute(
         "SELECT value FROM schema_meta WHERE key = 'version'"
     ).fetchone()
     assert row is not None
-    assert row[0] == "8"
+    assert row[0] == "9"
+
+
+def test_strategy_rotation_state_table_exists(pod_db):
+    tables = {
+        row[0]
+        for row in pod_db.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    assert "strategy_rotation_state" in tables

@@ -71,8 +71,22 @@ class ExecutionConfig(BaseModel):
     reentry_cooldown_bars: int = 1
 
 
+class StrategyRotationConfig(BaseModel):
+    enabled: bool = True
+    window_days: int = 60
+    top_n: int = 5
+    min_trades: int = 10
+    cooldown_days: int = 5
+
+
+class StrategyAllocationConfig(BaseModel):
+    strategy_group_caps: dict[str, float] = Field(default_factory=dict)
+    regime_weight_mult: dict[str, dict[str, float]] = Field(default_factory=dict)
+
+
 class RiskLimits(BaseModel):
     max_position_weight: float = 0.10
+    max_positions: int = 8
     max_trade_size: float = 0.02
     max_gross_exposure: float = 2.0
     max_net_exposure: float = 1.0
@@ -109,6 +123,7 @@ class TrackBLimits(BaseModel):
     """Risk limits for Track B — Aggressive Alpha strategies."""
 
     max_position_weight: float = 0.15
+    max_positions: int = 8
     max_trade_size: float = 0.03
     max_gross_exposure: float = 2.0
     max_net_exposure: float = 1.0
@@ -145,6 +160,7 @@ class TrackCLimits(BaseModel):
     """
 
     max_position_weight: float = 0.20           # 20% per strategy
+    max_positions: int = 8
     max_trade_size: float = 0.05                # 5% per trade
     max_gross_exposure: float = 2.0             # 200% (both legs summed)
     max_net_exposure: float = 0.30              # 30% — enforces near-zero beta
@@ -278,6 +294,12 @@ class AppConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    strategy_rotation: StrategyRotationConfig = Field(
+        default_factory=StrategyRotationConfig
+    )
+    allocation: StrategyAllocationConfig = Field(
+        default_factory=StrategyAllocationConfig
+    )
     risk: RiskLimits = Field(default_factory=RiskLimits)
     track_b: TrackBLimits = Field(default_factory=TrackBLimits)
     track_c: TrackCLimits = Field(default_factory=TrackCLimits)
@@ -299,6 +321,8 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     llm_data: dict = {}
     data_data: dict = {}
     execution_data: dict = {}
+    rotation_data: dict = {}
+    allocation_data: dict = {}
     risk_data: dict = {}
     track_b_data: dict = {}
     track_c_data: dict = {}
@@ -312,6 +336,8 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         llm_data = raw.get("llm", {})
         data_data = raw.get("data", {})
         execution_data = raw.get("execution", {})
+        rotation_data = raw.get("strategy_rotation", {})
+        allocation_data = raw.get("allocation", {})
 
     # Load risk.toml
     risk_path = config_dir / "risk.toml"
@@ -350,6 +376,8 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         llm=LLMConfig(**llm_data),
         data=DataConfig(**data_data),
         execution=ExecutionConfig(**execution_data),
+        strategy_rotation=StrategyRotationConfig(**rotation_data),
+        allocation=StrategyAllocationConfig(**allocation_data),
         risk=RiskLimits(**risk_data),
         track_b=TrackBLimits(**track_b_data),
         track_c=TrackCLimits(**track_c_data),

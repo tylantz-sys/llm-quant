@@ -7,7 +7,7 @@ import duckdb
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 DDL_STATEMENTS = [
     """
@@ -169,6 +169,7 @@ DDL_STATEMENTS = [
         oco_order_id VARCHAR,
         oco_tp_order_id VARCHAR,
         oco_stop_order_id VARCHAR,
+        oco_leg_missing_count INTEGER DEFAULT 0,
         hwm DOUBLE,
         remaining_qty DOUBLE,
         tp_status VARCHAR,
@@ -177,6 +178,13 @@ DDL_STATEMENTS = [
         last_checked_at TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (pod_id, symbol)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS strategy_rotation_state (
+        strategy_id VARCHAR PRIMARY KEY,
+        disabled_until DATE,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
     """
@@ -591,6 +599,44 @@ def _migrate_v7_to_v8(conn: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _migrate_v8_to_v9(conn: duckdb.DuckDBPyConnection) -> None:
+    """Add strategy rotation state + OCO leg tracking fields."""
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    if "strategy_rotation_state" not in tables:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS strategy_rotation_state (
+                strategy_id VARCHAR PRIMARY KEY,
+                disabled_until DATE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    if "intraday_order_state" in tables:
+        order_cols = {
+            row[0]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'intraday_order_state'"
+            ).fetchall()
+        }
+        if "oco_leg_missing_count" not in order_cols:
+            conn.execute(
+                "ALTER TABLE intraday_order_state "
+                "ADD COLUMN oco_leg_missing_count INTEGER DEFAULT 0"
+            )
+
+    logger.info(
+        "Migrated schema to v9: rotation state + OCO leg tracking added."
+    )
+
+
 def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
     """Create all tables in DuckDB. Returns the connection."""
     db_path = Path(db_path)
@@ -619,6 +665,8 @@ def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
         _migrate_v6_to_v7(conn)
     if old_version < 8:
         _migrate_v7_to_v8(conn)
+    if old_version < 9:
+        _migrate_v8_to_v9(conn)
 
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)",

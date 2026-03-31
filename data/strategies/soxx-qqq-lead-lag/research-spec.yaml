@@ -1,4 +1,5 @@
 strategy_slug: "soxx-qqq-lead-lag"
+group: "semis_lead_lag"
 strategy_type: "lead_lag"
 frozen: true
 frozen_at: "2026-03-26T00:00:00Z"

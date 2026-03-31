@@ -1,4 +1,8 @@
-from llm_quant.broker.intraday_orders import place_oco_exits_for_buys
+from llm_quant.broker.intraday_orders import (
+    IntradayOrderState,
+    place_oco_exits_for_buys,
+    reconcile_orders,
+)
 from llm_quant.trading.executor import ExecutedTrade
 
 
@@ -49,6 +53,26 @@ class FakeClient:
         return []
 
 
+class MissingLegClient:
+    def __init__(self) -> None:
+        self.stop_orders = []
+
+    def get_order(self, order_id, nested=False):
+        return {"id": order_id, "legs": []}
+
+    def list_orders(self, status="open", nested=False):
+        return []
+
+    def submit_stop_order(self, symbol, qty, side, stop_price):
+        self.stop_orders.append(
+            {"symbol": symbol, "qty": qty, "side": side, "stop_price": stop_price}
+        )
+        return {"id": "stop1"}
+
+    def cancel_order(self, order_id):
+        return None
+
+
 def test_place_oco_exits_for_buys_creates_partial_and_oco():
     client = FakeClient()
     states = {}
@@ -88,3 +112,28 @@ def test_place_oco_exits_for_buys_creates_partial_and_oco():
     assert client.oco_orders[0]["qty"] == 5
     assert client.oco_orders[0]["take_profit"] > client.limit_orders[0]["limit_price"]
     assert client.oco_orders[0]["take_profit"] == 104.0
+
+
+def test_reconcile_orders_fallbacks_when_oco_legs_missing():
+    client = MissingLegClient()
+    states = {
+        "SPY": IntradayOrderState(
+            symbol="SPY",
+            oco_order_id="oco1",
+            hwm=100.0,
+            remaining_qty=5.0,
+        )
+    }
+
+    for _ in range(3):
+        reconcile_orders(
+            client,
+            states,
+            positions={"SPY": 5.0},
+            trailing_pct=0.01,
+        )
+
+    state = states["SPY"]
+    assert state.oco_order_id is None
+    assert state.oco_stop_order_id == "stop1"
+    assert client.stop_orders

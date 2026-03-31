@@ -3,6 +3,7 @@
 ## What Changed
 - Promoted strategy specs in `data/strategies/*` now generate live signals.
 - Claude acts as a **risk/size overlay** when `claude_overlay_only = true`.
+- Strategy rotation can enable only the **Top‑N** performers (configurable).
 - Intraday bars (Alpaca) are stored in `market_data_intraday` and used for
   real-time context + profit-taking.
 - Profit-taking logic can trigger:
@@ -49,6 +50,7 @@ reentry_cooldown_bars = 1
 ## Operational Notes
 - Intraday runs disable bracket orders and rely on native OCO/limit orders.
 - Strategy signals are merged and capped by `risk.max_position_weight`.
+- Strategy group caps + regime multipliers can scale weights before execution.
 - Intraday runs are de-duped per 5‑minute slot via `data/locks/intraday_{pod}.lock`.
 - See `docs/governance/runtime-truth-table.md` for mode-by-mode behavior.
 

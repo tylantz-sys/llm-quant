@@ -22,6 +22,7 @@ class IntradayOrderState:
     oco_order_id: str | None = None
     oco_tp_order_id: str | None = None
     oco_stop_order_id: str | None = None
+    oco_leg_missing_count: int = 0
     hwm: float = 0.0
     remaining_qty: float = 0.0
     tp_status: str | None = None
@@ -42,6 +43,7 @@ def load_order_states(
             oco_order_id,
             oco_tp_order_id,
             oco_stop_order_id,
+            oco_leg_missing_count,
             hwm,
             remaining_qty,
             tp_status,
@@ -61,6 +63,7 @@ def load_order_states(
             oco_id,
             oco_tp_id,
             oco_stop_id,
+            oco_leg_missing_count,
             hwm,
             remaining_qty,
             tp_status,
@@ -74,6 +77,7 @@ def load_order_states(
             oco_order_id=oco_id,
             oco_tp_order_id=oco_tp_id,
             oco_stop_order_id=oco_stop_id,
+            oco_leg_missing_count=int(oco_leg_missing_count or 0),
             hwm=float(hwm or 0.0),
             remaining_qty=float(remaining_qty or 0.0),
             tp_status=tp_status,
@@ -102,6 +106,7 @@ def upsert_order_states(
                 state.oco_order_id,
                 state.oco_tp_order_id,
                 state.oco_stop_order_id,
+                state.oco_leg_missing_count,
                 state.hwm,
                 state.remaining_qty,
                 state.tp_status,
@@ -121,6 +126,7 @@ def upsert_order_states(
             oco_order_id,
             oco_tp_order_id,
             oco_stop_order_id,
+            oco_leg_missing_count,
             hwm,
             remaining_qty,
             tp_status,
@@ -128,7 +134,7 @@ def upsert_order_states(
             stop_status,
             last_checked_at,
             updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -351,6 +357,44 @@ def reconcile_orders(
         state.oco_tp_status = _order_status(client, state.oco_tp_order_id)
         state.stop_status = _order_status(client, state.oco_stop_order_id)
         state.last_checked_at = now
+
+        if state.oco_order_id and not state.oco_stop_order_id:
+            oco_tp_id, oco_stop_id = _resolve_oco_legs(client, state.oco_order_id)
+            if oco_stop_id:
+                state.oco_tp_order_id = oco_tp_id
+                state.oco_stop_order_id = oco_stop_id
+                state.oco_leg_missing_count = 0
+                logger.info(
+                    "Resolved OCO legs for %s (stop=%s).",
+                    symbol,
+                    oco_stop_id,
+                )
+            else:
+                state.oco_leg_missing_count += 1
+                if state.oco_leg_missing_count >= 3 and remaining_qty > 0:
+                    new_stop_price = state.hwm * (1.0 - trailing_pct)
+                    try:
+                        stop_order = client.submit_stop_order(
+                            symbol=symbol,
+                            qty=remaining_qty,
+                            side="sell",
+                            stop_price=new_stop_price,
+                        )
+                        state.oco_stop_order_id = stop_order.get("id")
+                        state.oco_order_id = None
+                        state.oco_tp_order_id = None
+                        state.stop_status = None
+                        state.oco_leg_missing_count = 0
+                        logger.warning(
+                            "OCO legs unresolved for %s; submitted standalone stop.",
+                            symbol,
+                        )
+                    except AlpacaError as exc:
+                        logger.warning(
+                            "Fallback stop submit failed for %s: %s",
+                            symbol,
+                            exc,
+                        )
 
         if remaining_qty <= 0:
             _cancel_orders(client, state)

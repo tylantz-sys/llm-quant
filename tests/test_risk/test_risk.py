@@ -117,6 +117,38 @@ def test_risk_manager_rejects_oversized(sample_portfolio, sample_prices, sample_
     assert len(rejected) == 1
 
 
+def test_risk_manager_blocks_new_positions_over_cap(sample_prices, sample_config):
+    from llm_quant.trading.portfolio import Portfolio, Position
+
+    p = Portfolio(initial_capital=100_000.0)
+    p.cash = 92_000.0
+    p.positions = {
+        "SPY": Position("SPY", 10, 100.0, 100.0, 95.0),
+        "QQQ": Position("QQQ", 10, 100.0, 100.0, 95.0),
+        "TLT": Position("TLT", 10, 100.0, 100.0, 95.0),
+        "GLD": Position("GLD", 10, 100.0, 100.0, 95.0),
+        "BTC-USD": Position("BTC-USD", 1, 30000.0, 30000.0, 28000.0),
+        "EURUSD=X": Position("EURUSD=X", 1000, 1.1, 1.1, 1.05),
+        "XLE": Position("XLE", 10, 100.0, 100.0, 95.0),
+        "XLF": Position("XLF", 10, 100.0, 100.0, 95.0),
+    }
+
+    sample_prices["NEW"] = 100.0
+    mgr = RiskManager(sample_config)
+    signal = TradeSignal(
+        symbol="NEW",
+        action=Action.BUY,
+        conviction=Conviction.MEDIUM,
+        target_weight=0.01,
+        stop_loss=95.0,
+        reasoning="New position beyond cap",
+    )
+    approved, rejected = mgr.filter_signals([signal], p, sample_prices)
+    assert len(approved) == 0
+    assert len(rejected) == 1
+    assert any(r.rule == "max_positions" for r in rejected[0][1])
+
+
 def test_risk_manager_enforces_trade_limit(
     sample_portfolio,
     sample_prices,

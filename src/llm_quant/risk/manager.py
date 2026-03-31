@@ -721,6 +721,62 @@ class RiskManager:
                     signal.conviction.value,
                 )
 
+        # Enforce max_positions on BUY signals that open new positions.
+        max_positions = getattr(active_limits, "max_positions", 0)
+        if max_positions and max_positions > 0:
+            open_symbols = {
+                symbol
+                for symbol, pos in portfolio.positions.items()
+                if getattr(pos, "shares", 0) > 0
+            }
+            closing_symbols = {
+                sig.symbol
+                for sig in approved
+                if sig.action == Action.CLOSE
+                or (sig.action == Action.SELL and sig.target_weight <= 0)
+            }
+            projected_open = open_symbols - closing_symbols
+
+            buy_signals = [s for s in approved if s.action == Action.BUY]
+            new_buys = [s for s in buy_signals if s.symbol not in projected_open]
+            available_slots = max_positions - len(projected_open)
+
+            if available_slots < len(new_buys):
+                conviction_rank = {
+                    "high": 0,
+                    "medium": 1,
+                    "low": 2,
+                }
+                new_buys.sort(key=lambda s: conviction_rank.get(s.conviction.value, 99))
+                keep_ids = {id(s) for s in new_buys[: max(available_slots, 0)]}
+                dropped = [s for s in new_buys if id(s) not in keep_ids]
+
+                approved = [s for s in approved if id(s) not in {id(d) for d in dropped}]
+                for sig in dropped:
+                    rejected.append(
+                        (
+                            sig,
+                            [
+                                RiskCheckResult(
+                                    passed=False,
+                                    rule="max_positions",
+                                    message=(
+                                        f"Open positions cap reached ({max_positions}). "
+                                        f"Signal for {sig.symbol} dropped."
+                                    ),
+                                    current_value=float(len(projected_open) + len(new_buys)),
+                                    limit_value=float(max_positions),
+                                )
+                            ],
+                        )
+                    )
+                    logger.warning(
+                        "DROPPED %s %s – max positions (%d) exceeded.",
+                        sig.action.value.upper(),
+                        sig.symbol,
+                        max_positions,
+                    )
+
         # Enforce max_trades_per_session on the approved list.
         # Prioritise by conviction (HIGH > MEDIUM > LOW), preserving
         # original order within the same conviction tier.

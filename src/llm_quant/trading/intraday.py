@@ -189,6 +189,19 @@ def apply_reentry_cooldown(
     return filtered
 
 
+def merge_intraday_signals(
+    entry_signals: list[TradeSignal],
+    other_signals: list[TradeSignal],
+    profit_signals: list[TradeSignal],
+) -> list[TradeSignal]:
+    """Merge intraday signals, prioritizing profit-taking exits."""
+    exit_symbols = {
+        s.symbol for s in profit_signals if s.action in (Action.SELL, Action.CLOSE)
+    }
+    filtered_entries = [s for s in entry_signals if s.symbol not in exit_symbols]
+    return other_signals + profit_signals + filtered_entries
+
+
 def update_peak_prices(
     portfolio: Portfolio,
     prices: dict[str, float],

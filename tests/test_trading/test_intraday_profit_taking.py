@@ -6,6 +6,7 @@ from llm_quant.trading.intraday import (
     apply_reentry_cooldown,
     apply_scale_in,
     generate_profit_taking_signals,
+    merge_intraday_signals,
 )
 from llm_quant.trading.portfolio import Portfolio, Position
 
@@ -120,3 +121,32 @@ def test_reentry_cooldown_blocks_buy():
         cooldown_bars=1,
     )
     assert filtered == []
+
+
+def test_merge_intraday_signals_prioritizes_profit_exits():
+    entry = [
+        TradeSignal(
+            symbol="SPY",
+            action=Action.BUY,
+            conviction=Conviction.MEDIUM,
+            target_weight=0.2,
+            stop_loss=95.0,
+            reasoning="entry",
+        )
+    ]
+    other = []
+    profit = [
+        TradeSignal(
+            symbol="SPY",
+            action=Action.SELL,
+            conviction=Conviction.HIGH,
+            target_weight=0.1,
+            stop_loss=95.0,
+            reasoning="tp",
+            exit_reason="tp_partial",
+        )
+    ]
+
+    merged = merge_intraday_signals(entry, other, profit)
+    assert len(merged) == 1
+    assert merged[0].action == Action.SELL

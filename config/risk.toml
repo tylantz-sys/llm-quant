@@ -2,6 +2,9 @@
 # Maximum weight for a single position as fraction of NAV
 max_position_weight = 0.12  # 12%
 
+# Maximum number of open positions
+max_positions = 8
+
 # Maximum capital allocated to a single trade as fraction of NAV
 max_trade_size = 0.04  # 4%
 
@@ -69,6 +72,7 @@ forex_default_stop_loss_pct = 0.03  # 3%  (vs 5% default — tighter given low v
 
 [track_b]
 max_position_weight = 0.15           # 15% (vs 12% Track A)
+max_positions = 8
 max_trade_size = 0.03                # 3%  (vs 4% Track A — note: Track A file shows 4%)
 max_gross_exposure = 2.0             # 200% unchanged
 max_net_exposure = 1.0               # 100% unchanged
@@ -109,6 +113,7 @@ eod_flatten_time = "15:55"
 # Per-position and per-trade sizing — wider than Track A because legs are
 # partially offsetting; net exposure remains near zero.
 max_position_weight = 0.20           # 20% per strategy (vs 10% Track A)
+max_positions = 8
 max_trade_size = 0.05                # 5% per trade    (vs 2% Track A)
 
 # Exposure caps — tight net cap enforces arb discipline.

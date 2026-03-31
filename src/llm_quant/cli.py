@@ -175,19 +175,25 @@ def _run_single_pod(
     from llm_quant.trading.intraday import (
         apply_reentry_cooldown,
         apply_scale_in,
+        generate_profit_taking_signals,
         load_position_states,
         log_intraday_context,
+        merge_intraday_signals,
         update_peak_prices,
         update_state_from_trades,
         upsert_position_states,
     )
     from llm_quant.trading.run_lock import acquire_run_lock, slot_for_time
     from llm_quant.strategies.runtime import (
-        aggregate_strategy_signals,
+        apply_group_caps,
+        apply_max_position_cap,
+        apply_regime_multipliers,
         generate_strategy_signals,
         load_promoted_specs,
+        merge_strategy_signals,
         required_symbols,
     )
+    from llm_quant.strategies.rotation import select_rotated_specs
     from llm_quant.trading.ledger import log_trades, save_portfolio_snapshot
     from llm_quant.trading.portfolio import Portfolio
 
@@ -355,8 +361,26 @@ def _run_single_pod(
     portfolio_state = portfolio.to_snapshot_dict()
     context = build_market_context(conn, portfolio_state, config)
 
+    selected_ids: list[str] = []
+    selected_specs = []
+
     if config.execution.claude_overlay_only:
         specs = load_promoted_specs()
+        selected_specs = specs
+        if config.strategy_rotation.enabled:
+            specs, selected_ids = select_rotated_specs(
+                conn,
+                specs,
+                as_of_date=datetime.now(tz=UTC).date(),
+                pod_id=pod_id,
+                initial_capital=config.general.initial_capital,
+                enabled=config.strategy_rotation.enabled,
+                window_days=config.strategy_rotation.window_days,
+                top_n=config.strategy_rotation.top_n,
+                min_trades=config.strategy_rotation.min_trades,
+                cooldown_days=config.strategy_rotation.cooldown_days,
+            )
+            selected_specs = specs
         strategy_symbols = required_symbols(specs)
         if config.execution.intraday_enabled:
             start_ts = datetime.now(tz=UTC) - timedelta(
@@ -380,8 +404,15 @@ def _run_single_pod(
             prices,
             datetime.now(tz=UTC).date(),
         )
-        aggregated = aggregate_strategy_signals(
-            strategy_signals, max_position_weight=config.risk.max_position_weight
+        strategy_signals = apply_regime_multipliers(
+            strategy_signals,
+            config.allocation.regime_weight_mult,
+            context.market_regime.value,
+        )
+        merged = merge_strategy_signals(strategy_signals)
+        merged = apply_group_caps(merged, config.allocation.strategy_group_caps)
+        aggregated = apply_max_position_cap(
+            merged, max_position_weight=config.risk.max_position_weight
         )
         candidate_signals = [
             {
@@ -454,7 +485,23 @@ def _run_single_pod(
             config.execution.reentry_cooldown_bars,
         )
 
-        signals = other_signals + entry_signals
+        if broker.lower() == "paper":
+            profit_signals = generate_profit_taking_signals(
+                portfolio,
+                prices,
+                states,
+                now_ts,
+                partial_tp_pct=config.execution.profit_take_partial_pct,
+                partial_tp_size=config.execution.profit_take_partial_size,
+                trailing_stop_pct=config.execution.trailing_stop_pct,
+            )
+            signals = merge_intraday_signals(
+                entry_signals,
+                other_signals,
+                profit_signals,
+            )
+        else:
+            signals = other_signals + entry_signals
 
         # Log intraday context snapshot for audit
         context_payload = {
@@ -471,6 +518,12 @@ def _run_single_pod(
                 for s in signals
             ],
         }
+        if config.execution.claude_overlay_only:
+            context_payload["selected_strategies"] = (
+                selected_ids
+                if selected_ids
+                else [spec.slug for spec in (selected_specs or specs)]
+            )
         log_intraday_context(conn, pod_id, now_ts, context_payload)
 
     approved, rejected = risk_mgr.filter_signals(signals, portfolio, prices)

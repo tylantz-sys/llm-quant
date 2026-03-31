@@ -38,6 +38,7 @@ class StrategySpec:
     slug: str
     strategy_name: str
     parameters: dict[str, Any]
+    group: str = "ungrouped"
 
 
 def load_promoted_specs(base_dir: Path | None = None) -> list[StrategySpec]:
@@ -60,7 +61,15 @@ def load_promoted_specs(base_dir: Path | None = None) -> list[StrategySpec]:
             logger.warning("Spec %s missing strategy_name/type; skipping", slug)
             continue
         params = raw.get("parameters", {}) or {}
-        specs.append(StrategySpec(slug=slug, strategy_name=strategy_name, parameters=params))
+        group = raw.get("group") or "ungrouped"
+        specs.append(
+            StrategySpec(
+                slug=slug,
+                strategy_name=strategy_name,
+                parameters=params,
+                group=str(group),
+            )
+        )
     return specs
 
 
@@ -97,6 +106,7 @@ def generate_strategy_signals(
 
         for signal in strat_signals:
             signal.strategy_id = spec.slug
+            signal.metadata["strategy_group"] = spec.group
             signals.append(signal)
 
     return signals
@@ -115,11 +125,10 @@ def required_symbols(specs: list[StrategySpec]) -> list[str]:
     return sorted(sym for sym in symbols if sym)
 
 
-def aggregate_strategy_signals(
+def merge_strategy_signals(
     signals: list[TradeSignal],
-    max_position_weight: float,
 ) -> list[TradeSignal]:
-    """Merge signals by symbol with simple correlation-aware caps."""
+    """Merge signals by symbol, preserving group metadata."""
     by_symbol: dict[str, list[TradeSignal]] = {}
     for sig in signals:
         by_symbol.setdefault(sig.symbol, []).append(sig)
@@ -150,6 +159,9 @@ def aggregate_strategy_signals(
 
         conviction = _max_conviction([g.conviction for g in group])
         strategy_ids = ",".join(sorted({g.strategy_id for g in group if g.strategy_id}))
+        groups = sorted(
+            {g.metadata.get("strategy_group", "ungrouped") for g in group}
+        )
         reasoning = "; ".join(
             f"{g.strategy_id or 'strategy'}:{g.reasoning}" for g in group
         )
@@ -163,17 +175,88 @@ def aggregate_strategy_signals(
                 stop_loss=stop_loss,
                 reasoning=reasoning,
                 strategy_id=strategy_ids,
+                metadata={"strategy_groups": groups},
             )
         )
 
-    # Proportional scaling: if any BUY exceeds cap, scale all BUY weights.
+    return merged
+
+
+def apply_regime_multipliers(
+    signals: list[TradeSignal],
+    regime_mults: dict[str, dict[str, float]],
+    market_regime: str,
+) -> list[TradeSignal]:
+    """Scale BUY weights by group/regime multipliers."""
+    if not regime_mults:
+        return signals
+
+    for sig in signals:
+        if sig.action != Action.BUY:
+            continue
+        group = sig.metadata.get("strategy_group", "ungrouped")
+        group_mults = regime_mults.get(group, {})
+        mult = group_mults.get(market_regime, 1.0)
+        sig.target_weight = round(sig.target_weight * float(mult), 4)
+
+    return signals
+
+
+def apply_group_caps(
+    signals: list[TradeSignal],
+    group_caps: dict[str, float],
+) -> list[TradeSignal]:
+    """Scale BUY weights so each strategy group respects its cap."""
+    if not group_caps:
+        return signals
+
+    totals: dict[str, float] = {}
+    for sig in signals:
+        if sig.action != Action.BUY:
+            continue
+        groups = sig.metadata.get("strategy_groups") or [
+            sig.metadata.get("strategy_group", "ungrouped")
+        ]
+        for group in groups:
+            totals[group] = totals.get(group, 0.0) + sig.target_weight
+
+    group_factors: dict[str, float] = {}
+    for group, total in totals.items():
+        cap = group_caps.get(group)
+        if cap is None or cap <= 0:
+            continue
+        if total > cap:
+            group_factors[group] = cap / total
+
+    if not group_factors:
+        return signals
+
+    for sig in signals:
+        if sig.action != Action.BUY:
+            continue
+        groups = sig.metadata.get("strategy_groups") or [
+            sig.metadata.get("strategy_group", "ungrouped")
+        ]
+        factors = [group_factors.get(group, 1.0) for group in groups]
+        scale = min(factors) if factors else 1.0
+        if scale < 1.0:
+            sig.target_weight = round(sig.target_weight * scale, 4)
+
+    return signals
+
+
+def apply_max_position_cap(
+    signals: list[TradeSignal],
+    max_position_weight: float,
+) -> list[TradeSignal]:
+    """Proportional scaling: if any BUY exceeds cap, scale all BUY weights."""
     max_buy_weight = max(
-        (s.target_weight for s in merged if s.action == Action.BUY),
+        (s.target_weight for s in signals if s.action == Action.BUY),
         default=0.0,
     )
     if max_buy_weight > max_position_weight and max_buy_weight > 0:
         scale = max_position_weight / max_buy_weight
-        for sig in merged:
+        for sig in signals:
             if sig.action == Action.BUY:
                 sig.target_weight = round(sig.target_weight * scale, 4)
         logger.info(
@@ -181,8 +264,16 @@ def aggregate_strategy_signals(
             scale,
             max_position_weight,
         )
+    return signals
 
-    return merged
+
+def aggregate_strategy_signals(
+    signals: list[TradeSignal],
+    max_position_weight: float,
+) -> list[TradeSignal]:
+    """Backwards-compatible merge + max-position scaling."""
+    merged = merge_strategy_signals(signals)
+    return apply_max_position_cap(merged, max_position_weight)
 
 
 def _max_conviction(convictions: list[Conviction]) -> Conviction:

@@ -3,6 +3,7 @@
 
 strategy_slug: "lqd-spy-credit-lead"
 strategy_name: "lead_lag"
+group: "credit_lead_lag"
 created_at: "2026-03-26"
 frozen: true
 frozen_at: "2026-03-26"
