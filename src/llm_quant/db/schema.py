@@ -7,7 +7,7 @@ import duckdb
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 DDL_STATEMENTS = [
     """
@@ -123,6 +123,23 @@ DDL_STATEMENTS = [
         regime_confidence DOUBLE,
         num_signals INTEGER,
         raw_response TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS decision_contexts (
+        decision_id INTEGER NOT NULL,
+        pod_id VARCHAR NOT NULL DEFAULT 'default',
+        timestamp TIMESTAMP NOT NULL,
+        context_json TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS llm_prompt_logs (
+        decision_id INTEGER NOT NULL,
+        prompt_type VARCHAR NOT NULL,
+        prompt_text TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
@@ -637,6 +654,42 @@ def _migrate_v8_to_v9(conn: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _migrate_v9_to_v10(conn: duckdb.DuckDBPyConnection) -> None:
+    """Add decision context + prompt log tables."""
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    if "decision_contexts" not in tables:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS decision_contexts (
+                decision_id INTEGER NOT NULL,
+                pod_id VARCHAR NOT NULL DEFAULT 'default',
+                timestamp TIMESTAMP NOT NULL,
+                context_json TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    if "llm_prompt_logs" not in tables:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_prompt_logs (
+                decision_id INTEGER NOT NULL,
+                prompt_type VARCHAR NOT NULL,
+                prompt_text TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    logger.info(
+        "Migrated schema to v10: decision contexts + prompt logs added."
+    )
+
+
 def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
     """Create all tables in DuckDB. Returns the connection."""
     db_path = Path(db_path)
@@ -667,6 +720,8 @@ def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
         _migrate_v7_to_v8(conn)
     if old_version < 9:
         _migrate_v8_to_v9(conn)
+    if old_version < 10:
+        _migrate_v9_to_v10(conn)
 
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)",

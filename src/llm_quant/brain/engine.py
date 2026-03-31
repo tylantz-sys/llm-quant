@@ -12,7 +12,6 @@ from llm_quant.brain.models import MarketContext, TradingDecision
 from llm_quant.brain.parser import parse_trading_decision
 from llm_quant.brain.prompts import load_system_prompt, render_decision_prompt
 from llm_quant.config import CONFIG_DIR, AppConfig
-from llm_quant.db.schema import get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +135,8 @@ class SignalEngine:
         decision.total_tokens = total_tokens
         decision.cost_usd = cost_usd
         decision.raw_response = raw_text
+        decision.system_prompt = self._system_prompt
+        decision.user_prompt = user_prompt
 
         # Step 4: Enforce max trades per session
         max_trades = self._config.llm.max_trades_per_session
@@ -146,15 +147,6 @@ class SignalEngine:
                 max_trades,
             )
             decision.signals = decision.signals[:max_trades]
-
-        # Step 5: Log to database
-        try:
-            conn = get_connection(self._config.general.db_path)
-            decision_id = self.log_decision(conn, decision)
-            conn.close()
-            logger.info("Decision logged to DB with decision_id=%d", decision_id)
-        except Exception:
-            logger.exception("Failed to log decision to database")
 
         return decision
 
@@ -206,6 +198,22 @@ class SignalEngine:
                 decision.raw_response,
             ],
         )
+        prompts: list[list] = []
+        system_prompt = getattr(decision, "system_prompt", "") or ""
+        user_prompt = getattr(decision, "user_prompt", "") or ""
+        if system_prompt:
+            prompts.append([decision_id, "system", system_prompt])
+        if user_prompt:
+            prompts.append([decision_id, "user", user_prompt])
+        if prompts:
+            conn.executemany(
+                """
+                INSERT INTO llm_prompt_logs (
+                    decision_id, prompt_type, prompt_text, created_at
+                ) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                prompts,
+            )
         conn.commit()
 
         logger.debug(

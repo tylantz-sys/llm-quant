@@ -63,6 +63,7 @@ class ExecutionConfig(BaseModel):
     intraday_timeframe_minutes: int = 5
     intraday_lookback_days: int = 10
     claude_overlay_only: bool = True
+    log_decisions_when_rth_closed: bool = True
     profit_take_partial_pct: float = 0.02
     profit_take_partial_size: float = 0.50
     profit_take_remainder_tp_mult: float = 2.0

@@ -179,6 +179,38 @@ def list_runs(
     )
 
 
+@app.get("/decisions")
+def list_decisions(
+    limit: int = Query(100, ge=1, le=1000),
+    pod_id: str = "default",
+) -> dict[str, Any]:
+    query = """
+        SELECT
+            decision_id,
+            created_at,
+            date,
+            pod_id,
+            decision_type,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cost_usd,
+            market_regime,
+            regime_confidence,
+            num_signals
+        FROM llm_decisions
+        WHERE pod_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+    """
+    return _query_with_cache(
+        cache_key=f"decisions:{pod_id}:{limit}",
+        query=query,
+        params=[pod_id, limit],
+    )
+
+
 @app.get("/decisions/{decision_id}")
 def get_decision(decision_id: int) -> dict[str, Any]:
     cache_key = f"decision:{decision_id}"
@@ -316,6 +348,7 @@ def list_intraday_orders(
             oco_order_id,
             oco_tp_order_id,
             oco_stop_order_id,
+            oco_leg_missing_count,
             hwm,
             remaining_qty,
             tp_status,
@@ -331,6 +364,90 @@ def list_intraday_orders(
         cache_key=f"intraday_orders:{pod_id}",
         query=query,
         params=[pod_id],
+    )
+
+
+@app.get("/decision-contexts")
+def list_decision_contexts(
+    decision_id: int | None = None,
+    pod_id: str = "default",
+    limit: int = Query(100, ge=1, le=1000),
+) -> dict[str, Any]:
+    where = "WHERE pod_id = ?"
+    params: list[Any] = [pod_id]
+    if decision_id is not None:
+        where += " AND decision_id = ?"
+        params.append(decision_id)
+    query = f"""
+        SELECT
+            decision_id,
+            pod_id,
+            timestamp,
+            context_json,
+            created_at
+        FROM decision_contexts
+        {where}
+        ORDER BY created_at DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    return _query_with_cache(
+        cache_key=f"decision_contexts:{pod_id}:{decision_id}:{limit}",
+        query=query,
+        params=params,
+    )
+
+
+@app.get("/prompt-logs")
+def list_prompt_logs(
+    decision_id: int | None = None,
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict[str, Any]:
+    where = ""
+    params: list[Any] = []
+    if decision_id is not None:
+        where = "WHERE decision_id = ?"
+        params.append(decision_id)
+    query = f"""
+        SELECT
+            decision_id,
+            prompt_type,
+            prompt_text,
+            created_at
+        FROM llm_prompt_logs
+        {where}
+        ORDER BY created_at DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    return _query_with_cache(
+        cache_key=f"prompt_logs:{decision_id}:{limit}",
+        query=query,
+        params=params,
+    )
+
+
+@app.get("/intraday-context")
+def list_intraday_context(
+    pod_id: str = "default",
+    limit: int = Query(100, ge=1, le=1000),
+) -> dict[str, Any]:
+    query = """
+        SELECT
+            snapshot_id,
+            timestamp,
+            pod_id,
+            context_json,
+            created_at
+        FROM intraday_context_snapshots
+        WHERE pod_id = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+    """
+    return _query_with_cache(
+        cache_key=f"intraday_context:{pod_id}:{limit}",
+        query=query,
+        params=[pod_id, limit],
     )
 
 

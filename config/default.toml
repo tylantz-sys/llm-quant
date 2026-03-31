@@ -23,6 +23,7 @@ intraday_enabled = true
 intraday_timeframe_minutes = 5
 intraday_lookback_days = 10
 claude_overlay_only = true
+log_decisions_when_rth_closed = true
 profit_take_partial_pct = 0.02
 profit_take_partial_size = 0.50
 profit_take_remainder_tp_mult = 2.0

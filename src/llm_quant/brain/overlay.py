@@ -63,6 +63,8 @@ class OverlayEngine:
         decision.total_tokens = total_tokens
         decision.cost_usd = cost_usd
         decision.raw_response = raw_text
+        decision.system_prompt = self._system_prompt
+        decision.user_prompt = user_prompt
         return decision
 
     def _call_api(self, user_prompt: str) -> anthropic.types.Message:

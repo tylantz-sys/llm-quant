@@ -183,6 +183,7 @@ def _run_single_pod(
         update_state_from_trades,
         upsert_position_states,
     )
+    from llm_quant.trading.telemetry import log_decision_context
     from llm_quant.trading.run_lock import acquire_run_lock, slot_for_time
     from llm_quant.strategies.runtime import (
         apply_group_caps,
@@ -200,6 +201,7 @@ def _run_single_pod(
     config = _get_config_for_pod(pod_id)
     db_path = _get_db_path(config)
     run_lock = None
+    log_only = False
     if config.execution.intraday_enabled:
         slot = slot_for_time(
             datetime.now(tz=UTC),
@@ -219,13 +221,19 @@ def _run_single_pod(
         try:
             rth_client = AlpacaClient.from_env()
             if not should_run_intraday(rth_client.is_market_open()):
-                console.print(
-                    "[yellow]RTH closed — skipped intraday run.[/yellow]"
-                )
-                conn.close()
-                if run_lock:
-                    run_lock.release()
-                return
+                if config.execution.log_decisions_when_rth_closed:
+                    log_only = True
+                    console.print(
+                        "[yellow]RTH closed — logging decisions only.[/yellow]"
+                    )
+                else:
+                    console.print(
+                        "[yellow]RTH closed — skipped intraday run.[/yellow]"
+                    )
+                    conn.close()
+                    if run_lock:
+                        run_lock.release()
+                    return
         except AlpacaError as exc:
             console.print(f"[red]FAIL[/red] Alpaca clock check failed: {exc}")
             conn.close()
@@ -271,7 +279,7 @@ def _run_single_pod(
             "  [yellow]WARN[/yellow] No new data fetched, using existing DB data"
         )
 
-    if config.execution.intraday_enabled:
+    if config.execution.intraday_enabled and not log_only:
         console.print("  [bold]Intraday:[/bold] Fetching 5-min bars from Alpaca...")
         try:
             intraday_df = fetch_intraday_ohlcv(
@@ -318,6 +326,10 @@ def _run_single_pod(
             console.print(
                 "  [yellow]WARN[/yellow] No intraday data fetched, using existing DB data"
             )
+    elif config.execution.intraday_enabled and log_only:
+        console.print(
+            "  [yellow]WARN[/yellow] RTH closed; using existing intraday DB data"
+        )
 
     # Step 2: Load portfolio
     console.print("[bold]Step 2/5:[/bold] Loading portfolio...")
@@ -537,16 +549,22 @@ def _run_single_pod(
             reasons = ", ".join(c.message for c in failed)
             console.print(f"    {sig.symbol} {sig.action.value}: {reasons}")
 
+    # Log decision + context (always)
+    decision_id = decision_logger.log_decision(conn, decision)
+    log_decision_context(conn, decision_id, pod_id, context)
+
     alpaca_client = None
-    if broker.lower() == "alpaca":
+    if not log_only and broker.lower() == "alpaca":
         try:
             alpaca_client = AlpacaClient.from_env()
         except AlpacaError as exc:
             console.print(f"[red]FAIL[/red] Alpaca client init failed: {exc}")
             conn.close()
             raise typer.Exit(1) from exc
-
-    if approved:
+    executed = []
+    if log_only:
+        console.print("  [yellow]RTH closed — decisions logged, no trades executed.[/yellow]")
+    elif approved:
         executed = execute_signals(portfolio, approved, prices, portfolio.nav)
         console.print(f"  [green]OK[/green] Executed {len(executed)} trades")
 
@@ -578,16 +596,13 @@ def _run_single_pod(
                 conn.close()
                 raise typer.Exit(1) from exc
 
-        # Log decision
-        decision_id = decision_logger.log_decision(conn, decision)
-
         # Log trades
         trade_ids = log_trades(conn, executed, today, decision_id, pod_id=pod_id)
         console.print(f"  [green]OK[/green] Logged trade IDs: {trade_ids}")
     else:
         console.print("  No trades to execute.")
 
-    if config.execution.intraday_enabled and alpaca_client:
+    if config.execution.intraday_enabled and alpaca_client and not log_only:
         order_states = load_order_states(conn, pod_id)
         try:
             positions = {

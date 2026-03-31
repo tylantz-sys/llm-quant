@@ -1,0 +1,12 @@
+[Unit]
+Description=llm-quant dashboard API
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ty/Documents/llm-quant/llm-quant
+ExecStart=/home/ty/Documents/llm-quant/llm-quant/scripts/run_dashboard_api.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

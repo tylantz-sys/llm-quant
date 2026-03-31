@@ -58,6 +58,8 @@ class TradingDecision:
     total_tokens: int = 0
     cost_usd: float = 0.0
     raw_response: str = ""
+    system_prompt: str = ""
+    user_prompt: str = ""
 
 
 @dataclass
