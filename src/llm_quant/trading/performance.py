@@ -433,3 +433,113 @@ def compute_performance(  # noqa: C901, PLR0912, PLR0915
     )
 
     return metrics
+
+
+def compute_strategy_performance(
+    conn: duckdb.DuckDBPyConnection,
+    start_date: date_type | None = None,
+    end_date: date_type | None = None,
+    pod_id: str | None = None,
+) -> list[dict]:
+    """Compute realized PnL + win/loss stats per strategy_id using FIFO."""
+    params: list = []
+    where: list[str] = []
+
+    if start_date is not None:
+        where.append("date >= ?")
+        params.append(start_date)
+    if end_date is not None:
+        where.append("date <= ?")
+        params.append(end_date)
+    if pod_id is not None:
+        where.append("pod_id = ?")
+        params.append(pod_id)
+
+    where_sql = ""
+    if where:
+        where_sql = "WHERE " + " AND ".join(where)
+
+    rows = conn.execute(
+        f"""
+        SELECT trade_id, date, symbol, action, shares, price, strategy_id
+        FROM trades
+        {where_sql}
+        ORDER BY trade_id ASC
+        """,
+        params,
+    ).fetchall()
+
+    if not rows:
+        return []
+
+    lots: dict[tuple[str, str], list[list[float]]] = {}
+    stats: dict[str, dict[str, float]] = {}
+
+    def _stat_bucket(strategy: str) -> dict[str, float]:
+        if strategy not in stats:
+            stats[strategy] = {
+                "realized_pnl": 0.0,
+                "wins": 0.0,
+                "losses": 0.0,
+                "trades": 0.0,
+            }
+        return stats[strategy]
+
+    for row in rows:
+        _, _, symbol, action, shares, price, strategy_id = row
+        strategy = strategy_id or "unattributed"
+        qty = float(shares)
+        if qty <= 0:
+            continue
+
+        key = (strategy, symbol)
+        if action == "buy":
+            lots.setdefault(key, []).append([qty, float(price)])
+            continue
+
+        if action not in {"sell", "close"}:
+            continue
+
+        queue = lots.setdefault(key, [])
+        if not queue:
+            continue
+
+        remaining = qty
+        while remaining > 0 and queue:
+            lot_qty, lot_price = queue[0]
+            matched = min(remaining, lot_qty)
+            pnl = (float(price) - lot_price) * matched
+            bucket = _stat_bucket(strategy)
+            bucket["realized_pnl"] += pnl
+            bucket["trades"] += 1
+            if pnl > 0:
+                bucket["wins"] += 1
+            else:
+                bucket["losses"] += 1
+
+            lot_qty -= matched
+            remaining -= matched
+            if lot_qty <= 0:
+                queue.pop(0)
+            else:
+                queue[0][0] = lot_qty
+
+    results: list[dict] = []
+    for strategy, bucket in stats.items():
+        total_trades = int(bucket["trades"])
+        wins = int(bucket["wins"])
+        losses = int(bucket["losses"])
+        win_rate = wins / total_trades if total_trades else 0.0
+        results.append(
+            {
+                "strategy_id": strategy,
+                "realized_pnl": round(bucket["realized_pnl"], 2),
+                "win_rate": round(win_rate, 4),
+                "trades": total_trades,
+                "wins": wins,
+                "losses": losses,
+            }
+        )
+
+    results.sort(key=lambda r: r["realized_pnl"], reverse=True)
+    return results

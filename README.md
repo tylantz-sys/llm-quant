@@ -30,6 +30,16 @@ See [research-tracks.md](docs/governance/research-tracks.md),
 5. **Execute** paper trades after pre-trade risk checks (7 automated limits)
 6. **Track** everything in DuckDB — trades, decisions, portfolio snapshots, hash chain
 
+## Hybrid Runtime (Optional)
+
+- **Promoted strategies** in `data/strategies/*` can run as signal pods.
+- **Claude overlay** scales/blocks strategy signals when `claude_overlay_only = true`.
+- **Intraday mode** uses Alpaca 5‑minute bars + intraday indicators.
+- **Profit-taking** supports partial TP + **OCO remainder** with trailing stop updates.
+- Reports include intraday tables, order state, and `decision_type` tagging.
+- Data upserts use a lock + timeout + bulk insert with retries to avoid E2E hangs.
+- See `docs/governance/runtime-truth-table.md` for mode-by-mode behavior.
+
 ## Research Lab Results
 
 This system runs a **133-hypothesis quantitative research lab** — every strategy passes through a 5-gate robustness filter before any capital is committed.

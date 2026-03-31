@@ -13,11 +13,11 @@ import polars as pl
 logger = logging.getLogger(__name__)
 
 
-def compute_indicators(df: pl.DataFrame) -> pl.DataFrame:
+def compute_indicators(df: pl.DataFrame, time_col: str = "date") -> pl.DataFrame:
     """Add technical-indicator columns to an OHLCV DataFrame.
 
     The input must contain at least the columns:
-    ``symbol, date, open, high, low, close, volume``.
+    ``symbol, <time_col>, open, high, low, close, volume``.
 
     Indicators computed (per symbol, ordered by date):
 
@@ -48,7 +48,7 @@ def compute_indicators(df: pl.DataFrame) -> pl.DataFrame:
         The original DataFrame with the eleven indicator columns appended
         (or replaced if they already existed).
     """
-    required = {"symbol", "date", "close", "high", "low"}
+    required = {"symbol", time_col, "close", "high", "low"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Input DataFrame is missing required columns: {missing}")
@@ -98,7 +98,7 @@ def compute_indicators(df: pl.DataFrame) -> pl.DataFrame:
         df = df.drop(existing)
 
     # Ensure sorted by symbol then date
-    df = df.sort(["symbol", "date"])
+    df = df.sort(["symbol", time_col])
 
     # -- SMA indicators -------------------------------------------------------
     df = df.with_columns(
@@ -152,8 +152,8 @@ def compute_indicators(df: pl.DataFrame) -> pl.DataFrame:
         df = df.with_columns(
             pl.col("volume")
             .rolling_mean(window_size=20, min_samples=20)
-            .over("symbol")
-            .alias("vol_sma_20"),
+        .over("symbol")
+        .alias("vol_sma_20"),
         )
     else:
         df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("vol_sma_20"))

@@ -184,15 +184,17 @@ class SignalEngine:
         conn.execute(
             """
             INSERT INTO llm_decisions (
-                decision_id, date, model,
+                decision_id, date, pod_id, decision_type, model,
                 prompt_tokens, completion_tokens, total_tokens, cost_usd,
                 market_regime, regime_confidence, num_signals,
                 raw_response
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 decision_id,
                 decision.date.isoformat(),
+                getattr(decision, "pod_id", "default") or "default",
+                getattr(decision, "decision_type", "llm") or "llm",
                 decision.model,
                 decision.prompt_tokens,
                 decision.completion_tokens,

@@ -49,6 +49,26 @@ class GeneralConfig(BaseModel):
 class DataConfig(BaseModel):
     lookback_days: int = 252
     fetch_timeout: int = 30
+    db_lock_timeout_seconds: float = 30.0
+    db_lock_retry_seconds: float = 0.5
+    db_upsert_timeout_seconds: float = 30.0
+    db_upsert_max_retries: int = 2
+    db_upsert_retry_seconds: float = 1.0
+
+
+class ExecutionConfig(BaseModel):
+    """Execution and runtime behavior flags (intraday + profit-taking)."""
+
+    intraday_enabled: bool = False
+    intraday_timeframe_minutes: int = 5
+    intraday_lookback_days: int = 10
+    claude_overlay_only: bool = True
+    profit_take_partial_pct: float = 0.02
+    profit_take_partial_size: float = 0.50
+    profit_take_remainder_tp_mult: float = 2.0
+    trailing_stop_pct: float = 0.015
+    scale_in_tranches: int = 3
+    reentry_cooldown_bars: int = 1
 
 
 class RiskLimits(BaseModel):
@@ -71,6 +91,13 @@ class RiskLimits(BaseModel):
     deviation_buffer: float = 0.20   # buffer before triggering rebalance alert
     atr_period: int = 14             # ATR lookback for equities / fixed income
     atr_period_crypto: int = 7       # shorter ATR lookback for crypto
+    # Take-profit defaults (configurable, overrides LLM when mode = pct)
+    take_profit_mode: str = "pct"    # pct | rr
+    take_profit_pct: float = 0.03    # fixed take-profit percent (3%)
+    take_profit_rr: float = 2.0      # risk-reward multiple (if mode = rr)
+    # End-of-day flatten control
+    eod_flatten_enabled: bool = True
+    eod_flatten_time: str = "15:55"  # US/Eastern
     # Per-asset-class overrides (crypto is more volatile, forex less so)
     crypto_max_position_weight: float = 0.05
     crypto_default_stop_loss_pct: float = 0.15
@@ -99,6 +126,13 @@ class TrackBLimits(BaseModel):
     crypto_max_position_weight: float = 0.08
     crypto_default_stop_loss_pct: float = 0.20
     leveraged_etf_max_position_weight: float = 0.10
+    # Take-profit defaults (configurable, overrides LLM when mode = pct)
+    take_profit_mode: str = "pct"
+    take_profit_pct: float = 0.03
+    take_profit_rr: float = 2.0
+    # End-of-day flatten control
+    eod_flatten_enabled: bool = True
+    eod_flatten_time: str = "15:55"
 
 
 class TrackCLimits(BaseModel):
@@ -243,6 +277,7 @@ class AppConfig(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     data: DataConfig = Field(default_factory=DataConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     risk: RiskLimits = Field(default_factory=RiskLimits)
     track_b: TrackBLimits = Field(default_factory=TrackBLimits)
     track_c: TrackCLimits = Field(default_factory=TrackCLimits)
@@ -263,6 +298,7 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     general_data: dict = {}
     llm_data: dict = {}
     data_data: dict = {}
+    execution_data: dict = {}
     risk_data: dict = {}
     track_b_data: dict = {}
     track_c_data: dict = {}
@@ -275,6 +311,7 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         general_data = raw.get("general", {})
         llm_data = raw.get("llm", {})
         data_data = raw.get("data", {})
+        execution_data = raw.get("execution", {})
 
     # Load risk.toml
     risk_path = config_dir / "risk.toml"
@@ -312,6 +349,7 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         general=GeneralConfig(**general_data),
         llm=LLMConfig(**llm_data),
         data=DataConfig(**data_data),
+        execution=ExecutionConfig(**execution_data),
         risk=RiskLimits(**risk_data),
         track_b=TrackBLimits(**track_b_data),
         track_c=TrackCLimits(**track_c_data),

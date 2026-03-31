@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 import duckdb
@@ -99,6 +99,45 @@ def _compute_change_pct(
             "volume": latest["volume"] or 0,
         }
     return result
+
+
+def _fetch_latest_intraday_market_data(
+    conn: duckdb.DuckDBPyConnection,
+    symbols: list[str],
+) -> list[dict[str, Any]]:
+    """Fetch the most recent two intraday bars per symbol."""
+    if not symbols:
+        return []
+
+    placeholders = ", ".join(["?"] * len(symbols))
+    query = f"""
+        WITH ranked AS (
+            SELECT
+                symbol, timestamp, close, volume,
+                sma_20, sma_50, rsi_14, macd, atr_14,
+                ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY timestamp DESC) AS rn
+            FROM market_data_intraday
+            WHERE symbol IN ({placeholders})
+        )
+        SELECT *
+        FROM ranked
+        WHERE rn <= 2
+        ORDER BY symbol, rn
+    """
+    rows = conn.execute(query, symbols).fetchall()
+    columns = [
+        "symbol",
+        "timestamp",
+        "close",
+        "volume",
+        "sma_20",
+        "sma_50",
+        "rsi_14",
+        "macd",
+        "atr_14",
+        "rn",
+    ]
+    return [dict(zip(columns, row, strict=True)) for row in rows]
 
 
 def _get_vix(conn: duckdb.DuckDBPyConnection) -> float:
@@ -548,8 +587,11 @@ def build_market_context(
         len(held_symbols),
     )
 
-    # Fetch market data for the last 2 days
-    raw_market = _fetch_latest_market_data(conn, all_symbols)
+    # Fetch market data (intraday if enabled, otherwise daily)
+    if getattr(config, "execution", None) and config.execution.intraday_enabled:
+        raw_market = _fetch_latest_intraday_market_data(conn, all_symbols)
+    else:
+        raw_market = _fetch_latest_market_data(conn, all_symbols)
     market_prices = _compute_change_pct(raw_market)
 
     # Build MarketRow list sorted by momentum (change_pct descending)
@@ -624,8 +666,6 @@ def build_market_context(
         execution_costs[asset.symbol] = get_execution_cost(
             asset.symbol, asset.asset_class
         )
-
-    from datetime import datetime
 
     today = datetime.now(tz=UTC).date()
 

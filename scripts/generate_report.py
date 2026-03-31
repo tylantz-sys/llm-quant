@@ -26,7 +26,10 @@ from llm_quant.config import load_config
 from llm_quant.db.integrity import verify_chain
 from llm_quant.db.schema import get_connection, init_schema
 from llm_quant.surveillance.scanner import SurveillanceScanner
-from llm_quant.trading.performance import compute_performance
+from llm_quant.trading.performance import (
+    compute_performance,
+    compute_strategy_performance,
+)
 
 logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 logger = logging.getLogger(__name__)
@@ -142,7 +145,17 @@ def _get_trades_for_date(
     """Get all trades for a given date."""
     rows = conn.execute(
         """
-        SELECT symbol, action, shares, price, notional, conviction, reasoning
+        SELECT
+            symbol,
+            action,
+            shares,
+            price,
+            notional,
+            conviction,
+            reasoning,
+            strategy_id,
+            entry_batch,
+            exit_reason
         FROM trades
         WHERE date = ?
         ORDER BY trade_id ASC
@@ -158,6 +171,9 @@ def _get_trades_for_date(
             "notional": float(r[4]),
             "conviction": r[5] or "",
             "reasoning": r[6] or "",
+            "strategy_id": r[7] or "",
+            "entry_batch": int(r[8]) if r[8] is not None else None,
+            "exit_reason": r[9] or "",
         }
         for r in rows
     ]
@@ -169,7 +185,18 @@ def _get_trades_for_range(
     """Get all trades within a date range (inclusive)."""
     rows = conn.execute(
         """
-        SELECT date, symbol, action, shares, price, notional, conviction, reasoning
+        SELECT
+            date,
+            symbol,
+            action,
+            shares,
+            price,
+            notional,
+            conviction,
+            reasoning,
+            strategy_id,
+            entry_batch,
+            exit_reason
         FROM trades
         WHERE date >= ? AND date <= ?
         ORDER BY date ASC, trade_id ASC
@@ -186,6 +213,9 @@ def _get_trades_for_range(
             "notional": float(r[5]),
             "conviction": r[6] or "",
             "reasoning": r[7] or "",
+            "strategy_id": r[8] or "",
+            "entry_batch": int(r[9]) if r[9] is not None else None,
+            "exit_reason": r[10] or "",
         }
         for r in rows
     ]
@@ -211,6 +241,126 @@ def _get_regime_for_date(
         "regime": row[0] or "unknown",
         "confidence": float(row[1]) if row[1] is not None else 0.0,
     }
+
+
+def _get_decisions_for_date(
+    conn: duckdb.DuckDBPyConnection, target_date: date
+) -> list[dict]:
+    """Return LLM/overlay decisions for a date."""
+    rows = conn.execute(
+        """
+        SELECT decision_id, created_at, decision_type, model, num_signals,
+               market_regime, regime_confidence
+        FROM llm_decisions
+        WHERE date = ?
+        ORDER BY created_at DESC
+        """,
+        [target_date],
+    ).fetchall()
+    return [
+        {
+            "decision_id": r[0],
+            "created_at": r[1],
+            "decision_type": r[2] or "llm",
+            "model": r[3],
+            "num_signals": int(r[4]) if r[4] is not None else 0,
+            "market_regime": r[5] or "unknown",
+            "regime_confidence": float(r[6]) if r[6] is not None else 0.0,
+        }
+        for r in rows
+    ]
+
+
+def _get_intraday_bars_for_date(
+    conn: duckdb.DuckDBPyConnection, target_date: date, limit: int = 50
+) -> list[dict]:
+    """Get recent intraday bars for a given date."""
+    rows = conn.execute(
+        """
+        SELECT symbol, timestamp, close, rsi_14, macd, atr_14
+        FROM market_data_intraday
+        WHERE DATE(timestamp) = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        [target_date, limit],
+    ).fetchall()
+    return [
+        {
+            "symbol": r[0],
+            "timestamp": r[1],
+            "close": float(r[2]) if r[2] is not None else None,
+            "rsi_14": float(r[3]) if r[3] is not None else None,
+            "macd": float(r[4]) if r[4] is not None else None,
+            "atr_14": float(r[5]) if r[5] is not None else None,
+        }
+        for r in rows
+    ]
+
+
+def _get_intraday_snapshots_for_date(
+    conn: duckdb.DuckDBPyConnection, target_date: date, limit: int = 25
+) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT snapshot_id, timestamp, pod_id
+        FROM intraday_context_snapshots
+        WHERE DATE(timestamp) = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        [target_date, limit],
+    ).fetchall()
+    return [
+        {
+            "snapshot_id": r[0],
+            "timestamp": r[1],
+            "pod_id": r[2],
+        }
+        for r in rows
+    ]
+
+
+def _get_intraday_order_state(
+    conn: duckdb.DuckDBPyConnection,
+    pod_id: str = "default",
+) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT
+            symbol,
+            partial_tp_order_id,
+            oco_order_id,
+            oco_tp_order_id,
+            oco_stop_order_id,
+            remaining_qty,
+            tp_status,
+            oco_tp_status,
+            stop_status,
+            last_checked_at,
+            updated_at
+        FROM intraday_order_state
+        WHERE pod_id = ?
+        ORDER BY symbol
+        """,
+        [pod_id],
+    ).fetchall()
+    return [
+        {
+            "symbol": r[0],
+            "partial_tp_order_id": r[1],
+            "oco_order_id": r[2],
+            "oco_tp_order_id": r[3],
+            "oco_stop_order_id": r[4],
+            "remaining_qty": float(r[5]) if r[5] is not None else 0.0,
+            "tp_status": r[6] or "",
+            "oco_tp_status": r[7] or "",
+            "stop_status": r[8] or "",
+            "last_checked_at": r[9],
+            "updated_at": r[10],
+        }
+        for r in rows
+    ]
 
 
 def _get_snapshots_for_range(
@@ -387,6 +537,31 @@ def generate_daily_report(
         lines.append("- Regime: N/A (no LLM decision recorded)")
     lines.append("")
 
+    # Decisions (LLM vs Overlay)
+    decisions = _get_decisions_for_date(conn, target_date)
+    lines.append("## Decisions")
+    lines.append("")
+    if decisions:
+        lines.append(
+            "| Decision ID | Time | Type | Model | Signals | Regime | Confidence |"
+        )
+        lines.append(
+            "|-------------|------|------|-------|---------|--------|------------|"
+        )
+        for d in decisions:
+            lines.append(
+                f"| {d['decision_id']} "
+                f"| {d['created_at']} "
+                f"| {d['decision_type']} "
+                f"| {d['model']} "
+                f"| {d['num_signals']} "
+                f"| {d['market_regime']} "
+                f"| {d['regime_confidence']:.2f} |"
+            )
+    else:
+        lines.append("No decisions recorded for this date.")
+    lines.append("")
+
     # Portfolio Summary
     snap = _get_snapshot_for_date(conn, target_date)
     lines.append("## Portfolio Summary")
@@ -454,10 +629,10 @@ def generate_daily_report(
     trades = _get_trades_for_date(conn, target_date)
     if trades:
         lines.append(
-            "| Symbol | Action | Shares | Price | Notional | Conviction | Reasoning |"
+            "| Symbol | Action | Shares | Price | Notional | Strategy | Batch | Exit | Conviction | Reasoning |"
         )
         lines.append(
-            "|--------|--------|--------|-------|----------|------------|-----------|"
+            "|--------|--------|--------|-------|----------|----------|-------|------|------------|-----------|"
         )
         for t in trades:
             reasoning_short = (
@@ -471,11 +646,79 @@ def generate_daily_report(
                 f"| {t['shares']:.2f} "
                 f"| {_fmt_money(t['price'])} "
                 f"| {_fmt_money(t['notional'])} "
+                f"| {t['strategy_id'] or '—'} "
+                f"| {t['entry_batch'] if t['entry_batch'] is not None else '—'} "
+                f"| {t['exit_reason'] or '—'} "
                 f"| {t['conviction']} "
                 f"| {reasoning_short} |"
             )
     else:
         lines.append("No trades executed today.")
+    lines.append("")
+
+    # Intraday data proof
+    lines.append("## Intraday Data")
+    lines.append("")
+    intraday_bars = _get_intraday_bars_for_date(conn, target_date)
+    if intraday_bars:
+        lines.append("| Symbol | Timestamp | Close | RSI | MACD | ATR |")
+        lines.append("|--------|-----------|-------|-----|------|-----|")
+        for row in intraday_bars:
+            rsi = f"{row['rsi_14']:.2f}" if row["rsi_14"] is not None else "—"
+            macd = f"{row['macd']:.4f}" if row["macd"] is not None else "—"
+            atr = f"{row['atr_14']:.4f}" if row["atr_14"] is not None else "—"
+            lines.append(
+                f"| {row['symbol']} "
+                f"| {row['timestamp']} "
+                f"| {_fmt_money(row['close']) if row['close'] is not None else '—'} "
+                f"| {rsi} "
+                f"| {macd} "
+                f"| {atr} |"
+            )
+    else:
+        lines.append("No intraday bars recorded for this date.")
+    lines.append("")
+
+    intraday_snaps = _get_intraday_snapshots_for_date(conn, target_date)
+    lines.append("## Intraday Context Snapshots")
+    lines.append("")
+    if intraday_snaps:
+        lines.append("| Snapshot ID | Timestamp | Pod |")
+        lines.append("|-------------|-----------|-----|")
+        for snap_row in intraday_snaps:
+            lines.append(
+                f"| {snap_row['snapshot_id']} "
+                f"| {snap_row['timestamp']} "
+                f"| {snap_row['pod_id']} |"
+            )
+    else:
+        lines.append("No intraday context snapshots recorded.")
+    lines.append("")
+
+    intraday_orders = _get_intraday_order_state(conn)
+    lines.append("## Intraday Order State")
+    lines.append("")
+    if intraday_orders:
+        lines.append(
+            "| Symbol | Partial TP | OCO TP | OCO Stop | Rem Qty | TP Status | OCO TP Status | Stop Status | Last Check |"
+        )
+        lines.append(
+            "|--------|------------|--------|----------|---------|-----------|---------------|-------------|-----------|"
+        )
+        for order in intraday_orders:
+            lines.append(
+                f"| {order['symbol']} "
+                f"| {order['partial_tp_order_id'] or '—'} "
+                f"| {order['oco_tp_order_id'] or '—'} "
+                f"| {order['oco_stop_order_id'] or '—'} "
+                f"| {order['remaining_qty']:.2f} "
+                f"| {order['tp_status'] or '—'} "
+                f"| {order['oco_tp_status'] or '—'} "
+                f"| {order['stop_status'] or '—'} "
+                f"| {order['last_checked_at'] or '—'} |"
+            )
+    else:
+        lines.append("No intraday order state recorded.")
     lines.append("")
 
     # Performance Metrics
@@ -492,6 +735,30 @@ def generate_daily_report(
     lines.append(f"| Calmar Ratio | {calmar:.2f} | > 0.50 |")
     lines.append(f"| Max Drawdown | {_fmt_pct(metrics['max_drawdown'])} | < -15% |")
     lines.append(f"| Win Rate | {_fmt_pct(metrics['win_rate'])} | — |")
+    lines.append("")
+
+    # Strategy-level performance
+    strategy_perf = compute_strategy_performance(
+        conn,
+        start_date=target_date,
+        end_date=target_date,
+    )
+    lines.append("## Strategy Performance")
+    lines.append("")
+    if strategy_perf:
+        lines.append("| Strategy | Realized P&L | Win Rate | Trades | Wins | Losses |")
+        lines.append("|----------|--------------|----------|--------|------|--------|")
+        for row in strategy_perf:
+            lines.append(
+                f"| {row['strategy_id']} "
+                f"| {_fmt_money(row['realized_pnl'])} "
+                f"| {_fmt_pct(row['win_rate'])} "
+                f"| {row['trades']} "
+                f"| {row['wins']} "
+                f"| {row['losses']} |"
+            )
+    else:
+        lines.append("No strategy-level trades recorded for this date.")
     lines.append("")
 
     # Benchmark Comparison
@@ -624,10 +891,10 @@ def generate_weekly_report(
     lines.append("")
     if trades:
         lines.append(
-            "| Date | Symbol | Action | Shares | Price | Notional | Conviction |"
+            "| Date | Symbol | Action | Shares | Price | Notional | Strategy | Exit | Conviction |"
         )
         lines.append(
-            "|------|--------|--------|--------|-------|----------|------------|"
+            "|------|--------|--------|--------|-------|----------|----------|------|------------|"
         )
         for t in trades:
             lines.append(
@@ -637,10 +904,36 @@ def generate_weekly_report(
                 f"| {t['shares']:.2f} "
                 f"| {_fmt_money(t['price'])} "
                 f"| {_fmt_money(t['notional'])} "
+                f"| {t['strategy_id'] or '—'} "
+                f"| {t['exit_reason'] or '—'} "
                 f"| {t['conviction']} |"
             )
     else:
         lines.append("No trades executed this week.")
+    lines.append("")
+
+    # Strategy performance
+    strategy_perf = compute_strategy_performance(
+        conn,
+        start_date=monday,
+        end_date=sunday,
+    )
+    lines.append("## Strategy Performance")
+    lines.append("")
+    if strategy_perf:
+        lines.append("| Strategy | Realized P&L | Win Rate | Trades | Wins | Losses |")
+        lines.append("|----------|--------------|----------|--------|------|--------|")
+        for row in strategy_perf:
+            lines.append(
+                f"| {row['strategy_id']} "
+                f"| {_fmt_money(row['realized_pnl'])} "
+                f"| {_fmt_pct(row['win_rate'])} "
+                f"| {row['trades']} "
+                f"| {row['wins']} "
+                f"| {row['losses']} |"
+            )
+    else:
+        lines.append("No strategy-level trades recorded for this week.")
     lines.append("")
 
     # Position changes
@@ -776,6 +1069,29 @@ def generate_monthly_report(
     lines.append(f"| Win Rate | {_fmt_pct(metrics['win_rate'])} | — |")
     lines.append(f"| Total Trades | {metrics['total_trades']} | — |")
     lines.append(f"| Avg Trade P&L | {_fmt_money(metrics['avg_trade_pnl'])} | — |")
+    lines.append("")
+
+    strategy_perf = compute_strategy_performance(
+        conn,
+        start_date=first_day,
+        end_date=last_day,
+    )
+    lines.append("## Strategy Performance")
+    lines.append("")
+    if strategy_perf:
+        lines.append("| Strategy | Realized P&L | Win Rate | Trades | Wins | Losses |")
+        lines.append("|----------|--------------|----------|--------|------|--------|")
+        for row in strategy_perf:
+            lines.append(
+                f"| {row['strategy_id']} "
+                f"| {_fmt_money(row['realized_pnl'])} "
+                f"| {_fmt_pct(row['win_rate'])} "
+                f"| {row['trades']} "
+                f"| {row['wins']} "
+                f"| {row['losses']} |"
+            )
+    else:
+        lines.append("No strategy-level trades recorded for this month.")
     lines.append("")
 
     # Trade Statistics by Conviction

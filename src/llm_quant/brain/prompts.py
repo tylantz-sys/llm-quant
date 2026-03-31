@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 _PROMPTS_SUBDIR = "prompts"
 _SYSTEM_TEMPLATE = "trader_system.md"
 _DECISION_TEMPLATE = "trader_decision.md"
+_OVERLAY_SYSTEM_TEMPLATE = "trader_overlay_system.md"
+_OVERLAY_DECISION_TEMPLATE = "trader_overlay_decision.md"
 
 
 def _get_prompts_dir(config_dir: Path | None = None) -> Path:
@@ -86,6 +88,21 @@ def load_system_prompt(config_dir: Path | None = None) -> str:
     return content
 
 
+def load_overlay_system_prompt(config_dir: Path | None = None) -> str:
+    """Load the overlay system prompt template."""
+    prompts_dir = _get_prompts_dir(config_dir)
+    template_path = prompts_dir / _OVERLAY_SYSTEM_TEMPLATE
+    if not template_path.is_file():
+        raise FileNotFoundError(f"Overlay system prompt not found: {template_path}")
+    content = template_path.read_text(encoding="utf-8")
+    logger.debug(
+        "Loaded overlay system prompt from %s (%d chars)",
+        template_path,
+        len(content),
+    )
+    return content
+
+
 def render_decision_prompt(
     context: MarketContext,
     config_dir: Path | None = None,
@@ -140,5 +157,37 @@ def render_decision_prompt(
         len(rendered),
         len(context.positions),
         len(context.market_data),
+    )
+    return rendered
+
+
+def render_overlay_prompt(
+    context: MarketContext,
+    candidate_signals: list[dict],
+    config_dir: Path | None = None,
+) -> str:
+    """Render the overlay decision prompt with candidate signals."""
+    prompts_dir = _get_prompts_dir(config_dir)
+    env = _build_jinja_env(prompts_dir)
+
+    try:
+        template = env.get_template(_OVERLAY_DECISION_TEMPLATE)
+    except TemplateNotFound as err:
+        raise FileNotFoundError(
+            f"Overlay prompt template '{_OVERLAY_DECISION_TEMPLATE}'"
+            f" not found in {prompts_dir}"
+        ) from err
+
+    template_vars = dataclasses.asdict(context)
+    template_vars["positions"] = context.positions
+    template_vars["market_data"] = context.market_data
+    template_vars["candidate_signals"] = candidate_signals
+
+    rendered = template.render(**template_vars)
+    logger.debug(
+        "Rendered overlay prompt for %s (%d chars, %d candidates)",
+        context.date,
+        len(rendered),
+        len(candidate_signals),
     )
     return rendered

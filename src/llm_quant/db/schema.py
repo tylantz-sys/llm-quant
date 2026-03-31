@@ -7,7 +7,7 @@ import duckdb
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 8
 
 DDL_STATEMENTS = [
     """
@@ -96,6 +96,9 @@ DDL_STATEMENTS = [
         notional DOUBLE NOT NULL,
         conviction VARCHAR,
         reasoning TEXT,
+        strategy_id VARCHAR,
+        entry_batch INTEGER,
+        exit_reason VARCHAR,
         llm_decision_id INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         prev_hash VARCHAR NOT NULL DEFAULT '',
@@ -110,6 +113,7 @@ DDL_STATEMENTS = [
         decision_id INTEGER PRIMARY KEY,
         date DATE NOT NULL,
         pod_id VARCHAR NOT NULL DEFAULT 'default',
+        decision_type VARCHAR NOT NULL DEFAULT 'llm',
         model VARCHAR NOT NULL,
         prompt_tokens INTEGER,
         completion_tokens INTEGER,
@@ -119,6 +123,71 @@ DDL_STATEMENTS = [
         regime_confidence DOUBLE,
         num_signals INTEGER,
         raw_response TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS market_data_intraday (
+        symbol VARCHAR NOT NULL,
+        timestamp TIMESTAMP NOT NULL,
+        open DOUBLE,
+        high DOUBLE,
+        low DOUBLE,
+        close DOUBLE,
+        volume BIGINT,
+        vwap DOUBLE,
+        sma_20 DOUBLE,
+        sma_50 DOUBLE,
+        rsi_14 DOUBLE,
+        macd DOUBLE,
+        macd_signal DOUBLE,
+        macd_hist DOUBLE,
+        atr_14 DOUBLE,
+        PRIMARY KEY (symbol, timestamp)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS intraday_position_state (
+        pod_id VARCHAR NOT NULL DEFAULT 'default',
+        symbol VARCHAR NOT NULL,
+        entry_batch INTEGER NOT NULL DEFAULT 0,
+        entry_price DOUBLE,
+        peak_price DOUBLE,
+        partial_exit_taken BOOLEAN DEFAULT FALSE,
+        last_entry_ts TIMESTAMP,
+        last_exit_ts TIMESTAMP,
+        cooldown_until_ts TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (pod_id, symbol)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS intraday_order_state (
+        pod_id VARCHAR NOT NULL DEFAULT 'default',
+        symbol VARCHAR NOT NULL,
+        partial_tp_order_id VARCHAR,
+        oco_order_id VARCHAR,
+        oco_tp_order_id VARCHAR,
+        oco_stop_order_id VARCHAR,
+        hwm DOUBLE,
+        remaining_qty DOUBLE,
+        tp_status VARCHAR,
+        oco_tp_status VARCHAR,
+        stop_status VARCHAR,
+        last_checked_at TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (pod_id, symbol)
+    )
+    """,
+    """
+    CREATE SEQUENCE IF NOT EXISTS seq_intraday_snapshot_id START 1
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS intraday_context_snapshots (
+        snapshot_id INTEGER PRIMARY KEY,
+        timestamp TIMESTAMP NOT NULL,
+        pod_id VARCHAR NOT NULL DEFAULT 'default',
+        context_json TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
@@ -353,6 +422,175 @@ def _migrate_v4_to_v5(conn: duckdb.DuckDBPyConnection) -> None:
     logger.info("Migrated schema to v5: cot_weekly table added.")
 
 
+def _migrate_v5_to_v6(conn: duckdb.DuckDBPyConnection) -> None:
+    """Add intraday tables + trade metadata columns."""
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    if "market_data_intraday" not in tables:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_data_intraday (
+                symbol VARCHAR NOT NULL,
+                timestamp TIMESTAMP NOT NULL,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                volume BIGINT,
+                vwap DOUBLE,
+                sma_20 DOUBLE,
+                sma_50 DOUBLE,
+                rsi_14 DOUBLE,
+                macd DOUBLE,
+                macd_signal DOUBLE,
+                macd_hist DOUBLE,
+                atr_14 DOUBLE,
+                PRIMARY KEY (symbol, timestamp)
+            )
+            """)
+    if "intraday_position_state" not in tables:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS intraday_position_state (
+                pod_id VARCHAR NOT NULL DEFAULT 'default',
+                symbol VARCHAR NOT NULL,
+                entry_batch INTEGER NOT NULL DEFAULT 0,
+                entry_price DOUBLE,
+                peak_price DOUBLE,
+                partial_exit_taken BOOLEAN DEFAULT FALSE,
+                last_entry_ts TIMESTAMP,
+                last_exit_ts TIMESTAMP,
+                cooldown_until_ts TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (pod_id, symbol)
+            )
+            """)
+    if "intraday_context_snapshots" not in tables:
+        conn.execute("CREATE SEQUENCE IF NOT EXISTS seq_intraday_snapshot_id START 1")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS intraday_context_snapshots (
+                snapshot_id INTEGER PRIMARY KEY,
+                timestamp TIMESTAMP NOT NULL,
+                pod_id VARCHAR NOT NULL DEFAULT 'default',
+                context_json TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+
+    # Add columns to trades table if missing
+    trade_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'trades'"
+        ).fetchall()
+    }
+    if "strategy_id" not in trade_cols:
+        conn.execute("ALTER TABLE trades ADD COLUMN strategy_id VARCHAR")
+    if "entry_batch" not in trade_cols:
+        conn.execute("ALTER TABLE trades ADD COLUMN entry_batch INTEGER")
+    if "exit_reason" not in trade_cols:
+        conn.execute("ALTER TABLE trades ADD COLUMN exit_reason VARCHAR")
+
+    logger.info("Migrated schema to v6: intraday tables + trade metadata added.")
+
+
+def _migrate_v6_to_v7(conn: duckdb.DuckDBPyConnection) -> None:
+    """Add intraday_order_state table for OCO/trailing management."""
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    if "intraday_order_state" not in tables:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS intraday_order_state (
+                pod_id VARCHAR NOT NULL DEFAULT 'default',
+                symbol VARCHAR NOT NULL,
+                tp_order_id VARCHAR,
+                stop_order_id VARCHAR,
+                hwm DOUBLE,
+                remaining_qty DOUBLE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (pod_id, symbol)
+            )
+            """)
+    logger.info("Migrated schema to v7: intraday_order_state added.")
+
+
+def _migrate_v7_to_v8(conn: duckdb.DuckDBPyConnection) -> None:
+    """Add decision_type + intraday order status columns."""
+    # decision_type for llm_decisions
+    decision_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'llm_decisions'"
+        ).fetchall()
+    }
+    if "decision_type" not in decision_cols:
+        conn.execute(
+            "ALTER TABLE llm_decisions "
+            "ADD COLUMN decision_type VARCHAR DEFAULT 'llm'"
+        )
+        conn.execute(
+            "UPDATE llm_decisions SET decision_type = 'llm' "
+            "WHERE decision_type IS NULL"
+        )
+
+    # intraday_order_state columns
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    if "intraday_order_state" in tables:
+        order_cols = {
+            row[0]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'intraday_order_state'"
+            ).fetchall()
+        }
+        additions = [
+            ("partial_tp_order_id", "VARCHAR"),
+            ("oco_order_id", "VARCHAR"),
+            ("oco_tp_order_id", "VARCHAR"),
+            ("oco_stop_order_id", "VARCHAR"),
+            ("tp_status", "VARCHAR"),
+            ("oco_tp_status", "VARCHAR"),
+            ("stop_status", "VARCHAR"),
+            ("last_checked_at", "TIMESTAMP"),
+        ]
+        for col, col_type in additions:
+            if col not in order_cols:
+                conn.execute(
+                    f"ALTER TABLE intraday_order_state ADD COLUMN {col} {col_type}"
+                )
+
+        # Backfill from legacy column names if present.
+        if "tp_order_id" in order_cols:
+            conn.execute(
+                "UPDATE intraday_order_state "
+                "SET partial_tp_order_id = tp_order_id "
+                "WHERE partial_tp_order_id IS NULL"
+            )
+        if "stop_order_id" in order_cols:
+            conn.execute(
+                "UPDATE intraday_order_state "
+                "SET oco_stop_order_id = stop_order_id "
+                "WHERE oco_stop_order_id IS NULL"
+            )
+
+    logger.info(
+        "Migrated schema to v8: decision_type + intraday order status columns added."
+    )
+
+
 def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
     """Create all tables in DuckDB. Returns the connection."""
     db_path = Path(db_path)
@@ -375,6 +613,12 @@ def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
         _migrate_v3_to_v4(conn)
     if old_version < 5:
         _migrate_v4_to_v5(conn)
+    if old_version < 6:
+        _migrate_v5_to_v6(conn)
+    if old_version < 7:
+        _migrate_v6_to_v7(conn)
+    if old_version < 8:
+        _migrate_v7_to_v8(conn)
 
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)",

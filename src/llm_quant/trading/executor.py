@@ -37,6 +37,9 @@ class ExecutedTrade:
     notional: float  # abs(shares * price)
     conviction: str
     reasoning: str
+    strategy_id: str = ""
+    entry_batch: int = 1
+    exit_reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +196,9 @@ def _execute_buy(
         notional=cost,
         conviction=signal.conviction.value,
         reasoning=signal.reasoning,
+        strategy_id=signal.strategy_id,
+        entry_batch=signal.entry_batch,
+        exit_reason=signal.exit_reason,
     )
 
 
@@ -245,6 +251,9 @@ def _execute_sell(
         notional=proceeds,
         conviction=signal.conviction.value,
         reasoning=signal.reasoning,
+        strategy_id=signal.strategy_id,
+        entry_batch=signal.entry_batch,
+        exit_reason=signal.exit_reason,
     )
 
 
@@ -272,6 +281,9 @@ def _execute_close(
         notional=proceeds,
         conviction=signal.conviction.value,
         reasoning=signal.reasoning,
+        strategy_id=signal.strategy_id,
+        entry_batch=signal.entry_batch,
+        exit_reason=signal.exit_reason,
     )
 
 

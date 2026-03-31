@@ -52,10 +52,10 @@ def test_indexes_created(pod_db):
     assert "idx_decisions_pod_date" in indexes
 
 
-def test_schema_version_is_5(pod_db):
-    """Verify schema_meta shows version 5 (v5 adds cot_weekly table)."""
+def test_schema_version_is_8(pod_db):
+    """Verify schema_meta shows version 8 (intraday + decision_type upgrades)."""
     row = pod_db.execute(
         "SELECT value FROM schema_meta WHERE key = 'version'"
     ).fetchone()
     assert row is not None
-    assert row[0] == "5"
+    assert row[0] == "8"

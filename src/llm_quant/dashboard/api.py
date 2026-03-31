@@ -138,6 +138,7 @@ def list_runs(
             d.created_at,
             d.date,
             d.pod_id,
+            d.decision_type,
             d.model,
             d.market_regime,
             d.regime_confidence,
@@ -158,6 +159,7 @@ def list_runs(
             d.created_at,
             d.date,
             d.pod_id,
+            d.decision_type,
             d.model,
             d.market_regime,
             d.regime_confidence,
@@ -185,6 +187,7 @@ def get_decision(decision_id: int) -> dict[str, Any]:
             decision_id,
             date,
             pod_id,
+            decision_type,
             model,
             prompt_tokens,
             completion_tokens,
@@ -282,6 +285,9 @@ def list_trades(
             notional,
             conviction,
             reasoning,
+            strategy_id,
+            entry_batch,
+            exit_reason,
             llm_decision_id,
             broker_order_id,
             broker_status,
@@ -295,6 +301,36 @@ def list_trades(
         cache_key=f"trades:{pod_id}:{limit}",
         query=query,
         params=[pod_id, limit],
+    )
+
+
+@app.get("/intraday-orders")
+def list_intraday_orders(
+    pod_id: str = "default",
+) -> dict[str, Any]:
+    query = """
+        SELECT
+            pod_id,
+            symbol,
+            partial_tp_order_id,
+            oco_order_id,
+            oco_tp_order_id,
+            oco_stop_order_id,
+            hwm,
+            remaining_qty,
+            tp_status,
+            oco_tp_status,
+            stop_status,
+            last_checked_at,
+            updated_at
+        FROM intraday_order_state
+        WHERE pod_id = ?
+        ORDER BY symbol
+    """
+    return _query_with_cache(
+        cache_key=f"intraday_orders:{pod_id}",
+        query=query,
+        params=[pod_id],
     )
 
 

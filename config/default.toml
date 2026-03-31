@@ -12,6 +12,23 @@ max_trades_per_session = 5
 [data]
 lookback_days = 504  # 2 years of trading days
 fetch_timeout = 30
+db_lock_timeout_seconds = 30.0
+db_lock_retry_seconds = 0.5
+db_upsert_timeout_seconds = 30.0
+db_upsert_max_retries = 2
+db_upsert_retry_seconds = 1.0
+
+[execution]
+intraday_enabled = true
+intraday_timeframe_minutes = 5
+intraday_lookback_days = 10
+claude_overlay_only = true
+profit_take_partial_pct = 0.02
+profit_take_partial_size = 0.50
+profit_take_remainder_tp_mult = 2.0
+trailing_stop_pct = 0.015
+scale_in_tranches = 3
+reentry_cooldown_bars = 1
 
 [logging]
 level = "INFO"

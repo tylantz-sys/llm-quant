@@ -62,52 +62,52 @@ def log_trades(
         assert row is not None
         trade_id: int = row[0]
 
-        # DuckDB DEFAULT fills created_at, so we fetch the timestamp
-        # after a dummy-free insert by computing it ourselves.
         trade_cols = [c[0] for c in conn.execute("DESCRIBE trades").fetchall()]
+        insert_cols = [
+            "trade_id",
+            "date",
+            "symbol",
+            "action",
+            "shares",
+            "price",
+            "notional",
+            "conviction",
+            "reasoning",
+            "llm_decision_id",
+        ]
+        insert_vals = [
+            trade_id,
+            trade_date,
+            trade.symbol,
+            trade.action,
+            trade.shares,
+            trade.price,
+            trade.notional,
+            trade.conviction,
+            trade.reasoning,
+            decision_id,
+        ]
+
         if "pod_id" in trade_cols:
-            conn.execute(
-                """
-                INSERT INTO trades (
-                    trade_id, date, pod_id, symbol, action, shares, price,
-                    notional, conviction, reasoning, llm_decision_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    trade_id,
-                    trade_date,
-                    pod_id,
-                    trade.symbol,
-                    trade.action,
-                    trade.shares,
-                    trade.price,
-                    trade.notional,
-                    trade.conviction,
-                    trade.reasoning,
-                    decision_id,
-                ],
-            )
-        else:
-            conn.execute(
-                """
-                INSERT INTO trades (
-                    trade_id, date, symbol, action, shares, price,
-                    notional, conviction, reasoning, llm_decision_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    trade_id,
-                    trade_date,
-                    trade.symbol,
-                    trade.action,
-                    trade.shares,
-                    trade.price,
-                    trade.notional,
-                    trade.conviction,
-                    trade.reasoning,
-                    decision_id,
-                ],
-            )
+            insert_cols.insert(2, "pod_id")
+            insert_vals.insert(2, pod_id)
+
+        if "strategy_id" in trade_cols:
+            insert_cols.append("strategy_id")
+            insert_vals.append(trade.strategy_id or None)
+        if "entry_batch" in trade_cols:
+            insert_cols.append("entry_batch")
+            insert_vals.append(trade.entry_batch)
+        if "exit_reason" in trade_cols:
+            insert_cols.append("exit_reason")
+            insert_vals.append(trade.exit_reason or None)
+
+        cols_sql = ", ".join(insert_cols)
+        placeholders = ", ".join(["?"] * len(insert_cols))
+        conn.execute(
+            f"INSERT INTO trades ({cols_sql}) VALUES ({placeholders})",
+            insert_vals,
+        )
 
         # Retrieve the server-generated created_at, then compute hash
         created_row = conn.execute(

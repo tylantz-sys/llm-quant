@@ -138,7 +138,7 @@ def _parse_signal(raw_signal: dict[str, Any]) -> TradeSignal | None:
         )
         target_weight = 0.0
 
-    target_weight = _clamp(target_weight, 0.0, 0.10)
+    target_weight = _clamp(target_weight, 0.0, 1.0)
 
     # Parse stop_loss with validation
     try:
@@ -162,6 +162,39 @@ def _parse_signal(raw_signal: dict[str, Any]) -> TradeSignal | None:
     # Reasoning (optional, default to empty string)
     reasoning = str(raw_signal.get("reasoning", ""))
 
+    # Parse take_profit with validation
+    try:
+        take_profit = float(raw_signal.get("take_profit", 0.0))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Signal for %s has invalid take_profit: %r; defaulting to 0.0",
+            symbol,
+            raw_signal.get("take_profit"),
+        )
+        take_profit = 0.0
+
+    if take_profit < 0:
+        logger.warning(
+            "Signal for %s has negative take_profit %.4f; setting to 0.0",
+            symbol,
+            take_profit,
+        )
+        take_profit = 0.0
+
+    strategy_id = str(raw_signal.get("strategy_id", "") or "")
+    exit_reason = str(raw_signal.get("exit_reason", "") or "")
+    entry_batch_raw = raw_signal.get("entry_batch", 1)
+    try:
+        entry_batch = int(entry_batch_raw)
+    except (TypeError, ValueError):
+        entry_batch = 1
+    if entry_batch < 1:
+        entry_batch = 1
+
+    metadata = raw_signal.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
     return TradeSignal(
         symbol=symbol,
         action=action,
@@ -169,6 +202,11 @@ def _parse_signal(raw_signal: dict[str, Any]) -> TradeSignal | None:
         target_weight=round(target_weight, 4),
         stop_loss=round(stop_loss, 2),
         reasoning=reasoning,
+        take_profit=round(take_profit, 2),
+        strategy_id=strategy_id,
+        entry_batch=entry_batch,
+        exit_reason=exit_reason,
+        metadata=metadata,
     )
 
 

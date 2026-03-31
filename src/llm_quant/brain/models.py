@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
+from typing import Any
 
 
 class Action(StrEnum):
@@ -34,6 +35,11 @@ class TradeSignal:
     target_weight: float
     stop_loss: float
     reasoning: str
+    take_profit: float = 0.0
+    strategy_id: str = ""
+    entry_batch: int = 1
+    exit_reason: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -44,6 +50,8 @@ class TradingDecision:
     regime_reasoning: str
     signals: list[TradeSignal]
     portfolio_commentary: str
+    decision_type: str = "llm"
+    pod_id: str = "default"
     model: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0

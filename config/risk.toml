@@ -44,6 +44,13 @@ deviation_buffer = 0.20           # 20% above ATR-implied max triggers alert
 atr_period = 14                   # standard ATR period (equities, fixed income)
 atr_period_crypto = 7             # shorter ATR period for crypto (faster regime response)
 
+# Take-profit (override LLM) + end-of-day flatten controls
+take_profit_mode = "pct"          # pct | rr
+take_profit_pct = 0.03             # fixed take-profit percent (3%)
+take_profit_rr = 2.0               # risk-reward multiple (if mode = rr)
+eod_flatten_enabled = true         # force flat at 3:55pm ET
+eod_flatten_time = "15:55"         # US/Eastern
+
 # Crypto: Higher volatility → tighter position weight, wider stop-loss
 crypto_max_position_weight = 0.05   # 5%  (vs 12% default)
 crypto_default_stop_loss_pct = 0.15 # 15% (vs 5% default — wider to avoid noise-triggered exits)
@@ -81,6 +88,13 @@ max_drawdown_pct = 0.30              # 30% (vs 15% Track A — the key relaxatio
 crypto_max_position_weight = 0.08    # 8%  (vs 5% Track A)
 crypto_default_stop_loss_pct = 0.20  # 20% (wider — crypto overnight gaps are large)
 leveraged_etf_max_position_weight = 0.10  # 10% — leveraged ETFs capped below general limit
+
+# Track B take-profit + end-of-day flatten controls
+take_profit_mode = "pct"
+take_profit_pct = 0.03
+take_profit_rr = 2.0
+eod_flatten_enabled = true
+eod_flatten_time = "15:55"
 
 # =============================================================================
 # TRACK C — STRUCTURAL ARB / EVENT-DRIVEN

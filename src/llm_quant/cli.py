@@ -1,9 +1,11 @@
 """CLI entry point for llm-quant paper trading system."""
 
+import dataclasses
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time as dt_time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
 import typer
@@ -19,6 +21,8 @@ app = typer.Typer(
 console = Console()
 
 logger = logging.getLogger("llm_quant")
+
+_ET = ZoneInfo("America/New_York")
 
 # ---------------------------------------------------------------------------
 # Pods sub-command group
@@ -54,6 +58,14 @@ def _get_db_path(config=None):
     return Path(config.general.db_path)
 
 
+def _parse_eod_time(value: str) -> dt_time:
+    parts = value.split(":")
+    if len(parts) != 2:
+        raise ValueError("EOD time must be HH:MM")
+    hour, minute = (int(p) for p in parts)
+    return dt_time(hour=hour, minute=minute)
+
+
 # ---------------------------------------------------------------------------
 # init / fetch (unchanged — not pod-scoped)
 # ---------------------------------------------------------------------------
@@ -86,7 +98,13 @@ def fetch():
 
     from llm_quant.data.fetcher import fetch_ohlcv
     from llm_quant.data.indicators import compute_indicators
-    from llm_quant.data.store import upsert_market_data
+    from llm_quant.data.store import (
+        get_intraday_data,
+        get_market_data,
+        upsert_intraday_data,
+        upsert_market_data,
+    )
+    from llm_quant.data.alpaca_intraday import fetch_intraday_ohlcv
     from llm_quant.data.universe import get_tradeable_symbols
     from llm_quant.db.schema import get_connection
 
@@ -121,25 +139,93 @@ def fetch():
 # --- run - pod-aware -------------------------------------------------------
 
 
-def _run_single_pod(pod_id: str, *, dry_run: bool = False) -> None:
+def _run_single_pod(
+    pod_id: str,
+    *,
+    dry_run: bool = False,
+    broker: str = "paper",
+) -> None:
     """Execute a full trading cycle for a single pod."""
     from llm_quant.brain.context import build_market_context
     from llm_quant.brain.engine import SignalEngine
+    from llm_quant.brain.models import Action
+    from llm_quant.brain.overlay import OverlayEngine
+    from llm_quant.broker.alpaca import AlpacaClient, AlpacaError
+    from llm_quant.broker.intraday_orders import (
+        load_order_states,
+        place_oco_exits_for_buys,
+        reconcile_orders,
+        update_trailing_stops,
+        upsert_order_states,
+    )
+    from llm_quant.broker.rth import should_run_intraday
     from llm_quant.data.fetcher import fetch_ohlcv
     from llm_quant.data.indicators import compute_indicators
-    from llm_quant.data.store import upsert_market_data
+    from llm_quant.data.store import (
+        get_intraday_data,
+        get_market_data,
+        upsert_intraday_data_with_retry,
+        upsert_market_data_with_retry,
+    )
     from llm_quant.data.universe import get_tradeable_symbols
+    from llm_quant.db.locks import acquire_file_lock
     from llm_quant.db.schema import get_connection
     from llm_quant.risk.manager import RiskManager
     from llm_quant.trading.executor import execute_signals
+    from llm_quant.trading.intraday import (
+        apply_reentry_cooldown,
+        apply_scale_in,
+        load_position_states,
+        log_intraday_context,
+        update_peak_prices,
+        update_state_from_trades,
+        upsert_position_states,
+    )
+    from llm_quant.trading.run_lock import acquire_run_lock, slot_for_time
+    from llm_quant.strategies.runtime import (
+        aggregate_strategy_signals,
+        generate_strategy_signals,
+        load_promoted_specs,
+        required_symbols,
+    )
     from llm_quant.trading.ledger import log_trades, save_portfolio_snapshot
     from llm_quant.trading.portfolio import Portfolio
 
     config = _get_config_for_pod(pod_id)
     db_path = _get_db_path(config)
+    run_lock = None
+    if config.execution.intraday_enabled:
+        slot = slot_for_time(
+            datetime.now(tz=UTC),
+            config.execution.intraday_timeframe_minutes,
+        )
+        run_lock = acquire_run_lock(pod_id, slot)
+        if run_lock is None:
+            console.print(
+                f"[yellow]Intraday slot {slot} already executed — skipping.[/yellow]"
+            )
+            return
 
     conn = get_connection(db_path)
     today = datetime.now(tz=UTC).date()
+
+    if config.execution.intraday_enabled:
+        try:
+            rth_client = AlpacaClient.from_env()
+            if not should_run_intraday(rth_client.is_market_open()):
+                console.print(
+                    "[yellow]RTH closed — skipped intraday run.[/yellow]"
+                )
+                conn.close()
+                if run_lock:
+                    run_lock.release()
+                return
+        except AlpacaError as exc:
+            console.print(f"[red]FAIL[/red] Alpaca clock check failed: {exc}")
+            conn.close()
+            if run_lock:
+                run_lock.release()
+            raise typer.Exit(1) from exc
 
     # Step 1: Fetch latest data
     symbols = get_tradeable_symbols(config)
@@ -149,24 +235,107 @@ def _run_single_pod(pod_id: str, *, dry_run: bool = False) -> None:
     df = fetch_ohlcv(symbols, lookback_days=config.data.lookback_days)
     if not df.is_empty():
         df = compute_indicators(df)
-        upsert_market_data(conn, df)
-        console.print(f"  [green]OK[/green] Updated {df['symbol'].n_unique()} symbols")
+        lock = acquire_file_lock(
+            Path("data") / "locks" / "daily_upsert.lock",
+            timeout_seconds=config.data.db_lock_timeout_seconds,
+            retry_seconds=config.data.db_lock_retry_seconds,
+        )
+        if lock is None:
+            console.print(
+                "  [yellow]WARN[/yellow] DB busy; skipping daily upsert this run"
+            )
+        else:
+            try:
+                upsert_market_data_with_retry(
+                    conn,
+                    df,
+                    max_retries=config.data.db_upsert_max_retries,
+                    retry_delay_seconds=config.data.db_upsert_retry_seconds,
+                    timeout_seconds=config.data.db_upsert_timeout_seconds,
+                )
+                console.print(
+                    f"  [green]OK[/green] Updated {df['symbol'].n_unique()} symbols"
+                )
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"  [yellow]WARN[/yellow] Daily upsert failed: {exc}")
+            finally:
+                lock.release()
     else:
         console.print(
             "  [yellow]WARN[/yellow] No new data fetched, using existing DB data"
         )
+
+    if config.execution.intraday_enabled:
+        console.print("  [bold]Intraday:[/bold] Fetching 5-min bars from Alpaca...")
+        try:
+            intraday_df = fetch_intraday_ohlcv(
+                symbols,
+                timeframe_minutes=config.execution.intraday_timeframe_minutes,
+                lookback_days=config.execution.intraday_lookback_days,
+                timeout=config.data.fetch_timeout,
+            )
+        except Exception as exc:
+            console.print(f"  [yellow]WARN[/yellow] Intraday fetch failed: {exc}")
+            intraday_df = None
+
+        if intraday_df is not None and not intraday_df.is_empty():
+            intraday_df = compute_indicators(intraday_df, time_col="timestamp")
+            lock = acquire_file_lock(
+                Path("data") / "locks" / "intraday_upsert.lock",
+                timeout_seconds=config.data.db_lock_timeout_seconds,
+                retry_seconds=config.data.db_lock_retry_seconds,
+            )
+            if lock is None:
+                console.print(
+                    "  [yellow]WARN[/yellow] DB busy; skipping intraday upsert"
+                )
+            else:
+                try:
+                    upsert_intraday_data_with_retry(
+                        conn,
+                        intraday_df,
+                        max_retries=config.data.db_upsert_max_retries,
+                        retry_delay_seconds=config.data.db_upsert_retry_seconds,
+                        timeout_seconds=config.data.db_upsert_timeout_seconds,
+                    )
+                    console.print(
+                        f"  [green]OK[/green] Intraday bars updated for "
+                        f"{intraday_df['symbol'].n_unique()} symbols"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    console.print(
+                        f"  [yellow]WARN[/yellow] Intraday upsert failed: {exc}"
+                    )
+                finally:
+                    lock.release()
+        else:
+            console.print(
+                "  [yellow]WARN[/yellow] No intraday data fetched, using existing DB data"
+            )
 
     # Step 2: Load portfolio
     console.print("[bold]Step 2/5:[/bold] Loading portfolio...")
     portfolio = Portfolio.from_db(conn, config.general.initial_capital, pod_id=pod_id)
 
     # Get latest prices for portfolio
-    latest = conn.execute("""
-        SELECT symbol, close as price FROM market_data_daily
-        WHERE (symbol, date) IN (
-            SELECT symbol, MAX(date) FROM market_data_daily GROUP BY symbol
-        )
-        """).pl()
+    if config.execution.intraday_enabled:
+        latest = conn.execute(
+            """
+            SELECT symbol, close as price FROM market_data_intraday
+            WHERE (symbol, timestamp) IN (
+                SELECT symbol, MAX(timestamp) FROM market_data_intraday GROUP BY symbol
+            )
+            """
+        ).pl()
+    else:
+        latest = conn.execute(
+            """
+            SELECT symbol, close as price FROM market_data_daily
+            WHERE (symbol, date) IN (
+                SELECT symbol, MAX(date) FROM market_data_daily GROUP BY symbol
+            )
+            """
+        ).pl()
     prices = dict(
         zip(
             latest["symbol"].to_list(),
@@ -182,12 +351,66 @@ def _run_single_pod(pod_id: str, *, dry_run: bool = False) -> None:
     )
 
     # Step 3: Build context and get Claude's signals
-    console.print("[bold]Step 3/5:[/bold] Consulting Claude...")
+    console.print("[bold]Step 3/5:[/bold] Generating signals...")
     portfolio_state = portfolio.to_snapshot_dict()
     context = build_market_context(conn, portfolio_state, config)
 
-    engine = SignalEngine(config)
-    decision = engine.get_signals(context)
+    if config.execution.claude_overlay_only:
+        specs = load_promoted_specs()
+        strategy_symbols = required_symbols(specs)
+        if config.execution.intraday_enabled:
+            start_ts = datetime.now(tz=UTC) - timedelta(
+                days=config.execution.intraday_lookback_days
+            )
+            indicators_df = get_intraday_data(conn, strategy_symbols, start_ts)
+            if "timestamp" in indicators_df.columns:
+                indicators_df = indicators_df.with_columns(
+                    indicators_df["timestamp"].alias("date")
+                )
+        else:
+            start_date = datetime.now(tz=UTC).date() - timedelta(
+                days=config.data.lookback_days
+            )
+            indicators_df = get_market_data(conn, strategy_symbols, start_date)
+
+        strategy_signals = generate_strategy_signals(
+            specs,
+            indicators_df,
+            portfolio,
+            prices,
+            datetime.now(tz=UTC).date(),
+        )
+        aggregated = aggregate_strategy_signals(
+            strategy_signals, max_position_weight=config.risk.max_position_weight
+        )
+        candidate_signals = [
+            {
+                "symbol": sig.symbol,
+                "action": sig.action.value,
+                "conviction": sig.conviction.value,
+                "target_weight": sig.target_weight,
+                "stop_loss": sig.stop_loss,
+                "take_profit": sig.take_profit,
+                "strategy_id": sig.strategy_id,
+                "reasoning": sig.reasoning,
+            }
+            for sig in aggregated
+        ]
+
+        overlay_engine = OverlayEngine(config)
+        decision = overlay_engine.get_overlay_signals(context, candidate_signals)
+        allowed = {sig.symbol for sig in aggregated}
+        decision.signals = [s for s in decision.signals if s.symbol in allowed]
+        decision_logger = SignalEngine(config)
+    else:
+        console.print("[bold]Step 3/5:[/bold] Consulting Claude...")
+        engine = SignalEngine(config)
+        decision = engine.get_signals(context)
+        decision_logger = engine
+
+    decision.pod_id = pod_id
+    if not getattr(decision, "decision_type", None):
+        decision.decision_type = "llm"
 
     # Display decision
     _display_decision(decision)
@@ -195,12 +418,62 @@ def _run_single_pod(pod_id: str, *, dry_run: bool = False) -> None:
     if dry_run:
         console.print("\n[yellow]DRY RUN[/yellow] -- no trades executed.")
         conn.close()
+        if run_lock:
+            run_lock.release()
         return
 
     # Step 4: Risk check and execute
     console.print("[bold]Step 4/5:[/bold] Risk check and execution...")
     risk_mgr = RiskManager(config)
-    approved, rejected = risk_mgr.filter_signals(decision.signals, portfolio, prices)
+
+    signals = decision.signals
+    now_ts = None
+    if config.execution.intraday_enabled:
+        now_row = conn.execute(
+            "SELECT MAX(timestamp) FROM market_data_intraday"
+        ).fetchone()
+        now_ts = now_row[0] if now_row and now_row[0] else datetime.now(tz=UTC)
+
+        states = load_position_states(conn, pod_id)
+        update_peak_prices(portfolio, prices, states)
+
+        entry_signals = [s for s in signals if s.action == Action.BUY]
+        other_signals = [s for s in signals if s.action != Action.BUY]
+
+        entry_signals = apply_scale_in(
+            entry_signals,
+            portfolio,
+            states,
+            config.execution.scale_in_tranches,
+        )
+        entry_signals = apply_reentry_cooldown(
+            entry_signals,
+            states,
+            now_ts,
+            config.execution.intraday_timeframe_minutes,
+            config.execution.reentry_cooldown_bars,
+        )
+
+        signals = other_signals + entry_signals
+
+        # Log intraday context snapshot for audit
+        context_payload = {
+            "timestamp": str(now_ts),
+            "market_context": dataclasses.asdict(context),
+            "signals": [
+                {
+                    "symbol": s.symbol,
+                    "action": s.action.value,
+                    "target_weight": s.target_weight,
+                    "strategy_id": s.strategy_id,
+                    "exit_reason": s.exit_reason,
+                }
+                for s in signals
+            ],
+        }
+        log_intraday_context(conn, pod_id, now_ts, context_payload)
+
+    approved, rejected = risk_mgr.filter_signals(signals, portfolio, prices)
 
     if rejected:
         console.print(
@@ -211,12 +484,49 @@ def _run_single_pod(pod_id: str, *, dry_run: bool = False) -> None:
             reasons = ", ".join(c.message for c in failed)
             console.print(f"    {sig.symbol} {sig.action.value}: {reasons}")
 
+    alpaca_client = None
+    if broker.lower() == "alpaca":
+        try:
+            alpaca_client = AlpacaClient.from_env()
+        except AlpacaError as exc:
+            console.print(f"[red]FAIL[/red] Alpaca client init failed: {exc}")
+            conn.close()
+            raise typer.Exit(1) from exc
+
     if approved:
         executed = execute_signals(portfolio, approved, prices, portfolio.nav)
         console.print(f"  [green]OK[/green] Executed {len(executed)} trades")
 
+        if config.execution.intraday_enabled and now_ts is not None:
+            update_state_from_trades(states, executed, now_ts)
+            cooldown_delta = timedelta(
+                minutes=config.execution.intraday_timeframe_minutes
+                * config.execution.reentry_cooldown_bars
+            )
+            for state in states.values():
+                if state.last_exit_ts:
+                    state.cooldown_until_ts = state.last_exit_ts + cooldown_delta
+            upsert_position_states(conn, pod_id, states)
+
+        if alpaca_client and executed:
+            from llm_quant.broker.executor import submit_alpaca_orders
+
+            stop_losses = {sig.symbol: sig.stop_loss for sig in approved}
+            try:
+                submit_alpaca_orders(
+                    alpaca_client,
+                    executed,
+                    stop_losses,
+                    config.risk,
+                    use_brackets=not config.execution.intraday_enabled,
+                )
+            except AlpacaError as exc:
+                console.print(f"[red]FAIL[/red] Alpaca execution failed: {exc}")
+                conn.close()
+                raise typer.Exit(1) from exc
+
         # Log decision
-        decision_id = engine.log_decision(conn, decision)
+        decision_id = decision_logger.log_decision(conn, decision)
 
         # Log trades
         trade_ids = log_trades(conn, executed, today, decision_id, pod_id=pod_id)
@@ -224,12 +534,53 @@ def _run_single_pod(pod_id: str, *, dry_run: bool = False) -> None:
     else:
         console.print("  No trades to execute.")
 
+    if config.execution.intraday_enabled and alpaca_client:
+        order_states = load_order_states(conn, pod_id)
+        try:
+            positions = {
+                p.get("symbol", ""): float(p.get("qty", 0.0))
+                for p in alpaca_client.list_positions()
+            }
+        except AlpacaError as exc:
+            console.print(f"[yellow]WARN[/yellow] Alpaca positions failed: {exc}")
+            positions = {}
+
+        reconcile_orders(
+            alpaca_client,
+            order_states,
+            positions,
+            trailing_pct=config.execution.trailing_stop_pct,
+        )
+        update_trailing_stops(
+            alpaca_client,
+            order_states,
+            prices,
+            trailing_pct=config.execution.trailing_stop_pct,
+        )
+
+        if approved and executed:
+            stop_losses = {sig.symbol: sig.stop_loss for sig in approved}
+            place_oco_exits_for_buys(
+                alpaca_client,
+                order_states,
+                executed,
+                stop_losses,
+                partial_tp_pct=config.execution.profit_take_partial_pct,
+                partial_tp_size=config.execution.profit_take_partial_size,
+                remainder_tp_mult=config.execution.profit_take_remainder_tp_mult,
+                default_stop_loss_pct=config.risk.default_stop_loss_pct,
+            )
+
+        upsert_order_states(conn, pod_id, order_states)
+
     # Step 5: Save snapshot
     console.print("[bold]Step 5/5:[/bold] Saving portfolio snapshot...")
     snap_id = save_portfolio_snapshot(conn, portfolio, today, pod_id=pod_id)
     console.print(f"  [green]OK[/green] Snapshot #{snap_id} saved")
 
     conn.close()
+    if run_lock:
+        run_lock.release()
     console.print(f"\n[bold green]Done.[/bold green] NAV: ${portfolio.nav:,.2f}")
 
 
@@ -244,6 +595,11 @@ def run(
     pod: str = typer.Option("default", "--pod", "-p", help="Pod to operate on"),
     all_pods: bool = typer.Option(
         False, "--all-pods", help="Run all active pods sequentially"
+    ),
+    broker: str = typer.Option(
+        "paper",
+        "--broker",
+        help="Execution broker: paper | alpaca",
     ),
 ):
     """Full cycle: fetch -> indicators -> Claude -> trade -> log."""
@@ -275,10 +631,119 @@ def run(
 
         for (pid,) in rows:
             console.rule(f"[bold]Pod: {pid}")
-            _run_single_pod(pid, dry_run=dry_run)
+            _run_single_pod(pid, dry_run=dry_run, broker=broker)
         return
 
-    _run_single_pod(pod, dry_run=dry_run)
+    _run_single_pod(pod, dry_run=dry_run, broker=broker)
+
+
+@app.command()
+def eod_flat(
+    pod: str = typer.Option("default", "--pod", "-p", help="Pod to operate on"),
+):
+    """Flatten all positions at the configured end-of-day time."""
+    _setup_logging()
+
+    from llm_quant.broker.alpaca import AlpacaClient, AlpacaError
+    from llm_quant.brain.models import Action, Conviction, TradeSignal
+    from llm_quant.db.schema import get_connection
+    from llm_quant.trading.executor import execute_signals
+    from llm_quant.trading.ledger import log_trades, save_portfolio_snapshot
+    from llm_quant.trading.portfolio import Portfolio
+
+    config = _get_config_for_pod(pod)
+    limits = config.risk
+
+    if not getattr(limits, "eod_flatten_enabled", False):
+        console.print("[yellow]EOD flatten disabled in config.[/yellow]")
+        return
+
+    try:
+        target_time = _parse_eod_time(getattr(limits, "eod_flatten_time", "15:55"))
+    except ValueError as exc:
+        console.print(f"[red]FAIL[/red] Invalid eod_flatten_time: {exc}")
+        raise typer.Exit(1) from exc
+
+    try:
+        client = AlpacaClient.from_env()
+        now_et = client.clock_timestamp_et()
+        if not client.is_market_open():
+            console.print("[yellow]Market closed — skipping EOD flatten.[/yellow]")
+            return
+    except AlpacaError as exc:
+        console.print(f"[red]FAIL[/red] Alpaca clock check failed: {exc}")
+        raise typer.Exit(1) from exc
+
+    if now_et.time() < target_time:
+        console.print(
+            f"[yellow]EOD flatten scheduled for {target_time} ET; "
+            f"current time {now_et.time().strftime('%H:%M')} ET.[/yellow]"
+        )
+        return
+
+    try:
+        client.cancel_all_orders()
+        positions = client.list_positions()
+    except AlpacaError as exc:
+        console.print(f"[red]FAIL[/red] Alpaca order/position fetch failed: {exc}")
+        raise typer.Exit(1) from exc
+
+    if not positions:
+        console.print("[green]No open positions to flatten.[/green]")
+        return
+
+    for pos in positions:
+        qty = float(pos.get("qty", 0.0))
+        if qty == 0:
+            continue
+        side = "sell" if qty > 0 else "buy"
+        try:
+            client.submit_market_order(
+                symbol=pos.get("symbol", ""),
+                qty=abs(qty),
+                side=side,
+            )
+        except AlpacaError as exc:
+            console.print(f"[red]FAIL[/red] Order submit failed: {exc}")
+            raise typer.Exit(1) from exc
+
+    # Log EOD flatten in DuckDB (best-effort; relies on DB matching Alpaca)
+    db_path = _get_db_path(config)
+    conn = get_connection(db_path)
+    portfolio = Portfolio.from_db(conn, config.general.initial_capital, pod_id=pod)
+
+    prices = {
+        pos.get("symbol", ""): float(pos.get("current_price", 0.0))
+        for pos in positions
+    }
+    portfolio.update_prices(prices)
+
+    close_signals: list[TradeSignal] = []
+    for pos in positions:
+        symbol = pos.get("symbol", "")
+        if not symbol:
+            continue
+        close_signals.append(
+            TradeSignal(
+                symbol=symbol,
+                action=Action.CLOSE,
+                conviction=Conviction.LOW,
+                target_weight=0.0,
+                stop_loss=0.0,
+                reasoning="eod_flatten",
+            )
+        )
+
+    executed = execute_signals(portfolio, close_signals, prices, portfolio.nav)
+    today = now_et.date()
+    if executed:
+        log_trades(conn, executed, today, decision_id=None, pod_id=pod)
+    save_portfolio_snapshot(conn, portfolio, today, pod_id=pod)
+    conn.close()
+
+    console.print(
+        f"[green]EOD flatten complete.[/green] Orders submitted: {len(positions)}"
+    )
 
 
 def _display_decision(decision):

@@ -1,0 +1,9 @@
+[Unit]
+Description=Run llm-quant intraday hybrid every 5 minutes
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* *:0/5:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
