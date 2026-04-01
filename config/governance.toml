@@ -73,3 +73,77 @@ min_paper_sharpe = 0.60           # Paper Sharpe >= 0.60
 canary_allocation_pct = 0.10      # Start with 10% allocation
 canary_min_days = 14              # Minimum 14 days in canary
 canary_max_drawdown_pct = 0.10    # Canary drawdown limit (tighter than full)
+
+[profit_taking]
+# Profit-taking-first governance overlay.
+enabled = true
+
+[profit_taking.score]
+# Composite harvest score weights. Should sum to 1.0.
+capture_ratio_weight = 0.35
+giveback_penalty_weight = 0.25
+tp1_hit_rate_weight = 0.15
+trailing_preservation_weight = 0.15
+runner_retention_weight = 0.10
+
+[profit_taking.promotion]
+# Monetization quality gates for promotion and continued eligibility.
+min_harvest_ratio = 0.45
+max_open_gain_giveback_pct = 0.35
+min_tp1_hit_rate = 0.40
+min_trailing_preservation_rate = 0.40
+min_realized_to_unrealized_ratio = 0.55
+min_paper_trades_for_harvest_eval = 30
+promotion_block_on_poor_monetization = true
+
+[profit_taking.rotation]
+# Ranking/allocation bias toward retaining profits and trimming stale winners.
+enabled = true
+weight = 0.25
+prefer_harvest_over_new_entries = true
+stale_winner_trim_required = true
+max_days_since_last_harvest = 10
+
+[profit_taking.selection]
+# Portfolio-level selection constraints that favor monetization discipline.
+enabled = true
+reserve_cash_for_rotation = 0.10
+require_trim_before_new_entry = false
+block_readd_after_partial = true
+min_realized_to_unrealized_ratio = 0.55
+
+[profit_taking.overlay_evaluation]
+# Evaluate Claude/overlay quality by realized harvest outcomes.
+enabled = true
+require_mandate_alignment = true
+realized_edge_weight = 0.50
+harvest_rate_edge_weight = 0.30
+giveback_control_weight = 0.20
+
+[profit_taking.mandates.default]
+enabled = true
+mandate_type = "balanced_harvest"
+harvest_priority = 50
+tp1_target_pct = 0.02
+tp1_size = 0.50
+runner_tp_mult = 2.0
+trailing_stop_pct = 0.015
+max_giveback_pct = 0.35
+min_harvest_ratio = 0.45
+stale_winner_days = 5
+allow_reentry_after_partial = false
+eod_flatten = false
+
+[profit_taking.mandates.crypto]
+enabled = true
+mandate_type = "crypto_synthetic_harvest"
+harvest_priority = 80
+tp1_target_pct = 0.015
+tp1_size = 0.50
+runner_tp_mult = 2.0
+trailing_stop_pct = 0.0125
+max_giveback_pct = 0.30
+min_harvest_ratio = 0.50
+stale_winner_days = 2
+allow_reentry_after_partial = false
+eod_flatten = false

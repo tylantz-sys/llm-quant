@@ -271,13 +271,20 @@ def _run_single_pod(
         update_state_from_trades,
         upsert_position_states,
     )
-    from llm_quant.trading.telemetry import log_decision_context
+    from llm_quant.trading.telemetry import (
+        log_decision_context,
+        log_profit_take_event,
+    )
     from llm_quant.trading.runtime_controls import (
         apply_expectancy_buy_scale,
+        apply_harvest_governance_controls,
         assess_intraday_symbol_freshness,
         compute_peak_nav,
         compute_recent_realized_expectancy,
         filter_signals_by_asset_class,
+        has_unprotected_crypto_positions,
+        load_latest_harvest_governance_result,
+        log_harvest_governance_action,
     )
     from llm_quant.trading.run_lock import acquire_run_lock, slot_for_time
     from llm_quant.strategies.runtime import (
@@ -789,7 +796,24 @@ def _run_single_pod(
     exit_policy = build_exit_policy(config.risk, config.execution)
     exit_runtime = build_exit_runtime(broker, config.execution)
 
-    signals = decision.signals
+    governance_runtime = load_latest_harvest_governance_result(
+        conn,
+        config=config,
+        pod_id=pod_id,
+    )
+    signals = apply_harvest_governance_controls(
+        decision.signals,
+        governance_runtime,
+        portfolio_symbols=set(portfolio.positions.keys()),
+    )
+    if governance_runtime.has_actions:
+        log_harvest_governance_action(
+            conn,
+            pod_id=pod_id,
+            runtime_result=governance_runtime,
+        )
+
+    signals = signals
     context_payload = None
     now_ts = None
     if config.execution.intraday_enabled:
@@ -825,9 +849,30 @@ def _run_single_pod(
             exit_policy,
             exit_runtime,
         )
-        if any(item.unprotected for item in exit_telemetry) and exit_policy.fail_on_unprotected_exits:
+        if any(
+            item.unprotected for item in exit_telemetry
+        ) and exit_policy.fail_on_unprotected_exits:
             console.print(
                 "[red]FAIL[/red] Canonical exit engine detected unprotected live position(s)."
+            )
+            conn.close()
+            if global_lock:
+                global_lock.release()
+            if run_lock:
+                run_lock.release()
+            raise typer.Exit(1)
+
+        if (
+            broker.lower() == "alpaca"
+            and exit_policy.fail_on_unprotected_exits
+            and has_unprotected_crypto_positions(
+                portfolio.positions,
+                asset_class_map,
+                exit_runtime,
+            )
+        ):
+            console.print(
+                "[red]FAIL[/red] Live crypto execution requires broker-managed protection."
             )
             conn.close()
             if global_lock:
@@ -923,6 +968,17 @@ def _run_single_pod(
         )
         context_payload["expectancy_sample_size"] = expectancy_sample_size
         context_payload["buy_scale_applied"] = buy_scale_applied
+        context_payload["harvest_governance"] = {
+            "metrics": governance_runtime.metrics,
+            "breached_rules": governance_runtime.breached_rules,
+            "actions": governance_runtime.actions,
+            "allocation_scale": governance_runtime.allocation_scale,
+            "active_mandate_name": governance_runtime.active_mandate_name,
+            "active_mandate_type": governance_runtime.active_mandate_type,
+            "conservative_mandate_name": governance_runtime.conservative_mandate_name,
+            "force_flatten": governance_runtime.force_flatten,
+            "lifecycle_recommendation": governance_runtime.lifecycle_recommendation,
+        }
         log_intraday_context(conn, pod_id, now_ts, context_payload)
 
     approved, rejected = risk_mgr.filter_signals(signals, portfolio, prices)
@@ -1015,7 +1071,42 @@ def _run_single_pod(
                 raise typer.Exit(1) from exc
 
         # Log trades
-        trade_ids = log_trades(conn, executed, today, decision_id, pod_id=pod_id)
+        trade_ids = log_trades(
+            conn,
+            executed,
+            today,
+            decision_id,
+            pod_id=pod_id,
+            decision_source=resolved_signal_source,
+            sleeve=strategy_set if use_strategy_overlay else None,
+            source_decision_id=decision_id,
+        )
+        for trade, trade_id in zip(executed, trade_ids, strict=True):
+            if not trade.exit_reason:
+                continue
+            log_profit_take_event(
+                conn,
+                timestamp=now_ts,
+                pod_id=pod_id,
+                symbol=trade.symbol,
+                event_type="executed",
+                decision_source=resolved_signal_source,
+                sleeve=strategy_set if use_strategy_overlay else None,
+                source_decision_id=decision_id,
+                decision_id=decision_id,
+                trade_id=trade_id,
+                entry_batch=trade.entry_batch,
+                action=trade.action,
+                shares=trade.shares,
+                price=trade.price,
+                notional=trade.notional,
+                trigger_price=prices.get(trade.symbol, trade.price),
+                reason=trade.exit_reason,
+                metadata={
+                    "reasoning": trade.reasoning,
+                    "strategy_id": trade.strategy_id,
+                },
+            )
         console.print(f"  [green]OK[/green] Logged trade IDs: {trade_ids}")
     else:
         console.print("  No trades to execute.")
@@ -1041,6 +1132,7 @@ def _run_single_pod(
             order_states,
             positions,
             trailing_pct=config.execution.trailing_stop_pct,
+            fail_on_unprotected=exit_policy.fail_on_unprotected_exits,
         )
         update_trailing_stops(
             alpaca_client,
@@ -1142,13 +1234,18 @@ def eod_flat(
     from llm_quant.brain.models import Action, Conviction, TradeSignal
     from llm_quant.db.schema import get_connection
     from llm_quant.trading.executor import execute_signals
-    from llm_quant.trading.exits import assess_eod_flatten, build_exit_policy
+    from llm_quant.trading.exits import (
+        assess_eod_flatten,
+        build_exit_policy,
+        build_exit_runtime,
+    )
     from llm_quant.trading.ledger import log_trades, save_portfolio_snapshot
     from llm_quant.trading.portfolio import Portfolio
 
     config = _get_config_for_pod(pod)
     limits = config.risk
     exit_policy = build_exit_policy(config.risk, config.execution)
+    exit_runtime = build_exit_runtime("alpaca", config.execution)
 
     if not exit_policy.eod_flatten_enabled:
         console.print("[yellow]EOD flatten disabled in config.[/yellow]")
@@ -1161,7 +1258,13 @@ def eod_flat(
             exit_policy,
             now_et=now_et,
             market_is_open=client.is_market_open(),
+            runtime=exit_runtime,
         )
+        if flatten_decision.reason == "disabled_for_crypto":
+            console.print(
+                "[yellow]EOD flatten disabled for crypto runtime semantics.[/yellow]"
+            )
+            return
         if flatten_decision.reason == "market_closed":
             console.print("[yellow]Market closed — skipping EOD flatten.[/yellow]")
             return
@@ -1240,7 +1343,16 @@ def eod_flat(
     )
     today = now_et.date()
     if executed:
-        log_trades(conn, executed, today, decision_id=None, pod_id=pod)
+        log_trades(
+            conn,
+            executed,
+            today,
+            decision_id=None,
+            pod_id=pod,
+            decision_source="system",
+            sleeve=None,
+            source_decision_id=None,
+        )
     save_portfolio_snapshot(conn, portfolio, today, pod_id=pod)
     conn.close()
 
@@ -1425,9 +1537,10 @@ def status(
         for sym, pos in sorted(active_positions.items()):
             pnl_color = "green" if pos.unrealized_pnl >= 0 else "red"
             weight = pos.market_value / portfolio.nav * 100
+            share_fmt = f"{pos.shares:.6f}" if abs(pos.shares - round(pos.shares)) > 1e-8 else f"{pos.shares:.0f}"
             table.add_row(
                 sym,
-                f"{pos.shares:.0f}",
+                share_fmt,
                 f"${pos.avg_cost:.2f}",
                 f"${pos.current_price:.2f}",
                 f"${pos.market_value:,.2f}",
@@ -1505,12 +1618,14 @@ def trades(
     action_colors = {"buy": "green", "sell": "red", "close": "red", "hold": "yellow"}
     for t in recent:
         a_color = action_colors.get(t.get("action", "").lower(), "white")
+        shares = float(t.get("shares", 0) or 0.0)
+        share_fmt = f"{shares:.6f}" if abs(shares - round(shares)) > 1e-8 else f"{shares:.0f}"
         table.add_row(
             str(t.get("trade_id", "")),
             str(t.get("date", "")),
             t.get("symbol", ""),
             f"[{a_color}]{t.get('action', '').upper()}[/{a_color}]",
-            f"{t.get('shares', 0):.0f}",
+            share_fmt,
             f"${t.get('price', 0):.2f}",
             f"${t.get('notional', 0):,.2f}",
             t.get("conviction", "-"),

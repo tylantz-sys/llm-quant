@@ -7,7 +7,7 @@ import duckdb
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
 DDL_STATEMENTS = [
     """
@@ -100,6 +100,11 @@ DDL_STATEMENTS = [
         entry_batch INTEGER,
         exit_reason VARCHAR,
         llm_decision_id INTEGER,
+        source_decision_id INTEGER,
+        decision_source VARCHAR,
+        sleeve VARCHAR,
+        is_profit_take BOOLEAN DEFAULT FALSE,
+        profit_take_reason VARCHAR,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         prev_hash VARCHAR NOT NULL DEFAULT '',
         row_hash VARCHAR NOT NULL DEFAULT ''
@@ -123,6 +128,12 @@ DDL_STATEMENTS = [
         regime_confidence DOUBLE,
         num_signals INTEGER,
         raw_response TEXT,
+        source_decision_id INTEGER,
+        decision_source VARCHAR,
+        sleeve VARCHAR,
+        is_profit_take BOOLEAN DEFAULT FALSE,
+        trigger_symbol VARCHAR,
+        trigger_event_type VARCHAR,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
@@ -227,6 +238,43 @@ DDL_STATEMENTS = [
         value VARCHAR NOT NULL
     )
     """,
+    """
+    CREATE SEQUENCE IF NOT EXISTS seq_profit_take_event_id START 1
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS profit_take_events (
+        event_id INTEGER PRIMARY KEY DEFAULT nextval('seq_profit_take_event_id'),
+        timestamp TIMESTAMP NOT NULL,
+        pod_id VARCHAR NOT NULL DEFAULT 'default',
+        symbol VARCHAR NOT NULL,
+        event_type VARCHAR NOT NULL,
+        decision_source VARCHAR,
+        sleeve VARCHAR,
+        source_decision_id INTEGER,
+        decision_id INTEGER,
+        trade_id INTEGER,
+        entry_batch INTEGER,
+        reduction_sequence INTEGER,
+        position_fraction DOUBLE,
+        action VARCHAR,
+        shares DOUBLE,
+        price DOUBLE,
+        notional DOUBLE,
+        trigger_price DOUBLE,
+        peak_price DOUBLE,
+        drawdown_pct DOUBLE,
+        pre_reduction_peak_unrealized_pnl DOUBLE,
+        pre_reduction_peak_return_pct DOUBLE,
+        trailing_stop_activated_at TIMESTAMP,
+        peak_to_reduction_drawdown_pct DOUBLE,
+        realized_pnl DOUBLE,
+        return_pct DOUBLE,
+        rule_name VARCHAR,
+        reason VARCHAR,
+        metadata_json TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
     # --- Governance / Surveillance tables (v3) ---
     """
     CREATE SEQUENCE IF NOT EXISTS seq_scan_id START 1
@@ -288,6 +336,22 @@ DDL_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_decisions_pod_date
         ON llm_decisions (pod_id, date DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_profit_take_events_pod_time
+        ON profit_take_events (pod_id, timestamp DESC, event_id DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_profit_take_events_symbol_time
+        ON profit_take_events (symbol, timestamp DESC, event_id DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_profit_take_events_trade_id
+        ON profit_take_events (trade_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_profit_take_events_decision_id
+        ON profit_take_events (decision_id)
     """,
 ]
 
@@ -742,6 +806,236 @@ def _migrate_v10_to_v11(conn: duckdb.DuckDBPyConnection) -> None:
     logger.info("Migrated schema to v11: pod-scoped rotation state enabled.")
 
 
+def _rebuild_table_with_added_columns(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    table_name: str,
+    temp_table_name: str,
+    final_columns: list[tuple[str, str]],
+    copy_columns: list[str],
+) -> None:
+    """Rebuild a table with an expanded schema when ALTER TABLE is blocked."""
+    conn.execute(f"DROP TABLE IF EXISTS {temp_table_name}")
+    column_defs = ",\n            ".join(
+        f"{column_name} {column_type}" for column_name, column_type in final_columns
+    )
+    conn.execute(f"""
+        CREATE TABLE {temp_table_name} (
+            {column_defs}
+        )
+        """)
+    copy_column_sql = ", ".join(copy_columns)
+    conn.execute(f"""
+        INSERT INTO {temp_table_name} ({copy_column_sql})
+        SELECT {copy_column_sql}
+        FROM {table_name}
+        """)
+    conn.execute(f"DROP TABLE {table_name}")
+    conn.execute(f"ALTER TABLE {temp_table_name} RENAME TO {table_name}")
+
+
+def _migrate_v11_to_v12(conn: duckdb.DuckDBPyConnection) -> None:
+    """Add profit-taking telemetry schema objects and attribution columns."""
+    conn.execute("CREATE SEQUENCE IF NOT EXISTS seq_profit_take_event_id START 1")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS profit_take_events (
+            event_id INTEGER PRIMARY KEY DEFAULT nextval('seq_profit_take_event_id'),
+            timestamp TIMESTAMP NOT NULL,
+            pod_id VARCHAR NOT NULL DEFAULT 'default',
+            symbol VARCHAR NOT NULL,
+            event_type VARCHAR NOT NULL,
+            decision_source VARCHAR,
+            sleeve VARCHAR,
+            source_decision_id INTEGER,
+            decision_id INTEGER,
+            trade_id INTEGER,
+            entry_batch INTEGER,
+            action VARCHAR,
+            shares DOUBLE,
+            price DOUBLE,
+            notional DOUBLE,
+            trigger_price DOUBLE,
+            peak_price DOUBLE,
+            drawdown_pct DOUBLE,
+            realized_pnl DOUBLE,
+            return_pct DOUBLE,
+            rule_name VARCHAR,
+            reason VARCHAR,
+            metadata_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+    trade_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'trades'"
+        ).fetchall()
+    }
+    trade_additions = [
+        ("source_decision_id", "INTEGER"),
+        ("decision_source", "VARCHAR"),
+        ("sleeve", "VARCHAR"),
+        ("is_profit_take", "BOOLEAN DEFAULT FALSE"),
+        ("profit_take_reason", "VARCHAR"),
+    ]
+    if "profit_take_reason" not in trade_cols:
+        final_trade_columns = [
+            ("trade_id", "INTEGER PRIMARY KEY"),
+            ("date", "DATE NOT NULL"),
+            ("pod_id", "VARCHAR NOT NULL DEFAULT 'default'"),
+            ("symbol", "VARCHAR NOT NULL"),
+            ("action", "VARCHAR NOT NULL"),
+            ("shares", "DOUBLE NOT NULL"),
+            ("price", "DOUBLE NOT NULL"),
+            ("notional", "DOUBLE NOT NULL"),
+            ("conviction", "VARCHAR"),
+            ("reasoning", "TEXT"),
+            ("strategy_id", "VARCHAR"),
+            ("entry_batch", "INTEGER"),
+            ("exit_reason", "VARCHAR"),
+            ("llm_decision_id", "INTEGER"),
+            ("source_decision_id", "INTEGER"),
+            ("decision_source", "VARCHAR"),
+            ("sleeve", "VARCHAR"),
+            ("is_profit_take", "BOOLEAN DEFAULT FALSE"),
+            ("profit_take_reason", "VARCHAR"),
+            ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("prev_hash", "VARCHAR NOT NULL DEFAULT ''"),
+            ("row_hash", "VARCHAR NOT NULL DEFAULT ''"),
+        ]
+        copy_trade_columns = [col for col, _ in final_trade_columns if col in trade_cols]
+        _rebuild_table_with_added_columns(
+            conn,
+            table_name="trades",
+            temp_table_name="trades_v12_migration",
+            final_columns=final_trade_columns,
+            copy_columns=copy_trade_columns,
+        )
+    else:
+        for col, col_type in trade_additions:
+            if col not in trade_cols:
+                conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
+    if "is_profit_take" in {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'trades'"
+        ).fetchall()
+    }:
+        conn.execute(
+            "UPDATE trades SET is_profit_take = FALSE WHERE is_profit_take IS NULL"
+        )
+
+    decision_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'llm_decisions'"
+        ).fetchall()
+    }
+    decision_additions = [
+        ("source_decision_id", "INTEGER"),
+        ("decision_source", "VARCHAR"),
+        ("sleeve", "VARCHAR"),
+        ("is_profit_take", "BOOLEAN DEFAULT FALSE"),
+        ("trigger_symbol", "VARCHAR"),
+        ("trigger_event_type", "VARCHAR"),
+    ]
+    if "trigger_event_type" not in decision_cols:
+        final_decision_columns = [
+            ("decision_id", "INTEGER PRIMARY KEY"),
+            ("date", "DATE NOT NULL"),
+            ("pod_id", "VARCHAR NOT NULL DEFAULT 'default'"),
+            ("decision_type", "VARCHAR NOT NULL DEFAULT 'llm'"),
+            ("model", "VARCHAR NOT NULL"),
+            ("prompt_tokens", "INTEGER"),
+            ("completion_tokens", "INTEGER"),
+            ("total_tokens", "INTEGER"),
+            ("cost_usd", "DOUBLE"),
+            ("market_regime", "VARCHAR"),
+            ("regime_confidence", "DOUBLE"),
+            ("num_signals", "INTEGER"),
+            ("raw_response", "TEXT"),
+            ("source_decision_id", "INTEGER"),
+            ("decision_source", "VARCHAR"),
+            ("sleeve", "VARCHAR"),
+            ("is_profit_take", "BOOLEAN DEFAULT FALSE"),
+            ("trigger_symbol", "VARCHAR"),
+            ("trigger_event_type", "VARCHAR"),
+            ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ]
+        copy_decision_columns = [
+            col for col, _ in final_decision_columns if col in decision_cols
+        ]
+        _rebuild_table_with_added_columns(
+            conn,
+            table_name="llm_decisions",
+            temp_table_name="llm_decisions_v12_migration",
+            final_columns=final_decision_columns,
+            copy_columns=copy_decision_columns,
+        )
+    else:
+        for col, col_type in decision_additions:
+            if col not in decision_cols:
+                conn.execute(f"ALTER TABLE llm_decisions ADD COLUMN {col} {col_type}")
+    if "is_profit_take" in {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'llm_decisions'"
+        ).fetchall()
+    }:
+        conn.execute(
+            "UPDATE llm_decisions SET is_profit_take = FALSE "
+            "WHERE is_profit_take IS NULL"
+        )
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_profit_take_events_pod_time "
+        "ON profit_take_events (pod_id, timestamp DESC, event_id DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_profit_take_events_symbol_time "
+        "ON profit_take_events (symbol, timestamp DESC, event_id DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_profit_take_events_trade_id "
+        "ON profit_take_events (trade_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_profit_take_events_decision_id "
+        "ON profit_take_events (decision_id)"
+    )
+    logger.info("Migrated schema to v12: profit-taking telemetry enabled.")
+
+
+def _migrate_v12_to_v13(conn: duckdb.DuckDBPyConnection) -> None:
+    """Add first-class profit-take lifecycle telemetry fields."""
+    event_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'profit_take_events'"
+        ).fetchall()
+    }
+    additions = [
+        ("reduction_sequence", "INTEGER"),
+        ("position_fraction", "DOUBLE"),
+        ("pre_reduction_peak_unrealized_pnl", "DOUBLE"),
+        ("pre_reduction_peak_return_pct", "DOUBLE"),
+        ("trailing_stop_activated_at", "TIMESTAMP"),
+        ("peak_to_reduction_drawdown_pct", "DOUBLE"),
+    ]
+    for col, col_type in additions:
+        if col not in event_cols:
+            conn.execute(
+                f"ALTER TABLE profit_take_events ADD COLUMN {col} {col_type}"
+            )
+    logger.info("Migrated schema to v13: profit-take lifecycle telemetry added.")
+
+
 def _needs_v11_rotation_migration(
     conn: duckdb.DuckDBPyConnection,
     old_version: int,
@@ -802,6 +1096,10 @@ def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
         _migrate_v9_to_v10(conn)
     if _needs_v11_rotation_migration(conn, old_version):
         _migrate_v10_to_v11(conn)
+    if old_version < 12:
+        _migrate_v11_to_v12(conn)
+    if old_version < 13:
+        _migrate_v12_to_v13(conn)
 
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)",

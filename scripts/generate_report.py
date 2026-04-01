@@ -26,6 +26,7 @@ from llm_quant.config import load_config
 from llm_quant.db.integrity import verify_chain
 from llm_quant.db.schema import get_connection, init_schema
 from llm_quant.surveillance.scanner import SurveillanceScanner
+from llm_quant.trading.harvest_metrics import compute_harvest_metrics_from_db
 from llm_quant.trading.performance import (
     compute_performance,
     compute_strategy_performance,
@@ -58,6 +59,12 @@ def _fmt_pct(value: float, decimals: int = 1) -> str:
 def _fmt_pct_raw(value: float, decimals: int = 2) -> str:
     """Format a value already in percentage form (e.g. -2.5 -> '-2.50%')."""
     return f"{value:.{decimals}f}%"
+
+
+def _fmt_optional_ratio(value: float | None, decimals: int = 1) -> str:
+    if value is None:
+        return "N/A"
+    return _fmt_pct(value, decimals=decimals)
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +518,70 @@ def _compute_benchmark_return(
     return 0.6 * spy_ret + 0.4 * tlt_ret
 
 
+def _append_harvest_metrics_section(
+    lines: list[str],
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    start_date: date,
+    end_date: date,
+) -> None:
+    metrics = compute_harvest_metrics_from_db(
+        conn,
+        start=start_date,
+        end=end_date,
+    )
+
+    lines.append("## Harvest Metrics")
+    lines.append("")
+    if metrics["executed_profit_take_events"] == 0:
+        lines.append("No executed profit-taking telemetry recorded for this period.")
+        lines.append("")
+        return
+
+    lines.append("| Metric | Value |")
+    lines.append("|--------|-------|")
+    lines.append(f"| Executed Harvest Events | {metrics['executed_profit_take_events']} |")
+    lines.append(f"| Symbols Harvested | {metrics['symbols_harvested']} |")
+    lines.append(
+        f"| Realized Harvest P&L | {_fmt_money(metrics['realized_harvest_pnl'])} |"
+    )
+    lines.append(
+        f"| Capture Ratio | {_fmt_optional_ratio(metrics['capture_ratio'])} |"
+    )
+    lines.append(
+        f"| Giveback Ratio | {_fmt_optional_ratio(metrics['giveback_ratio'])} |"
+    )
+    lines.append(
+        f"| TP1 Effectiveness | {_fmt_optional_ratio(metrics['tp1_effectiveness'])} |"
+    )
+    lines.append(
+        f"| Runner Retention Proxy | {_fmt_optional_ratio(metrics['runner_retention_proxy'])} |"
+    )
+    lines.append(
+        f"| Trailing Salvage Proxy | {_fmt_optional_ratio(metrics['trailing_salvage_proxy'])} |"
+    )
+    lines.append(
+        f"| Realized-to-Peak Ratio | {_fmt_optional_ratio(metrics['realized_to_peak_ratio'])} |"
+    )
+    drawdown = metrics["avg_peak_to_reduction_drawdown_pct"]
+    lines.append(
+        f"| Avg Peak-to-Reduction Drawdown | {_fmt_optional_ratio(drawdown)} |"
+    )
+    lines.append("")
+
+    reason_breakdown = metrics.get("exit_reason_breakdown", {})
+    lines.append("### Harvest Breakdown by Exit Archetype")
+    lines.append("")
+    if reason_breakdown:
+        lines.append("| Exit Reason | Events |")
+        lines.append("|-------------|--------|")
+        for reason, count in sorted(reason_breakdown.items()):
+            lines.append(f"| {reason} | {count} |")
+    else:
+        lines.append("No harvest exit archetype breakdown available.")
+    lines.append("")
+
+
 # ---------------------------------------------------------------------------
 # Report generators
 # ---------------------------------------------------------------------------
@@ -655,6 +726,13 @@ def generate_daily_report(
     else:
         lines.append("No trades executed today.")
     lines.append("")
+
+    _append_harvest_metrics_section(
+        lines,
+        conn,
+        start_date=target_date,
+        end_date=target_date,
+    )
 
     # Intraday data proof
     lines.append("## Intraday Data")
@@ -912,6 +990,13 @@ def generate_weekly_report(
         lines.append("No trades executed this week.")
     lines.append("")
 
+    _append_harvest_metrics_section(
+        lines,
+        conn,
+        start_date=monday,
+        end_date=sunday,
+    )
+
     # Strategy performance
     strategy_perf = compute_strategy_performance(
         conn,
@@ -1093,6 +1178,13 @@ def generate_monthly_report(
     else:
         lines.append("No strategy-level trades recorded for this month.")
     lines.append("")
+
+    _append_harvest_metrics_section(
+        lines,
+        conn,
+        start_date=first_day,
+        end_date=last_day,
+    )
 
     # Trade Statistics by Conviction
     trades = _get_trades_for_range(conn, first_day, last_day)

@@ -282,6 +282,137 @@ class PromotionConfig(BaseModel):
     canary_max_drawdown_pct: float = 0.10
 
 
+class ProfitTakingScoreConfig(BaseModel):
+    capture_ratio_weight: float = 0.35
+    giveback_penalty_weight: float = 0.25
+    tp1_hit_rate_weight: float = 0.15
+    trailing_preservation_weight: float = 0.15
+    runner_retention_weight: float = 0.10
+
+
+class ProfitTakingMandateConfig(BaseModel):
+    enabled: bool = True
+    mandate_type: str = "balanced_harvest"
+    harvest_priority: int = 50
+    tp1_target_pct: float = 0.02
+    tp1_size: float = 0.50
+    runner_tp_mult: float = 2.0
+    trailing_stop_pct: float = 0.015
+    max_giveback_pct: float = 0.35
+    min_harvest_ratio: float = 0.45
+    stale_winner_days: int = 5
+    allow_reentry_after_partial: bool = False
+    eod_flatten: bool = False
+
+
+class ProfitTakingMandatesConfig(BaseModel):
+    default: ProfitTakingMandateConfig = Field(
+        default_factory=ProfitTakingMandateConfig
+    )
+    crypto: ProfitTakingMandateConfig = Field(
+        default_factory=lambda: ProfitTakingMandateConfig(
+            mandate_type="crypto_synthetic_harvest",
+            harvest_priority=80,
+            tp1_target_pct=0.015,
+            tp1_size=0.50,
+            runner_tp_mult=2.0,
+            trailing_stop_pct=0.0125,
+            max_giveback_pct=0.30,
+            min_harvest_ratio=0.50,
+            stale_winner_days=2,
+            allow_reentry_after_partial=False,
+            eod_flatten=False,
+        )
+    )
+
+    def get_by_name(self, mandate_name: str) -> ProfitTakingMandateConfig:
+        """Return a named mandate, falling back to attribute lookup semantics."""
+        mandate = getattr(self, mandate_name, None)
+        if not isinstance(mandate, ProfitTakingMandateConfig):
+            raise KeyError(f"Unknown profit-taking mandate '{mandate_name}'")
+        return mandate
+
+
+class ProfitTakingPromotionConfig(BaseModel):
+    min_harvest_ratio: float = 0.45
+    max_open_gain_giveback_pct: float = 0.35
+    min_tp1_hit_rate: float = 0.40
+    min_trailing_preservation_rate: float = 0.40
+    min_realized_to_unrealized_ratio: float = 0.55
+    min_paper_trades_for_harvest_eval: int = 30
+    promotion_block_on_poor_monetization: bool = True
+
+
+class ProfitTakingRotationConfig(BaseModel):
+    enabled: bool = True
+    weight: float = 0.25
+    prefer_harvest_over_new_entries: bool = True
+    stale_winner_trim_required: bool = True
+    max_days_since_last_harvest: int = 10
+
+
+class ProfitTakingSelectionConfig(BaseModel):
+    enabled: bool = True
+    reserve_cash_for_rotation: float = 0.10
+    require_trim_before_new_entry: bool = False
+    block_readd_after_partial: bool = True
+    min_realized_to_unrealized_ratio: float = 0.55
+
+
+class ProfitTakingOverlayEvaluationConfig(BaseModel):
+    enabled: bool = True
+    require_mandate_alignment: bool = True
+    realized_edge_weight: float = 0.50
+    harvest_rate_edge_weight: float = 0.30
+    giveback_control_weight: float = 0.20
+
+
+class ProfitTakingGovernanceActionsConfig(BaseModel):
+    allocation_shrink_scale: float = 0.50
+    apply_conservative_mandate: bool = True
+    conservative_mandate_name: str = "default"
+    temporary_eod_flatten: bool = True
+    demote_on_halt: bool = True
+    paper_revalidate_on_halt: bool = True
+
+
+class ProfitTakingGovernanceConfig(BaseModel):
+    enabled: bool = True
+    lookback_days: int = 30
+    min_profit_take_events: int = 5
+    min_capture_ratio: float = 0.45
+    max_giveback_ratio: float = 0.55
+    min_trailing_salvage_rate: float = 0.40
+    min_realized_retention: float = 0.45
+    min_tp1_effectiveness: float = 0.40
+    actions: ProfitTakingGovernanceActionsConfig = Field(
+        default_factory=ProfitTakingGovernanceActionsConfig
+    )
+
+
+class ProfitTakingConfig(BaseModel):
+    enabled: bool = True
+    score: ProfitTakingScoreConfig = Field(default_factory=ProfitTakingScoreConfig)
+    mandates: ProfitTakingMandatesConfig = Field(
+        default_factory=ProfitTakingMandatesConfig
+    )
+    promotion: ProfitTakingPromotionConfig = Field(
+        default_factory=ProfitTakingPromotionConfig
+    )
+    rotation: ProfitTakingRotationConfig = Field(
+        default_factory=ProfitTakingRotationConfig
+    )
+    selection: ProfitTakingSelectionConfig = Field(
+        default_factory=ProfitTakingSelectionConfig
+    )
+    overlay_evaluation: ProfitTakingOverlayEvaluationConfig = Field(
+        default_factory=ProfitTakingOverlayEvaluationConfig
+    )
+    governance: ProfitTakingGovernanceConfig = Field(
+        default_factory=ProfitTakingGovernanceConfig
+    )
+
+
 class GovernanceConfig(BaseModel):
     regime_drift: RegimeDriftConfig = Field(default_factory=RegimeDriftConfig)
     alpha_decay: AlphaDecayConfig = Field(default_factory=AlphaDecayConfig)
@@ -293,6 +424,21 @@ class GovernanceConfig(BaseModel):
     )
     kill_switches: KillSwitchConfig = Field(default_factory=KillSwitchConfig)
     promotion: PromotionConfig = Field(default_factory=PromotionConfig)
+    profit_taking: ProfitTakingConfig = Field(default_factory=ProfitTakingConfig)
+
+
+class StrategyMetadataConfig(BaseModel):
+    sleeve: str = "default"
+    profit_taking_mandate: str | None = None
+
+    @property
+    def active_profit_taking_mandate_name(self) -> str:
+        """Return the explicitly selected mandate or the sleeve-derived default."""
+        if self.profit_taking_mandate:
+            return self.profit_taking_mandate
+        if self.sleeve == "crypto":
+            return "crypto"
+        return "default"
 
 
 class AssetEntry(BaseModel):
@@ -325,6 +471,7 @@ class AppConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    strategy: StrategyMetadataConfig = Field(default_factory=StrategyMetadataConfig)
     strategy_rotation: StrategyRotationConfig = Field(
         default_factory=StrategyRotationConfig
     )
@@ -336,6 +483,18 @@ class AppConfig(BaseModel):
     track_c: TrackCLimits = Field(default_factory=TrackCLimits)
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     governance: GovernanceConfig = Field(default_factory=GovernanceConfig)
+
+    @property
+    def active_profit_taking_mandate_name(self) -> str:
+        """Return the mandate name selected for the active sleeve/pod."""
+        return self.strategy.active_profit_taking_mandate_name
+
+    @property
+    def active_profit_taking_mandate(self) -> ProfitTakingMandateConfig:
+        """Return the active profit-taking mandate config for the current pod."""
+        return self.governance.profit_taking.mandates.get_by_name(
+            self.active_profit_taking_mandate_name
+        )
 
 
 def _load_toml(path: Path) -> dict:
@@ -352,6 +511,7 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     llm_data: dict = {}
     data_data: dict = {}
     execution_data: dict = {}
+    strategy_data: dict = {}
     rotation_data: dict = {}
     allocation_data: dict = {}
     risk_data: dict = {}
@@ -367,6 +527,7 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         llm_data = raw.get("llm", {})
         data_data = raw.get("data", {})
         execution_data = raw.get("execution", {})
+        strategy_data = raw.get("strategy", {})
         rotation_data = raw.get("strategy_rotation", {})
         allocation_data = raw.get("allocation", {})
 
@@ -407,6 +568,7 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         llm=LLMConfig(**llm_data),
         data=DataConfig(**data_data),
         execution=ExecutionConfig(**execution_data),
+        strategy=StrategyMetadataConfig(**strategy_data),
         strategy_rotation=StrategyRotationConfig(**rotation_data),
         allocation=StrategyAllocationConfig(**allocation_data),
         risk=RiskLimits(**risk_data),

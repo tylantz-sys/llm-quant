@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -13,6 +14,15 @@ from llm_quant.broker.alpaca import AlpacaClient, AlpacaError
 from llm_quant.trading.executor import ExecutedTrade
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_order_qty(qty: float) -> float:
+    if qty <= 0:
+        return 0.0
+    rounded = round(float(qty), 8)
+    if math.isclose(rounded, round(rounded), rel_tol=0.0, abs_tol=1e-8):
+        return float(int(round(rounded)))
+    return rounded
 
 
 @dataclass
@@ -224,7 +234,7 @@ def place_oco_exits_for_buys(
             continue
 
         symbol = trade.symbol
-        qty = int(trade.shares)
+        qty = _normalize_order_qty(float(trade.shares))
         if qty <= 0:
             continue
 
@@ -247,10 +257,10 @@ def place_oco_exits_for_buys(
         if remainder_tp_price < min_remainder_tp:
             remainder_tp_price = min_remainder_tp
 
-        qty_tp = int(qty * partial_tp_size)
+        qty_tp = _normalize_order_qty(qty * partial_tp_size)
         if qty_tp <= 0 and qty >= 2:
-            qty_tp = 1
-        qty_remainder = max(qty - qty_tp, 0)
+            qty_tp = 1.0
+        qty_remainder = _normalize_order_qty(max(qty - qty_tp, 0.0))
 
         partial_tp_order_id = None
         if qty_tp > 0:
@@ -353,6 +363,7 @@ def reconcile_orders(
     states: dict[str, IntradayOrderState],
     positions: dict[str, float],
     trailing_pct: float,
+    fail_on_unprotected: bool = False,
 ) -> None:
     """Cancel/replace legs when TP or stop fills."""
     to_delete: list[str] = []
@@ -360,7 +371,9 @@ def reconcile_orders(
 
     for symbol, state in states.items():
         prev_remaining = state.remaining_qty
-        remaining_qty = positions.get(symbol, 0.0)
+        remaining_qty = _normalize_order_qty(
+            float(positions.get(symbol, 0.0) or 0.0)
+        )
         state.remaining_qty = float(remaining_qty or 0.0)
         state.tp_status = _order_status(client, state.partial_tp_order_id)
         state.oco_tp_status = _order_status(client, state.oco_tp_order_id)
@@ -381,29 +394,40 @@ def reconcile_orders(
             else:
                 state.oco_leg_missing_count += 1
                 if state.oco_leg_missing_count >= 3 and remaining_qty > 0:
-                    new_stop_price = state.hwm * (1.0 - trailing_pct)
-                    try:
-                        stop_order = client.submit_stop_order(
-                            symbol=symbol,
-                            qty=remaining_qty,
-                            side="sell",
-                            stop_price=new_stop_price,
+                    if trailing_pct <= 0 or state.hwm <= 0:
+                        message = (
+                            f"Cannot compute fallback stop for {symbol}: "
+                            f"trailing_pct={trailing_pct}, hwm={state.hwm}"
                         )
-                        state.oco_stop_order_id = stop_order.get("id")
-                        state.oco_order_id = None
-                        state.oco_tp_order_id = None
-                        state.stop_status = None
-                        state.oco_leg_missing_count = 0
-                        logger.warning(
-                            "OCO legs unresolved for %s; submitted standalone stop.",
-                            symbol,
-                        )
-                    except AlpacaError as exc:
-                        logger.warning(
-                            "Fallback stop submit failed for %s: %s",
-                            symbol,
-                            exc,
-                        )
+                        if fail_on_unprotected:
+                            raise AlpacaError(message)
+                        logger.warning(message)
+                    else:
+                        new_stop_price = state.hwm * (1.0 - trailing_pct)
+                        try:
+                            stop_order = client.submit_stop_order(
+                                symbol=symbol,
+                                qty=remaining_qty,
+                                side="sell",
+                                stop_price=new_stop_price,
+                            )
+                            state.oco_stop_order_id = stop_order.get("id")
+                            state.oco_order_id = None
+                            state.oco_tp_order_id = None
+                            state.stop_status = None
+                            state.oco_leg_missing_count = 0
+                            logger.warning(
+                                "OCO legs unresolved for %s; submitted standalone stop.",
+                                symbol,
+                            )
+                        except AlpacaError as exc:
+                            if fail_on_unprotected:
+                                raise
+                            logger.warning(
+                                "Fallback stop submit failed for %s: %s",
+                                symbol,
+                                exc,
+                            )
 
         if remaining_qty <= 0:
             _cancel_orders(client, state)
@@ -412,20 +436,35 @@ def reconcile_orders(
 
         if 0 < remaining_qty < prev_remaining:
             _cancel_oco_orders(client, state)
-            new_stop_price = state.hwm * (1.0 - trailing_pct)
-            try:
-                stop_order = client.submit_stop_order(
-                    symbol=symbol,
-                    qty=remaining_qty,
-                    side="sell",
-                    stop_price=new_stop_price,
+            if trailing_pct <= 0 or state.hwm <= 0:
+                message = (
+                    f"Cannot compute replacement stop for {symbol}: "
+                    f"trailing_pct={trailing_pct}, hwm={state.hwm}"
                 )
-                state.oco_stop_order_id = stop_order.get("id")
-                state.oco_order_id = None
-                state.oco_tp_order_id = None
-                state.stop_status = None
-            except AlpacaError as exc:
-                logger.warning("Stop re-submit failed for %s: %s", symbol, exc)
+                if fail_on_unprotected:
+                    raise AlpacaError(message)
+                logger.warning(message)
+            else:
+                new_stop_price = state.hwm * (1.0 - trailing_pct)
+                try:
+                    stop_order = client.submit_stop_order(
+                        symbol=symbol,
+                        qty=remaining_qty,
+                        side="sell",
+                        stop_price=new_stop_price,
+                    )
+                    state.oco_stop_order_id = stop_order.get("id")
+                    state.oco_order_id = None
+                    state.oco_tp_order_id = None
+                    state.stop_status = None
+                except AlpacaError as exc:
+                    if fail_on_unprotected:
+                        raise
+                    logger.warning("Stop re-submit failed for %s: %s", symbol, exc)
+            if fail_on_unprotected and remaining_qty > 0 and not state.oco_stop_order_id:
+                raise AlpacaError(
+                    f"Protective stop missing for {symbol} after partial fill reconciliation"
+                )
             continue
 
         if state.stop_status == "filled":
@@ -445,20 +484,35 @@ def reconcile_orders(
                 to_delete.append(symbol)
                 continue
 
-            new_stop_price = state.hwm * (1.0 - trailing_pct)
-            try:
-                stop_order = client.submit_stop_order(
-                    symbol=symbol,
-                    qty=remaining_qty,
-                    side="sell",
-                    stop_price=new_stop_price,
+            if trailing_pct <= 0 or state.hwm <= 0:
+                message = (
+                    f"Cannot compute replacement stop for {symbol}: "
+                    f"trailing_pct={trailing_pct}, hwm={state.hwm}"
                 )
-                state.oco_stop_order_id = stop_order.get("id")
-                state.oco_order_id = None
-                state.oco_tp_order_id = None
-                state.stop_status = None
-            except AlpacaError as exc:
-                logger.warning("Stop re-submit failed for %s: %s", symbol, exc)
+                if fail_on_unprotected:
+                    raise AlpacaError(message)
+                logger.warning(message)
+            else:
+                new_stop_price = state.hwm * (1.0 - trailing_pct)
+                try:
+                    stop_order = client.submit_stop_order(
+                        symbol=symbol,
+                        qty=remaining_qty,
+                        side="sell",
+                        stop_price=new_stop_price,
+                    )
+                    state.oco_stop_order_id = stop_order.get("id")
+                    state.oco_order_id = None
+                    state.oco_tp_order_id = None
+                    state.stop_status = None
+                except AlpacaError as exc:
+                    if fail_on_unprotected:
+                        raise
+                    logger.warning("Stop re-submit failed for %s: %s", symbol, exc)
+            if fail_on_unprotected and remaining_qty > 0 and not state.oco_stop_order_id:
+                raise AlpacaError(
+                    f"Protective stop missing for {symbol} after OCO take-profit fill"
+                )
 
     for symbol in to_delete:
         states.pop(symbol, None)

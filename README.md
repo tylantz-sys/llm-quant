@@ -21,6 +21,12 @@ See [research-tracks.md](docs/governance/research-tracks.md),
 [alpha-hunting-framework.md](docs/governance/alpha-hunting-framework.md), and
 [institutional-quant-guide.md](docs/research/institutional-quant-guide.md) for full specifications.
 
+For current operating state and governance truth sources, also see:
+- [strategy-artifact-status-matrix.md](docs/governance/strategy-artifact-status-matrix.md)
+- [validation-requirements-matrix.md](docs/governance/validation-requirements-matrix.md)
+- [no-signal-runtime-runbook.md](docs/governance/no-signal-runtime-runbook.md)
+- [runtime-truth-table.md](docs/governance/runtime-truth-table.md)
+
 ## How It Works
 
 1. **Fetch** daily OHLCV data for 39 liquid US ETFs + crypto via Yahoo Finance
@@ -31,10 +37,21 @@ See [research-tracks.md](docs/governance/research-tracks.md),
 6. **Realize** exits through the active broker path — synthetic monitoring, native brackets, or native OCO management
 7. **Track** everything in DuckDB — trades, decisions, portfolio snapshots, hash chain, and exit telemetry
 
+## Governance and Runtime Operations
+
+Key operator-facing governance/runtime references:
+
+- [strategy-artifact-status-matrix.md](docs/governance/strategy-artifact-status-matrix.md) — canonical status ledger for lifecycle artifacts, runtime state, and evidence quality by sleeve/strategy
+- [validation-requirements-matrix.md](docs/governance/validation-requirements-matrix.md) — normalized gate requirements across lifecycle stages and strategy families
+- [no-signal-runtime-runbook.md](docs/governance/no-signal-runtime-runbook.md) — operator runbook for distinguishing healthy no-trade states from broken runtime states
+- [runtime-truth-table.md](docs/governance/runtime-truth-table.md) — mode-by-mode execution and control behavior
+- [control-matrix.md](docs/governance/control-matrix.md) — governance/control mapping across lifecycle and runtime
+
 ## Hybrid Runtime (Optional)
 
 - **Promoted strategies** in `data/strategies/*` can run as signal pods.
 - **Pod mandates** are explicit: `default` (overlay-only), `commodities` (RTH commodity sleeve), `crypto` (24/7 sleeve).
+- **Sleeve-specific harvest mandates** resolve by pod: the default sleeve uses the `balanced_harvest` doctrine, while the crypto sleeve uses `crypto_synthetic_harvest`.
 - **Signal source is explicit** per pod: `llm` or `strategy_overlay`.
 - **Strategy sets** are catalog-driven via `config/strategies/catalog.toml`.
 - **Claude overlay** scales/blocks strategy signals when `claude_overlay_only = true`.

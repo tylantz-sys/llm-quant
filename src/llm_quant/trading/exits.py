@@ -56,6 +56,7 @@ class ExitRuntime:
     broker: str
     intraday_enabled: bool
     intraday_use_oco: bool
+    asset_class_filter: tuple[str, ...] = ()
 
     @property
     def exit_mode(self) -> ExitMode:
@@ -64,6 +65,12 @@ class ExitRuntime:
         ):
             return "synthetic"
         return "native"
+
+    @property
+    def is_crypto(self) -> bool:
+        return "crypto" in {
+            asset_class.lower() for asset_class in self.asset_class_filter
+        }
 
     @property
     def broker_exit_kind(self) -> BrokerExitKind:
@@ -166,6 +173,7 @@ def build_exit_runtime(
         broker=broker,
         intraday_enabled=bool(execution.intraday_enabled),
         intraday_use_oco=bool(execution.intraday_use_oco),
+        asset_class_filter=tuple(getattr(execution, "asset_class_filter", []) or []),
     )
 
 
@@ -369,10 +377,13 @@ def assess_eod_flatten(
     policy: ExitPolicy,
     now_et: datetime,
     market_is_open: bool,
+    runtime: ExitRuntime | None = None,
 ) -> EODFlattenDecision:
     target_time = parse_eod_time(policy.eod_flatten_time)
     if not policy.eod_flatten_enabled:
         return EODFlattenDecision(False, target_time, False, "disabled")
+    if runtime is not None and runtime.is_crypto:
+        return EODFlattenDecision(False, target_time, False, "disabled_for_crypto")
     if not market_is_open:
         return EODFlattenDecision(True, target_time, False, "market_closed")
     if now_et.time() < target_time:
@@ -405,6 +416,8 @@ def build_exit_telemetry_payload(
                 "broker": runtime.broker,
                 "intraday_enabled": runtime.intraday_enabled,
                 "intraday_use_oco": runtime.intraday_use_oco,
+                "asset_class_filter": list(runtime.asset_class_filter),
+                "is_crypto": runtime.is_crypto,
                 "exit_mode": runtime.exit_mode,
                 "broker_exit_kind": runtime.broker_exit_kind,
             },

@@ -56,13 +56,13 @@ def test_indexes_created(pod_db):
     assert "idx_decisions_pod_date" in indexes
 
 
-def test_schema_version_is_11(pod_db):
-    """Verify schema_meta shows version 11 (pod-scoped rotation state)."""
+def test_schema_version_is_13(pod_db):
+    """Verify schema_meta shows version 13 (profit-taking lifecycle telemetry)."""
     row = pod_db.execute(
         "SELECT value FROM schema_meta WHERE key = 'version'"
     ).fetchone()
     assert row is not None
-    assert row[0] == "11"
+    assert row[0] == "13"
 
 
 def test_strategy_rotation_state_table_exists(pod_db):
@@ -92,6 +92,99 @@ def test_decision_telemetry_tables_exist(pod_db):
     }
     assert "decision_contexts" in tables
     assert "llm_prompt_logs" in tables
+
+
+def test_profit_take_events_table_and_columns_exist(pod_db):
+    tables = {
+        row[0]
+        for row in pod_db.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    assert "profit_take_events" in tables
+
+    cols = {
+        row[0]
+        for row in pod_db.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'profit_take_events'"
+        ).fetchall()
+    }
+    expected = {
+        "event_id",
+        "timestamp",
+        "pod_id",
+        "symbol",
+        "event_type",
+        "decision_source",
+        "sleeve",
+        "source_decision_id",
+        "decision_id",
+        "trade_id",
+        "entry_batch",
+        "reduction_sequence",
+        "position_fraction",
+        "action",
+        "shares",
+        "price",
+        "notional",
+        "trigger_price",
+        "peak_price",
+        "drawdown_pct",
+        "pre_reduction_peak_unrealized_pnl",
+        "pre_reduction_peak_return_pct",
+        "trailing_stop_activated_at",
+        "peak_to_reduction_drawdown_pct",
+        "realized_pnl",
+        "return_pct",
+        "rule_name",
+        "reason",
+        "metadata_json",
+        "created_at",
+    }
+    assert expected.issubset(cols)
+
+
+def test_profit_take_indexes_and_attribution_columns_exist(pod_db):
+    indexes = {
+        row[0]
+        for row in pod_db.execute("SELECT index_name FROM duckdb_indexes()").fetchall()
+    }
+    assert "idx_profit_take_events_pod_time" in indexes
+    assert "idx_profit_take_events_symbol_time" in indexes
+    assert "idx_profit_take_events_trade_id" in indexes
+    assert "idx_profit_take_events_decision_id" in indexes
+
+    trades_cols = {
+        row[0]
+        for row in pod_db.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'trades'"
+        ).fetchall()
+    }
+    assert {
+        "source_decision_id",
+        "decision_source",
+        "sleeve",
+        "is_profit_take",
+        "profit_take_reason",
+    }.issubset(trades_cols)
+
+    decision_cols = {
+        row[0]
+        for row in pod_db.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'llm_decisions'"
+        ).fetchall()
+    }
+    assert {
+        "source_decision_id",
+        "decision_source",
+        "sleeve",
+        "is_profit_take",
+        "trigger_symbol",
+        "trigger_event_type",
+    }.issubset(decision_cols)
 
 
 def test_v11_repair_migrates_rotation_table_missing_pod_id(tmp_path):
@@ -132,3 +225,25 @@ def test_v11_repair_migrates_rotation_table_missing_pod_id(tmp_path):
     assert row[1] == "legacy_strategy"
     assert str(row[2]) == "2026-04-01"
     migrated.close()
+
+
+def test_v12_migration_backfills_is_profit_take_defaults(pod_db):
+    trade_default = pod_db.execute(
+        "SELECT column_default FROM information_schema.columns "
+        "WHERE table_name = 'trades' AND column_name = 'is_profit_take'"
+    ).fetchone()
+    decision_default = pod_db.execute(
+        "SELECT column_default FROM information_schema.columns "
+        "WHERE table_name = 'llm_decisions' AND column_name = 'is_profit_take'"
+    ).fetchone()
+
+    assert trade_default is not None
+    assert decision_default is not None
+    assert trade_default[0] in {"false", "FALSE", "CAST('f' AS BOOLEAN)"}
+    assert decision_default[0] in {"false", "FALSE", "CAST('f' AS BOOLEAN)"}
+
+    version_row = pod_db.execute(
+        "SELECT value FROM schema_meta WHERE key = 'version'"
+    ).fetchone()
+    assert version_row is not None
+    assert version_row[0] == "13"

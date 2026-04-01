@@ -25,6 +25,9 @@ trailing_stop_pct = 0.0125
 scale_in_tranches = 2
 reentry_cooldown_bars = 1
 
+[strategy]
+sleeve = "crypto"
+
 [strategy_rotation]
 enabled = true
 window_days = 60

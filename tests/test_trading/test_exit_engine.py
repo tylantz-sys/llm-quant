@@ -153,6 +153,28 @@ def test_eod_flatten_due_after_cutoff():
     assert decision.reason == "due"
 
 
+def test_eod_flatten_disabled_for_crypto_runtime():
+    policy = build_exit_policy(
+        RiskLimits(eod_flatten_enabled=True, eod_flatten_time="15:55"),
+        ExecutionConfig(asset_class_filter=["crypto"]),
+    )
+    runtime = build_exit_runtime(
+        "alpaca",
+        ExecutionConfig(intraday_enabled=True, intraday_use_oco=True, asset_class_filter=["crypto"]),
+    )
+
+    decision = assess_eod_flatten(
+        policy,
+        datetime(2026, 3, 31, 23, 56, tzinfo=UTC),
+        market_is_open=True,
+        runtime=runtime,
+    )
+
+    assert decision.enabled is False
+    assert decision.due is False
+    assert decision.reason == "disabled_for_crypto"
+
+
 def test_parse_eod_time_rejects_invalid_value():
     try:
         parse_eod_time("bad")
@@ -180,3 +202,25 @@ def test_exit_telemetry_payload_contains_policy_and_position_data():
     assert payload["exit_engine"]["policy"]["take_profit_mode"] == policy.take_profit_mode
     assert payload["exit_engine"]["runtime"]["broker_exit_kind"] == runtime.broker_exit_kind
     assert payload["exit_engine"]["positions"][0]["symbol"] == "SPY"
+
+
+def test_exit_telemetry_marks_native_crypto_without_stop_as_unprotected():
+    portfolio = _portfolio_with_position("BTC-USD", 0.25, 40000.0)
+    portfolio.positions["BTC-USD"].stop_loss = 0.0
+    states = {"BTC-USD": IntradayPositionState(symbol="BTC-USD", entry_price=40000.0)}
+    policy = build_exit_policy(RiskLimits(), ExecutionConfig(asset_class_filter=["crypto"]))
+    runtime = build_exit_runtime(
+        "alpaca",
+        ExecutionConfig(intraday_enabled=True, intraday_use_oco=True, asset_class_filter=["crypto"]),
+    )
+
+    _signals, telemetry = evaluate_position_exits(
+        portfolio,
+        {"BTC-USD": 40500.0},
+        states,
+        policy,
+        runtime,
+    )
+
+    assert telemetry[0].unprotected is True
+    assert telemetry[0].broker_exit_kind == "oco"

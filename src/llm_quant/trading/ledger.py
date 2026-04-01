@@ -16,6 +16,10 @@ import duckdb
 from llm_quant.db.integrity import compute_trade_hash, get_latest_hash
 from llm_quant.trading.executor import ExecutedTrade
 from llm_quant.trading.portfolio import Portfolio
+from llm_quant.trading.telemetry import (
+    is_profit_take_reason,
+    normalize_profit_take_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,9 @@ def log_trades(
     trade_date: date,
     decision_id: int | None = None,
     pod_id: str = "default",
+    decision_source: str | None = None,
+    sleeve: str | None = None,
+    source_decision_id: int | None = None,
 ) -> list[int]:
     """Persist executed trades to the ``trades`` table.
 
@@ -98,9 +105,27 @@ def log_trades(
         if "entry_batch" in trade_cols:
             insert_cols.append("entry_batch")
             insert_vals.append(trade.entry_batch)
+        normalized_exit_reason = normalize_profit_take_reason(trade.exit_reason)
         if "exit_reason" in trade_cols:
             insert_cols.append("exit_reason")
-            insert_vals.append(trade.exit_reason or None)
+            insert_vals.append(normalized_exit_reason)
+        if "source_decision_id" in trade_cols:
+            insert_cols.append("source_decision_id")
+            insert_vals.append(source_decision_id if source_decision_id is not None else decision_id)
+        if "decision_source" in trade_cols:
+            insert_cols.append("decision_source")
+            insert_vals.append(decision_source)
+        if "sleeve" in trade_cols:
+            insert_cols.append("sleeve")
+            insert_vals.append(sleeve)
+        if "is_profit_take" in trade_cols:
+            insert_cols.append("is_profit_take")
+            insert_vals.append(is_profit_take_reason(normalized_exit_reason))
+        if "profit_take_reason" in trade_cols:
+            insert_cols.append("profit_take_reason")
+            insert_vals.append(
+                normalized_exit_reason if is_profit_take_reason(normalized_exit_reason) else None
+            )
 
         cols_sql = ", ".join(insert_cols)
         placeholders = ", ".join(["?"] * len(insert_cols))

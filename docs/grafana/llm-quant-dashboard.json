@@ -258,6 +258,43 @@
       ],
       "fieldConfig": { "defaults": {}, "overrides": [] },
       "options": { "showHeader": true }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Harvest Metrics (Report Placeholder)",
+      "description": "Placeholder panel for report-level harvest telemetry. Wire this to a future API endpoint or exported report dataset when available.",
+      "datasource": "${DS_INFINITY}",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "url": "${api_base}/decisions/${decision_id}",
+          "parser": "backend",
+          "format": "table",
+          "root_selector": "$",
+          "columns": [
+            { "selector": "decision_id", "text": "decision_id", "type": "number" },
+            { "selector": "meta.warning", "text": "note", "type": "string" }
+          ],
+          "json_options": { "root_is_not_array": true, "columnar": false },
+          "url_options": {
+            "method": "GET",
+            "headers": [],
+            "params": [],
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": ""
+          },
+          "filters": [],
+          "uql": "",
+          "global_query_id": ""
+        }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "showHeader": true }
     }
   ],
   "schemaVersion": 39,

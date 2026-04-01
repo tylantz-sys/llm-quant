@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 from llm_quant.broker.alpaca import AlpacaClient, AlpacaError
 from llm_quant.config import ExecutionConfig, RiskLimits
@@ -15,6 +16,10 @@ from llm_quant.trading.exits import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _has_fractional_quantity(qty: float) -> bool:
+    return not math.isclose(float(qty), round(float(qty)), rel_tol=0.0, abs_tol=1e-9)
 
 
 def resolve_take_profit(price: float, stop_loss: float, limits: RiskLimits) -> float:
@@ -62,9 +67,15 @@ def submit_alpaca_orders(
             mapped_symbol = _map_crypto_symbol(symbol, execution.crypto_symbol_map)
             if trade.action in ("buy", "sell", "close"):
                 notional = None
-                qty = trade.shares
-                if execution.crypto_order_sizing == "notional":
+                qty = float(trade.shares)
+                if execution.crypto_order_sizing == "notional" and trade.action == "buy":
                     notional = trade.notional
+                if qty <= 0 and notional is None:
+                    logger.warning(
+                        "Skipping crypto order for %s because qty/notional is empty.",
+                        symbol,
+                    )
+                    continue
                 try:
                     client.submit_market_order(
                         symbol=mapped_symbol,
@@ -76,10 +87,16 @@ def submit_alpaca_orders(
                     )
                 except TypeError:
                     # Backward-compatible fallback if allow_fractional not supported.
+                    if _has_fractional_quantity(qty):
+                        raise AlpacaError(
+                            f"Fractional crypto order requires broker fractional support for {mapped_symbol}"
+                        ) from None
                     client.submit_market_order(
                         symbol=mapped_symbol,
                         qty=qty,
                         side="buy" if trade.action == "buy" else "sell",
+                        time_in_force=execution.crypto_time_in_force,
+                        notional=notional,
                     )
             continue
         if trade.action == "buy":

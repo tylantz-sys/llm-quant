@@ -16,6 +16,7 @@ import duckdb
 
 from llm_quant.config import AppConfig
 from llm_quant.surveillance.models import SeverityLevel, SurveillanceCheck
+from llm_quant.trading.harvest_metrics import compute_harvest_metrics_from_db
 
 logger = logging.getLogger(__name__)
 
@@ -786,6 +787,167 @@ def check_operational_health(
 # ---------------------------------------------------------------------------
 # 7. Kill Switches — 6 automatic halt triggers
 # ---------------------------------------------------------------------------
+
+
+def check_harvest_governance(
+    conn: duckdb.DuckDBPyConnection,
+    config: AppConfig,
+) -> list[SurveillanceCheck]:
+    """Evaluate profit-taking harvest governance thresholds."""
+    cfg = config.governance.profit_taking.governance
+    if not cfg.enabled:
+        return [
+            SurveillanceCheck(
+                detector="harvest_governance",
+                severity=SeverityLevel.OK,
+                message="Harvest governance disabled.",
+            )
+        ]
+
+    end_date = datetime.now(tz=UTC).date()
+    start_date = end_date - timedelta(days=max(cfg.lookback_days - 1, 0))
+    metrics = compute_harvest_metrics_from_db(
+        conn,
+        start=start_date,
+        end=end_date,
+    )
+
+    executed_events = int(metrics.get("executed_profit_take_events", 0))
+    if executed_events < cfg.min_profit_take_events:
+        return [
+            SurveillanceCheck(
+                detector="harvest_governance",
+                severity=SeverityLevel.OK,
+                message=(
+                    "Insufficient harvest telemetry for governance evaluation "
+                    f"({executed_events} events, need {cfg.min_profit_take_events})."
+                ),
+                metric_name="executed_profit_take_events",
+                current_value=float(executed_events),
+                threshold_value=float(cfg.min_profit_take_events),
+                details={
+                    "lookback_days": cfg.lookback_days,
+                    "recommended_actions": [],
+                    "observed_metrics": metrics,
+                },
+            )
+        ]
+
+    thresholds = [
+        ("capture_ratio", cfg.min_capture_ratio, "min"),
+        ("giveback_ratio", cfg.max_giveback_ratio, "max"),
+        ("trailing_salvage_proxy", cfg.min_trailing_salvage_rate, "min"),
+        ("realized_to_peak_ratio", cfg.min_realized_retention, "min"),
+        ("tp1_effectiveness", cfg.min_tp1_effectiveness, "min"),
+    ]
+
+    breached_metrics: list[dict[str, float | str | None]] = []
+    for metric_name, threshold, direction in thresholds:
+        observed = metrics.get(metric_name)
+        if observed is None:
+            breached_metrics.append(
+                {
+                    "metric": metric_name,
+                    "observed": None,
+                    "threshold": threshold,
+                    "direction": direction,
+                    "breach_type": "missing",
+                }
+            )
+            continue
+        if direction == "min" and observed < threshold:
+            breached_metrics.append(
+                {
+                    "metric": metric_name,
+                    "observed": float(observed),
+                    "threshold": threshold,
+                    "direction": direction,
+                    "breach_type": "below_min",
+                }
+            )
+        if direction == "max" and observed > threshold:
+            breached_metrics.append(
+                {
+                    "metric": metric_name,
+                    "observed": float(observed),
+                    "threshold": threshold,
+                    "direction": direction,
+                    "breach_type": "above_max",
+                }
+            )
+
+    actions_cfg = cfg.actions
+    recommended_actions: list[dict[str, object]] = []
+    if breached_metrics:
+        recommended_actions.append(
+            {
+                "action": "allocation_shrink",
+                "scale": actions_cfg.allocation_shrink_scale,
+            }
+        )
+        if actions_cfg.apply_conservative_mandate:
+            recommended_actions.append(
+                {
+                    "action": "apply_conservative_mandate",
+                    "mandate_name": actions_cfg.conservative_mandate_name,
+                }
+            )
+        if actions_cfg.temporary_eod_flatten:
+            recommended_actions.append(
+                {
+                    "action": "temporary_eod_flatten",
+                    "enabled": True,
+                }
+            )
+        if actions_cfg.demote_on_halt:
+            recommended_actions.append(
+                {
+                    "action": "demote_strategy",
+                    "enabled": True,
+                }
+            )
+        if actions_cfg.paper_revalidate_on_halt:
+            recommended_actions.append(
+                {
+                    "action": "paper_revalidate",
+                    "enabled": True,
+                }
+            )
+
+    severity = SeverityLevel.HALT if breached_metrics else SeverityLevel.OK
+    message = (
+        "Harvest governance breached thresholds for "
+        f"{', '.join(str(item['metric']) for item in breached_metrics)}."
+        if breached_metrics
+        else (
+            "Harvest governance metrics within thresholds "
+            f"over the last {cfg.lookback_days} days."
+        )
+    )
+
+    return [
+        SurveillanceCheck(
+            detector="harvest_governance",
+            severity=severity,
+            message=message,
+            metric_name="harvest_governance_breach_count",
+            current_value=float(len(breached_metrics)),
+            threshold_value=0.0,
+            details={
+                "lookback_days": cfg.lookback_days,
+                "breached_metrics": breached_metrics,
+                "observed_metrics": {
+                    "capture_ratio": metrics.get("capture_ratio"),
+                    "giveback_ratio": metrics.get("giveback_ratio"),
+                    "trailing_salvage_proxy": metrics.get("trailing_salvage_proxy"),
+                    "realized_to_peak_ratio": metrics.get("realized_to_peak_ratio"),
+                    "tp1_effectiveness": metrics.get("tp1_effectiveness"),
+                    "executed_profit_take_events": executed_events,
+                },
+                "recommended_actions": recommended_actions,
+            },
+        )
+    ]
 
 
 def check_kill_switches(  # noqa: C901, PLR0912

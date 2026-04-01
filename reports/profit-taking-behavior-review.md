@@ -41,6 +41,119 @@ However, the repo shows a material mismatch between **documented policy** and **
 - Backtesting scripts do not appear to model the intraday profit-taking stack or EOD flatten policy, so historical evidence for “does what it should” is weak.
 - I found no direct tests covering profit-taking, OCO reconciliation, trailing stop updates, or EOD flatten timing.
 
+## Phase 1 scorecard and mandate taxonomy
+
+This section is the new canonical Phase 1 specification for making the repo profit-taking-first at the governance and configuration layer.
+
+### Profit-taking scorecard objectives
+
+The repo should explicitly optimize for:
+- converting favorable excursion into realized profit
+- limiting open-gain giveback
+- harvesting winners before they become stale
+- favoring sleeves that retain profits better
+- evaluating Claude/overlay quality by realized harvest outcomes
+
+### Canonical Phase 1 metrics
+
+The scorecard introduces the following first-class metrics:
+
+- **harvest_ratio**: realized profit divided by peak unrealized profit
+- **open_gain_giveback_pct**: percent of peak open profit lost before monetization
+- **tp1_hit_rate**: frequency of hitting the first profit-taking milestone
+- **trailing_preservation_rate**: fraction of trades where trailing logic preserved gains effectively
+- **realized_to_unrealized_ratio**: ratio of booked gains to observed peak gains
+- **days_since_last_harvest**: timeliness metric for stale winner handling
+- **runner_retention_quality**: whether the residual runner meaningfully improved realized outcome
+
+These metrics are Phase 1 governance objects even before all runtime telemetry is live. The immediate purpose is to:
+- define thresholds
+- create configuration defaults
+- establish promotion and selection rules
+- create a stable vocabulary for later instrumentation
+
+### Composite score weights
+
+Phase 1 defines a composite profit-taking score with these default weights:
+
+- capture ratio weight: `0.35`
+- giveback penalty weight: `0.25`
+- TP1 hit-rate weight: `0.15`
+- trailing preservation weight: `0.15`
+- runner retention weight: `0.10`
+
+These weights are intended to be stable defaults, not final optimized parameters.
+
+### Promotion gates
+
+A strategy should not be promoted solely on robustness or paper profitability. Under the Phase 1 model it should also satisfy monetization quality floors:
+
+- `min_harvest_ratio = 0.45`
+- `max_open_gain_giveback_pct = 0.35`
+- `min_tp1_hit_rate = 0.40`
+- `min_trailing_preservation_rate = 0.40`
+- `min_realized_to_unrealized_ratio = 0.55`
+- `min_paper_trades_for_harvest_eval = 30`
+
+These are intended as **initial governance defaults**, not yet final policy.
+
+### Rotation and selection defaults
+
+The repo should begin to reflect a harvest-first bias in ranking and capital deployment:
+
+- `prefer_harvest_over_new_entries = true`
+- `stale_winner_trim_required = true`
+- `max_days_since_last_harvest = 10`
+- `reserve_cash_for_rotation = 0.10`
+- `block_readd_after_partial = true`
+
+These are Phase 1 planning and configuration defaults. Runtime enforcement and telemetry come later.
+
+## Sleeve mandate taxonomy
+
+Phase 1 introduces explicit harvesting doctrines per sleeve instead of treating all promoted sleeves as exit-identical.
+
+### Default sleeve mandate
+The base promoted default sleeve should use a **balanced harvest** doctrine:
+
+- `mandate_type = "balanced_harvest"`
+- `harvest_priority = 50`
+- `tp1_target_pct = 0.02`
+- `tp1_size = 0.50`
+- `runner_tp_mult = 2.0`
+- `trailing_stop_pct = 0.015`
+- `max_giveback_pct = 0.35`
+- `min_harvest_ratio = 0.45`
+- `stale_winner_days = 5`
+- `allow_reentry_after_partial = false`
+- `eod_flatten = false`
+
+### Crypto sleeve mandate
+The crypto sleeve should use a **crypto synthetic harvest** doctrine with faster monetization and tighter giveback controls:
+
+- `mandate_type = "crypto_synthetic_harvest"`
+- `harvest_priority = 80`
+- `tp1_target_pct = 0.015`
+- `tp1_size = 0.50`
+- `runner_tp_mult = 2.0`
+- `trailing_stop_pct = 0.0125`
+- `max_giveback_pct = 0.30`
+- `min_harvest_ratio = 0.50`
+- `stale_winner_days = 2`
+- `allow_reentry_after_partial = false`
+- `eod_flatten = false`
+
+These are seed mandates meant to create a stable contract between governance, future telemetry, ranking, and prompt logic.
+
+## Intended Phase 1 outcomes
+
+Phase 1 is not a runtime telemetry overhaul. It is a **configuration and governance contract** that does four things:
+
+1. defines what “keeping profits well” means
+2. creates explicit thresholds for promotion and sleeve behavior
+3. introduces stable mandate vocabulary for default and crypto sleeves
+4. creates future integration points for telemetry, ranking, governance enforcement, and Claude evaluation
+
 ## 1) Where profit-taking is actually implemented
 
 ### A. Non-intraday Alpaca bracket take-profit

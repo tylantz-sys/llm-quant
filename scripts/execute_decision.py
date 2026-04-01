@@ -28,8 +28,19 @@ from llm_quant.config import load_config_for_pod
 from llm_quant.db.schema import get_connection
 from llm_quant.risk.manager import RiskManager
 from llm_quant.trading.executor import execute_signals
+from llm_quant.trading.exits import (
+    build_exit_policy,
+    build_exit_runtime,
+    build_exit_telemetry_payload,
+    evaluate_position_exits,
+)
 from llm_quant.trading.ledger import log_trades, save_portfolio_snapshot
 from llm_quant.trading.portfolio import Portfolio
+from llm_quant.trading.runtime_controls import (
+    apply_harvest_governance_controls,
+    load_latest_harvest_governance_result,
+    log_harvest_governance_action,
+)
 
 logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 logger = logging.getLogger(__name__)
@@ -94,10 +105,37 @@ def main() -> None:
         portfolio.update_prices(prices)
         nav_before = portfolio.nav
 
+        exit_policy = build_exit_policy(config.risk, config.execution)
+        exit_runtime = build_exit_runtime("paper", config.execution)
+        exit_signals, exit_telemetry = evaluate_position_exits(
+            portfolio=portfolio,
+            prices=prices,
+            states={},
+            policy=exit_policy,
+            runtime=exit_runtime,
+        )
+
+        runtime_result = load_latest_harvest_governance_result(
+            conn,
+            config=config,
+            pod_id=pod_id,
+        )
+        all_signals = exit_signals + decision.signals
+        governed_signals = apply_harvest_governance_controls(
+            all_signals,
+            runtime_result,
+            portfolio_symbols=set(portfolio.positions.keys()),
+        )
+        log_harvest_governance_action(
+            conn,
+            pod_id=pod_id,
+            runtime_result=runtime_result,
+        )
+
         # Risk filter
         risk_mgr = RiskManager(config)
         approved, rejected = risk_mgr.filter_signals(
-            decision.signals, portfolio, prices
+            governed_signals, portfolio, prices
         )
 
         # Execute approved signals
@@ -140,6 +178,23 @@ def main() -> None:
                 "regime_reasoning": decision.regime_reasoning,
                 "portfolio_commentary": decision.portfolio_commentary,
                 "total_signals": len(decision.signals),
+                "exit_engine_signals": len(exit_signals),
+                "total_signals_after_exit_merge": len(all_signals),
+                "total_signals_after_governance": len(governed_signals),
+            },
+            "exit_engine": build_exit_telemetry_payload(
+                exit_telemetry, exit_policy, exit_runtime
+            )["exit_engine"],
+            "harvest_governance": {
+                "active_mandate_name": runtime_result.active_mandate_name,
+                "active_mandate_type": runtime_result.active_mandate_type,
+                "allocation_scale": runtime_result.allocation_scale,
+                "force_flatten": runtime_result.force_flatten,
+                "conservative_mandate_name": runtime_result.conservative_mandate_name,
+                "lifecycle_recommendation": runtime_result.lifecycle_recommendation,
+                "breached_rules": runtime_result.breached_rules,
+                "actions": runtime_result.actions,
+                "metrics": runtime_result.metrics,
             },
             "risk_filter": {
                 "approved": len(approved),

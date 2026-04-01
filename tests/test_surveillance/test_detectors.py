@@ -15,6 +15,9 @@ from llm_quant.config import (
     KillSwitchConfig,
     OperationalHealthConfig,
     ProcessDriftConfig,
+    ProfitTakingGovernanceActionsConfig,
+    ProfitTakingGovernanceConfig,
+    ProfitTakingConfig,
     RegimeDriftConfig,
     RiskDriftConfig,
 )
@@ -797,6 +800,141 @@ class TestCheckOperationalHealth:
         ]
         assert len(staleness_checks) >= 1
         assert staleness_checks[0].severity == SeverityLevel.WARNING
+
+
+class TestCheckHarvestGovernance:
+    """Tests for check_harvest_governance detector."""
+
+    def test_insufficient_profit_take_events_returns_ok(self, tmp_db):
+        from llm_quant.surveillance.detectors import check_harvest_governance
+
+        config = AppConfig(
+            governance=GovernanceConfig(
+                profit_taking=ProfitTakingConfig(
+                    governance=ProfitTakingGovernanceConfig(
+                        min_profit_take_events=3,
+                    )
+                )
+            )
+        )
+        checks = check_harvest_governance(tmp_db, config)
+        assert len(checks) == 1
+        assert checks[0].severity == SeverityLevel.OK
+        assert checks[0].metric_name == "executed_profit_take_events"
+        assert "Insufficient harvest telemetry" in checks[0].message
+
+    def test_breached_metrics_trigger_halt_with_actions(self, tmp_db):
+        from llm_quant.surveillance.detectors import check_harvest_governance
+
+        now = datetime.now(tz=UTC)
+        for idx in range(5):
+            tmp_db.execute(
+                """
+                INSERT INTO profit_take_events (
+                    event_id, timestamp, pod_id, symbol, event_type,
+                    decision_source, realized_pnl, pre_reduction_peak_unrealized_pnl,
+                    peak_to_reduction_drawdown_pct, reason, metadata_json
+                ) VALUES (?, ?, 'default', 'SPY', 'executed', 'llm', ?, ?, ?, ?, '{}')
+                """,
+                [
+                    idx + 1,
+                    now - timedelta(days=idx),
+                    10.0,
+                    100.0,
+                    0.8,
+                    "trailing_stop" if idx >= 3 else "take_profit_partial",
+                ],
+            )
+        tmp_db.commit()
+
+        config = AppConfig(
+            governance=GovernanceConfig(
+                profit_taking=ProfitTakingConfig(
+                    governance=ProfitTakingGovernanceConfig(
+                        min_profit_take_events=5,
+                        min_capture_ratio=0.5,
+                        max_giveback_ratio=0.2,
+                        min_trailing_salvage_rate=0.8,
+                        min_realized_retention=0.5,
+                        min_tp1_effectiveness=0.8,
+                        actions=ProfitTakingGovernanceActionsConfig(
+                            allocation_shrink_scale=0.4,
+                            apply_conservative_mandate=True,
+                            conservative_mandate_name="default",
+                            temporary_eod_flatten=True,
+                            demote_on_halt=True,
+                            paper_revalidate_on_halt=True,
+                        ),
+                    )
+                )
+            )
+        )
+
+        checks = check_harvest_governance(tmp_db, config)
+        assert len(checks) == 1
+        check = checks[0]
+        assert check.severity == SeverityLevel.HALT
+        assert check.metric_name == "harvest_governance_breach_count"
+        assert check.current_value > 0
+        assert "breached thresholds" in check.message
+        assert check.details["recommended_actions"]
+        assert any(
+            action["action"] == "allocation_shrink"
+            for action in check.details["recommended_actions"]
+        )
+
+    def test_metrics_within_thresholds_return_ok(self, tmp_db):
+        from llm_quant.surveillance.detectors import check_harvest_governance
+
+        now = datetime.now(tz=UTC)
+        events = [
+            (1, 60.0, 100.0, 0.1, "take_profit_partial"),
+            (2, 55.0, 100.0, 0.1, "take_profit_partial"),
+            (3, 50.0, 100.0, 0.1, "take_profit_partial"),
+            (4, 45.0, 100.0, 0.1, "trailing_stop"),
+            (5, 40.0, 100.0, 0.1, "trailing_stop"),
+        ]
+        for event_id, realized_pnl, peak_pnl, giveback, reason in events:
+            tmp_db.execute(
+                """
+                INSERT INTO profit_take_events (
+                    event_id, timestamp, pod_id, symbol, event_type,
+                    decision_source, realized_pnl, pre_reduction_peak_unrealized_pnl,
+                    peak_to_reduction_drawdown_pct, reason, metadata_json
+                ) VALUES (?, ?, 'default', 'SPY', 'executed', 'llm', ?, ?, ?, ?, '{}')
+                """,
+                [
+                    event_id,
+                    now - timedelta(days=event_id),
+                    realized_pnl,
+                    peak_pnl,
+                    giveback,
+                    reason,
+                ],
+            )
+        tmp_db.commit()
+
+        config = AppConfig(
+            governance=GovernanceConfig(
+                profit_taking=ProfitTakingConfig(
+                    governance=ProfitTakingGovernanceConfig(
+                        min_profit_take_events=5,
+                        min_capture_ratio=0.4,
+                        max_giveback_ratio=0.2,
+                        min_trailing_salvage_rate=0.2,
+                        min_realized_retention=0.4,
+                        min_tp1_effectiveness=0.5,
+                    )
+                )
+            )
+        )
+
+        checks = check_harvest_governance(tmp_db, config)
+        assert len(checks) == 1
+        check = checks[0]
+        assert check.severity == SeverityLevel.OK
+        assert check.current_value == 0.0
+        assert check.details["recommended_actions"] == []
 
 
 class TestCheckKillSwitches:

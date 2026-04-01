@@ -12,6 +12,7 @@ from llm_quant.config import AppConfig
 from llm_quant.surveillance.detectors import (
     check_alpha_decay,
     check_data_quality,
+    check_harvest_governance,
     check_kill_switches,
     check_operational_health,
     check_process_drift,
@@ -61,6 +62,7 @@ class SurveillanceScanner:
             ("process_drift", check_process_drift),
             ("operational_health", check_operational_health),
             ("kill_switches", check_kill_switches),
+            ("harvest_governance", check_harvest_governance),
             # Track C — Structural Arbitrage kill-switch detectors
             ("track_c_exchange_health", check_exchange_health),
             ("track_c_spread_compression", check_spread_compression),
