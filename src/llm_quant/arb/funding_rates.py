@@ -14,7 +14,23 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import ccxt
+try:
+    import ccxt
+
+    _CcxtNotSupportedError = ccxt.NotSupported
+    _CcxtBadRequestError = ccxt.BadRequest
+    _CCXT_AVAILABLE = True
+except ImportError:
+    ccxt = None
+
+    class _CcxtNotSupportedError(Exception):  # type: ignore[no-redef]
+        """Placeholder for ccxt.NotSupported when ccxt is not installed."""
+
+    class _CcxtBadRequestError(Exception):  # type: ignore[no-redef]
+        """Placeholder for ccxt.BadRequest when ccxt is not installed."""
+
+    _CCXT_AVAILABLE = False
+
 import duckdb
 import polars as pl
 
@@ -95,6 +111,12 @@ class FundingCollector:
 
     def _create_exchange(self, exchange_id: str) -> ccxt.Exchange:
         """Instantiate a CCXT exchange object with safe defaults."""
+        if not _CCXT_AVAILABLE:
+            msg = (
+                "ccxt is required for exchange connectivity. "
+                "Install with: pip install 'llm-quant[trackc]'"
+            )
+            raise ImportError(msg)
         exchange_class = getattr(ccxt, exchange_id)
         return exchange_class(
             {
@@ -287,7 +309,7 @@ class FundingCollector:
                 batch = exchange.fetch_funding_rate_history(
                     symbol, since=current_since, limit=100
                 )
-            except (ccxt.NotSupported, ccxt.BadRequest, AttributeError):
+            except (_CcxtNotSupportedError, _CcxtBadRequestError, AttributeError):
                 logger.debug(
                     "fetch_funding_rate_history not supported on %s for %s",
                     exchange.id,

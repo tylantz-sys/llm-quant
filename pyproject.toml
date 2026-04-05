@@ -48,6 +48,9 @@ dashboard = [
     "streamlit>=1.38.0",
     "plotly>=5.24.0",
 ]
+trackc = [
+    "ccxt>=4.0.0",
+]
 
 [project.scripts]
 pq = "llm_quant.cli:app"
