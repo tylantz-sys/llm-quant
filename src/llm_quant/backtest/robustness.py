@@ -79,6 +79,30 @@ class MinTRLResult:
     min_trl_pass: bool = False  # True if backtest_months >= min_trl_months
 
 
+def build_robustness_gate_details(
+    *,
+    dsr_passed: bool,
+    pbo_passed: bool,
+    cpcv_passed: bool,
+    cost_2x_survives: bool,
+    parameter_stability_passed: bool,
+    shuffled_signal_passed: bool,
+    marginal_sr_passed: bool,
+    portfolio_correlation_passed: bool,
+) -> dict[str, bool]:
+    """Return normalized gate details for robustness artifacts."""
+    return {
+        "dsr_>=_0.95": dsr_passed,
+        "pbo_<=_0.10": pbo_passed,
+        "cpcv_mean_oos_sharpe_>_0": cpcv_passed,
+        "2x_costs_survive": cost_2x_survives,
+        "parameter_stability_>_50%": parameter_stability_passed,
+        "shuffled_signal_p_<_0.05": shuffled_signal_passed,
+        "marginal_sr_contribution_>=_0.05": marginal_sr_passed,
+        "portfolio_correlation_<_0.30": portfolio_correlation_passed,
+    }
+
+
 @dataclass
 class RobustnessResult:
     """Complete robustness gate result."""
@@ -114,16 +138,16 @@ class RobustnessResult:
 
     def compute_overall(self) -> None:
         """Compute overall gate pass from individual results."""
-        self.gate_details = {
-            "dsr_>=_0.95": self.dsr_passed,
-            "pbo_<=_0.10": self.pbo_passed,
-            "cpcv_mean_oos_sharpe_>_0": self.cpcv_passed,
-            "2x_costs_survive": self.cost_2x_survives,
-            "parameter_stability_>_50%": self.parameter_stability_passed,
-            "shuffled_signal_p_<_0.05": self.shuffled_signal_passed,
-            "marginal_sr_contribution_>=_0.05": self.marginal_sr_passed,
-            "portfolio_correlation_<_0.30": self.portfolio_correlation_passed,
-        }
+        self.gate_details = build_robustness_gate_details(
+            dsr_passed=self.dsr_passed,
+            pbo_passed=self.pbo_passed,
+            cpcv_passed=self.cpcv_passed,
+            cost_2x_survives=self.cost_2x_survives,
+            parameter_stability_passed=self.parameter_stability_passed,
+            shuffled_signal_passed=self.shuffled_signal_passed,
+            marginal_sr_passed=self.marginal_sr_passed,
+            portfolio_correlation_passed=self.portfolio_correlation_passed,
+        )
         self.overall_passed = all(self.gate_details.values())
 
         # Emit WARNING if backtest history is shorter than MinTRL

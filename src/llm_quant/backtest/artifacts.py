@@ -152,7 +152,8 @@ def get_lifecycle_state(strat_dir: Path) -> LifecycleState:
 def ensure_frozen_spec(strat_dir: Path) -> dict[str, Any]:
     """Load research-spec.yaml and verify it is frozen.
 
-    Raises FrozenSpecError if the spec is not frozen.
+    Raises FrozenSpecError if the spec is not frozen or its frozen_hash
+    does not match the current file contents excluding frozen_hash itself.
     Returns the spec data.
     """
     spec_path = strat_dir / "research-spec.yaml"
@@ -168,6 +169,23 @@ def ensure_frozen_spec(strat_dir: Path) -> dict[str, Any]:
             "Set frozen: true before running backtests."
         )
         raise FrozenSpecError(msg)
+
+    frozen_hash = spec.get("frozen_hash")
+    if not frozen_hash:
+        raise FrozenSpecError(
+            "research-spec.yaml is frozen but missing frozen_hash. "
+            "Re-freeze the research spec before running backtests."
+        )
+
+    hashable = {k: v for k, v in spec.items() if k != "frozen_hash"}
+    content = yaml.dump(hashable, default_flow_style=False, sort_keys=False)
+    current_hash = hash_content(content)
+    if current_hash != frozen_hash:
+        raise FrozenSpecError(
+            "research-spec.yaml frozen_hash does not match current contents. "
+            "Re-freeze the research spec before running backtests."
+        )
+
     return spec
 
 

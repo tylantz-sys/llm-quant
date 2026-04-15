@@ -1,3 +1,13 @@
 #!/bin/sh
 export PATH="$HOME/.local/bin:$PATH"
-pytest
+TIER="${1:-all}"
+
+case "$TIER" in
+  all)
+    pytest
+    ;;
+  *)
+    echo "Unknown test tier: $TIER — use: all" >&2
+    exit 1
+    ;;
+esac

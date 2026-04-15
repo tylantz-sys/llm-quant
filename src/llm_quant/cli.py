@@ -3,8 +3,10 @@
 import dataclasses
 import logging
 import re
+import time
 from datetime import UTC, datetime, time as dt_time, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -122,7 +124,7 @@ def _get_alpaca_account() -> dict[str, float | str]:
     return client.get_account()
 
 
-def _sync_live_alpaca_cash(portfolio) -> dict[str, float] | None:
+def _sync_live_alpaca_cash(portfolio: Any) -> dict[str, float] | None:
     try:
         account = _get_alpaca_account()
     except Exception as exc:  # noqa: BLE001
@@ -139,6 +141,65 @@ def _sync_live_alpaca_cash(portfolio) -> dict[str, float] | None:
         f"cash=${live_cash:,.2f} equity=${live_equity:,.2f}"
     )
     return {"cash": live_cash, "equity": live_equity}
+
+
+def _broker_side_for_signal(action: object) -> str:
+    value = getattr(action, "value", str(action)).lower()
+    return "buy" if value == "buy" else "sell"
+
+
+def _release_runtime_locks(global_lock: Any, run_lock: Any) -> None:
+    if global_lock:
+        global_lock.release()
+    if run_lock:
+        run_lock.release()
+
+
+def _monitor_and_reconcile_broker_drift(
+    *,
+    conn: Any,
+    client: Any,
+    portfolio: Any,
+    pod_id: str,
+    tracked_symbols: list[str] | None = None,
+    decision_id: int | None = None,
+    resolved_signal_source: str | None = None,
+    strategy_set: str | None = None,
+    exit_policy_state: dict[str, object] | None = None,
+) -> tuple[bool, Any | None]:
+    from llm_quant.broker.monitor import monitor_open_positions
+    from llm_quant.broker.reconciliation import reconcile_broker_orders
+    from llm_quant.trading.ledger import log_broker_fills
+
+    monitored = monitor_open_positions(client, tracked_symbols=tracked_symbols)
+    monitored_symbols = {event.symbol for event in monitored if getattr(event, "symbol", "")}
+    portfolio_symbols = {
+        str(symbol)
+        for symbol, position in getattr(portfolio, "positions", {}).items()
+        if float(getattr(position, "shares", 0.0) or 0.0) > 0.0
+    }
+    drift_detected = monitored_symbols != portfolio_symbols
+    if not drift_detected:
+        return False, None
+
+    reconciliation = reconcile_broker_orders(
+        conn,
+        client,
+        portfolio=portfolio,
+        ledger_conn=conn,
+        pod_id=pod_id,
+        broker_positions=client.list_positions(),
+        log_fills_fn=log_broker_fills,
+        trade_date=datetime.now(tz=UTC).date(),
+        log_kwargs={
+            "decision_id": decision_id,
+            "decision_source": resolved_signal_source,
+            "sleeve": strategy_set,
+            "source_decision_id": decision_id,
+            "exit_policy_state": exit_policy_state or {},
+        },
+    )
+    return True, reconciliation
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +289,8 @@ def _run_single_pod(
         fallback_governor_decision,
     )
     from llm_quant.brain.models import Action, TradingDecision
-    from llm_quant.brain.overlay import OverlayEngine
+    from llm_quant.broker.execution.exit_adapter import convert_exit_to_orders
+    from llm_quant.brain.overlay import OverlayEngine, OverlayUnavailableError
     from llm_quant.broker.alpaca import AlpacaClient, AlpacaError
     from llm_quant.broker.intraday_orders import (
         load_order_states,
@@ -237,6 +299,8 @@ def _run_single_pod(
         update_trailing_stops,
         upsert_order_states,
     )
+    from llm_quant.broker.monitor import monitor_open_positions
+    from llm_quant.broker.reconciliation import reconcile_broker_orders
     from llm_quant.broker.rth import should_skip_intraday
     from llm_quant.data.alpaca_intraday import (
         fetch_intraday_crypto_ohlcv,
@@ -256,10 +320,13 @@ def _run_single_pod(
     from llm_quant.risk.manager import RiskManager
     from llm_quant.trading.executor import execute_signals
     from llm_quant.trading.exits import (
+        EODFlattenDecision,
         build_exit_policy,
         build_exit_runtime,
         build_exit_telemetry_payload,
+        evaluate_broker_exit_status,
         evaluate_position_exits,
+        parse_eod_time,
     )
     from llm_quant.trading.intraday import (
         apply_reentry_cooldown,
@@ -297,8 +364,20 @@ def _run_single_pod(
         required_symbols,
     )
     from llm_quant.strategies.rotation import select_rotated_specs
-    from llm_quant.trading.ledger import log_trades, save_portfolio_snapshot
+    from llm_quant.trading.ledger import (
+        log_broker_fills,
+        log_trades,
+        persist_reconciliation_snapshot,
+        save_portfolio_snapshot,
+    )
+    alpaca_client = None
     from llm_quant.trading.portfolio import Portfolio
+    from llm_quant.broker.executor import (
+        build_entry_order_intents,
+        submit_alpaca_orders,
+        submit_order_intents,
+    )
+    from llm_quant.broker.reconciliation import persist_submitted_orders
 
     config = _get_config_for_pod(pod_id)
     db_path = _get_db_path(config)
@@ -322,6 +401,27 @@ def _run_single_pod(
         )
         run_lock = acquire_run_lock(pod_id, slot)
         if run_lock is None:
+            try:
+                skip_conn = get_connection(db_path)
+                log_intraday_context(
+                    skip_conn,
+                    pod_id,
+                    datetime.now(tz=UTC),
+                    {
+                        "timestamp": slot,
+                        "signal_source": resolved_signal_source,
+                        "strategy_set": strategy_set if use_strategy_overlay else "",
+                        "skip_reason": "already_executed",
+                        "skip_status": "skipped",
+                        "slot": slot,
+                    },
+                )
+                skip_conn.close()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Failed to log already-executed intraday skip context for pod %s",
+                    pod_id,
+                )
             console.print(
                 f"[yellow]Intraday slot {slot} already executed — skipping.[/yellow]"
             )
@@ -344,30 +444,42 @@ def _run_single_pod(
     today = datetime.now(tz=UTC).date()
 
     if config.execution.intraday_enabled and config.execution.intraday_rth_guard:
-        try:
-            rth_client = AlpacaClient.from_env()
-            if should_skip_intraday(rth_client.is_market_open(), True):
-                if config.execution.log_decisions_when_rth_closed:
-                    log_only = True
-                    console.print(
-                        "[yellow]RTH closed — logging decisions only.[/yellow]"
-                    )
-                else:
-                    console.print("[yellow]RTH closed — skipped intraday run.[/yellow]")
-                    conn.close()
-                    if global_lock:
-                        global_lock.release()
-                    if run_lock:
-                        run_lock.release()
-                    return
-        except AlpacaError as exc:
-            console.print(f"[red]FAIL[/red] Alpaca clock check failed: {exc}")
-            conn.close()
-            if global_lock:
-                global_lock.release()
-            if run_lock:
-                run_lock.release()
-            raise typer.Exit(1) from exc
+        asset_class_filters = {
+            str(asset_class).lower()
+            for asset_class in (config.execution.asset_class_filter or [])
+        }
+        uses_crypto_only_runtime = bool(asset_class_filters) and asset_class_filters <= {
+            "crypto"
+        }
+        if uses_crypto_only_runtime:
+            console.print(
+                "[yellow]Crypto-only intraday pod detected — skipping equities RTH clock guard.[/yellow]"
+            )
+        else:
+            try:
+                rth_client = AlpacaClient.from_env()
+                if should_skip_intraday(rth_client.is_market_open(), True):
+                    if config.execution.log_decisions_when_rth_closed:
+                        log_only = True
+                        console.print(
+                            "[yellow]RTH closed — logging decisions only.[/yellow]"
+                        )
+                    else:
+                        console.print("[yellow]RTH closed — skipped intraday run.[/yellow]")
+                        conn.close()
+                        if global_lock:
+                            global_lock.release()
+                        if run_lock:
+                            run_lock.release()
+                        return
+            except AlpacaError as exc:
+                console.print(f"[red]FAIL[/red] Alpaca clock check failed: {exc}")
+                conn.close()
+                if global_lock:
+                    global_lock.release()
+                if run_lock:
+                    run_lock.release()
+                raise typer.Exit(1) from exc
     elif config.execution.intraday_enabled and not config.execution.intraday_rth_guard:
         console.print(
             "[yellow]RTH guard disabled — running intraday regardless of market hours.[/yellow]"
@@ -510,6 +622,7 @@ def _run_single_pod(
     console.print("[bold]Step 2/5:[/bold] Loading portfolio...")
     initial_capital = _resolve_initial_capital(config, broker)
     portfolio = Portfolio.from_db(conn, initial_capital, pod_id=pod_id)
+    states: dict[str, Any] = {}
 
     # Get latest prices for portfolio
     if config.execution.intraday_enabled:
@@ -540,7 +653,6 @@ def _run_single_pod(
         live_account_context = _sync_live_alpaca_cash(portfolio)
 
     peak_nav = compute_peak_nav(conn, pod_id, initial_capital)
-    portfolio.peak_nav = peak_nav
     current_drawdown_pct = (
         ((portfolio.nav - peak_nav) / peak_nav * 100.0) if peak_nav > 0 else 0.0
     )
@@ -739,6 +851,24 @@ def _run_single_pod(
                     decision = overlay_decision
                     decision.signals = sanitized_signals
                     governor_audit["mode"] = "overlay_governor"
+            except OverlayUnavailableError as exc:
+                reason = str(exc)
+                decision = fallback_governor_decision(
+                    context=context,
+                    candidate_signals=candidate_signals,
+                    reason=reason,
+                )
+                governor_audit.update(
+                    {
+                        "mode": "overlay_fallback",
+                        "fallback_required": True,
+                        "policy_violations": [reason],
+                    }
+                )
+                console.print(
+                    "[yellow]WARN[/yellow] Overlay unavailable; using deterministic "
+                    f"governor fallback ({reason})."
+                )
             except Exception as exc:  # noqa: BLE001
                 reason = f"overlay_error:{exc}"
                 decision = fallback_governor_decision(
@@ -754,7 +884,8 @@ def _run_single_pod(
                     }
                 )
                 console.print(
-                    f"[yellow]WARN[/yellow] Overlay call failed; fallback engaged: {exc}"
+                    "[yellow]WARN[/yellow] Overlay call failed; using deterministic "
+                    "governor fallback."
                 )
             decision_logger = SignalEngine(config)
     else:
@@ -795,6 +926,9 @@ def _run_single_pod(
     risk_mgr = RiskManager(config)
     exit_policy = build_exit_policy(config.risk, config.execution)
     exit_runtime = build_exit_runtime(broker, config.execution)
+    exit_policy_state = dataclasses.asdict(exit_policy)
+
+    alpaca_client: AlpacaClient | None = None
 
     governance_runtime = load_latest_harvest_governance_result(
         conn,
@@ -880,6 +1014,60 @@ def _run_single_pod(
             if run_lock:
                 run_lock.release()
             raise typer.Exit(1)
+        if (
+            broker.lower() == "alpaca"
+            and config.execution.intraday_enabled
+            and not config.execution.intraday_use_oco
+        ):
+            broker_exit_statuses = evaluate_broker_exit_status(
+                portfolio,
+                prices,
+                states,
+                exit_policy,
+            )
+            synthetic_exit_intents = []
+            for status in broker_exit_statuses:
+                synthetic_exit_intents.extend(
+                    convert_exit_to_orders(
+                        status,
+                        status.remaining_qty,
+                        allow_fractional=asset_class_map.get(status.symbol, "equity").lower()
+                        == "crypto",
+                    )
+                )
+            if synthetic_exit_intents:
+                if alpaca_client is None:
+                    try:
+                        alpaca_client = AlpacaClient.from_env()
+                    except AlpacaError as exc:
+                        console.print(f"[red]FAIL[/red] Alpaca client init failed: {exc}")
+                        conn.close()
+                        _release_runtime_locks(global_lock, run_lock)
+                        raise typer.Exit(1) from exc
+                submitted_exit_orders = submit_order_intents(
+                    alpaca_client,
+                    synthetic_exit_intents,
+                    config.execution,
+                )
+                persist_submitted_orders(conn, submitted_exit_orders, pod_id=pod_id)
+                reconcile_broker_orders(
+                    conn,
+                    alpaca_client,
+                    portfolio=portfolio,
+                    ledger_conn=conn,
+                    pod_id=pod_id,
+                    order_ids=[order.order_id for order in submitted_exit_orders],
+                    broker_positions=alpaca_client.list_positions(),
+                    log_fills_fn=log_broker_fills,
+                    trade_date=today,
+                    log_kwargs={
+                        "decision_id": None,
+                        "decision_source": resolved_signal_source,
+                        "sleeve": strategy_set if use_strategy_overlay else None,
+                        "source_decision_id": None,
+                        "exit_policy_state": exit_policy_state,
+                    },
+                )
         if exit_runtime.exit_mode == "synthetic":
             signals = merge_intraday_signals(
                 entry_signals,
@@ -1009,8 +1197,7 @@ def _run_single_pod(
         },
     )
 
-    alpaca_client = None
-    if not log_only and broker.lower() == "alpaca":
+    if broker.lower() == "alpaca":
         try:
             alpaca_client = AlpacaClient.from_env()
         except AlpacaError as exc:
@@ -1019,6 +1206,18 @@ def _run_single_pod(
             if global_lock:
                 global_lock.release()
             raise typer.Exit(1) from exc
+
+        _monitor_and_reconcile_broker_drift(
+            conn=conn,
+            client=alpaca_client,
+            portfolio=portfolio,
+            pod_id=pod_id,
+            tracked_symbols=list(asset_class_map),
+            decision_id=decision_id,
+            resolved_signal_source=resolved_signal_source,
+            strategy_set=strategy_set if use_strategy_overlay else None,
+            exit_policy_state=exit_policy_state,
+        )
     executed = []
     if log_only:
         console.print(
@@ -1050,11 +1249,9 @@ def _run_single_pod(
             upsert_position_states(conn, pod_id, states)
 
         if alpaca_client and executed:
-            from llm_quant.broker.executor import submit_alpaca_orders
-
             stop_losses = {sig.symbol: sig.stop_loss for sig in approved}
             try:
-                submit_alpaca_orders(
+                submitted_orders = submit_alpaca_orders(
                     alpaca_client,
                     executed,
                     stop_losses,
@@ -1062,6 +1259,25 @@ def _run_single_pod(
                     use_brackets=not config.execution.intraday_enabled,
                     asset_class_map=asset_class_map,
                     execution=config.execution,
+                )
+                persist_submitted_orders(conn, submitted_orders, pod_id=pod_id)
+                reconcile_broker_orders(
+                    conn,
+                    alpaca_client,
+                    portfolio=portfolio,
+                    ledger_conn=conn,
+                    pod_id=pod_id,
+                    order_ids=[order.order_id for order in submitted_orders],
+                    broker_positions=alpaca_client.list_positions(),
+                    log_fills_fn=log_broker_fills,
+                    trade_date=today,
+                    log_kwargs={
+                        "decision_id": None,
+                        "decision_source": resolved_signal_source,
+                        "sleeve": strategy_set if use_strategy_overlay else None,
+                        "source_decision_id": None,
+                        "exit_policy_state": exit_policy_state,
+                    },
                 )
             except AlpacaError as exc:
                 console.print(f"[red]FAIL[/red] Alpaca execution failed: {exc}")
@@ -1156,10 +1372,34 @@ def _run_single_pod(
             )
 
         upsert_order_states(conn, pod_id, order_states)
+        _monitor_and_reconcile_broker_drift(
+            conn=conn,
+            client=alpaca_client,
+            portfolio=portfolio,
+            pod_id=pod_id,
+            tracked_symbols=list(order_states),
+            decision_id=decision_id,
+            resolved_signal_source=resolved_signal_source,
+            strategy_set=strategy_set if use_strategy_overlay else None,
+            exit_policy_state=exit_policy_state,
+        )
 
     # Step 5: Save snapshot
     console.print("[bold]Step 5/5:[/bold] Saving portfolio snapshot...")
     snap_id = save_portfolio_snapshot(conn, portfolio, today, pod_id=pod_id)
+    persist_reconciliation_snapshot(
+        conn,
+        pod_id=pod_id,
+        snapshot_date=today,
+        snapshot={
+            "intraday_position_state": context_payload.get("exit_engine", {}).get("positions", {})
+            if context_payload
+            else {},
+            "order_state": {},
+            "lifecycle_state": {},
+            "exit_policy_state": exit_policy_state,
+        },
+    )
     console.print(f"  [green]OK[/green] Snapshot #{snap_id} saved")
 
     conn.close()
@@ -1231,15 +1471,22 @@ def eod_flat(
     _setup_logging()
 
     from llm_quant.broker.alpaca import AlpacaClient, AlpacaError
+    from llm_quant.broker.monitor import monitor_open_positions
+    from llm_quant.broker.reconciliation import reconcile_broker_orders
     from llm_quant.brain.models import Action, Conviction, TradeSignal
     from llm_quant.db.schema import get_connection
     from llm_quant.trading.executor import execute_signals
     from llm_quant.trading.exits import (
+        EODFlattenDecision,
         assess_eod_flatten,
         build_exit_policy,
         build_exit_runtime,
     )
-    from llm_quant.trading.ledger import log_trades, save_portfolio_snapshot
+    from llm_quant.trading.ledger import (
+        log_broker_fills,
+        log_trades,
+        save_portfolio_snapshot,
+    )
     from llm_quant.trading.portfolio import Portfolio
 
     config = _get_config_for_pod(pod)
@@ -1251,6 +1498,27 @@ def eod_flat(
         console.print("[yellow]EOD flatten disabled in config.[/yellow]")
         return
 
+    target_time = _parse_eod_time(exit_policy.eod_flatten_time)
+    flatten_decision = EODFlattenDecision(
+        enabled=exit_policy.eod_flatten_enabled,
+        target_time=target_time,
+        due=False,
+        reason="before_cutoff",
+    )
+    if exit_runtime.is_crypto:
+        flatten_decision = EODFlattenDecision(
+            enabled=False,
+            target_time=target_time,
+            due=False,
+            reason="disabled_for_crypto",
+        )
+
+    if flatten_decision.reason == "disabled_for_crypto":
+        console.print(
+            "[yellow]EOD flatten disabled for crypto runtime semantics.[/yellow]"
+        )
+        return
+
     try:
         client = AlpacaClient.from_env()
         now_et = client.clock_timestamp_et()
@@ -1260,11 +1528,6 @@ def eod_flat(
             market_is_open=client.is_market_open(),
             runtime=exit_runtime,
         )
-        if flatten_decision.reason == "disabled_for_crypto":
-            console.print(
-                "[yellow]EOD flatten disabled for crypto runtime semantics.[/yellow]"
-            )
-            return
         if flatten_decision.reason == "market_closed":
             console.print("[yellow]Market closed — skipping EOD flatten.[/yellow]")
             return
@@ -1278,39 +1541,63 @@ def eod_flat(
         console.print(f"[red]FAIL[/red] Alpaca clock check failed: {exc}")
         raise typer.Exit(1) from exc
 
-    try:
-        client.cancel_all_orders()
-        positions = client.list_positions()
-    except AlpacaError as exc:
-        console.print(f"[red]FAIL[/red] Alpaca order/position fetch failed: {exc}")
-        raise typer.Exit(1) from exc
-
-    if not positions:
-        console.print("[green]No open positions to flatten.[/green]")
-        return
-
-    for pos in positions:
-        qty = float(pos.get("qty", 0.0))
-        if qty == 0:
-            continue
-        side = "sell" if qty > 0 else "buy"
-        try:
+    db_path = _get_db_path(config)
+    conn = get_connection(db_path)
+    deadline = datetime.now(tz=UTC) + timedelta(seconds=300)
+    positions = client.list_positions()
+    while positions and datetime.now(tz=UTC) < deadline:
+        for pos in positions:
+            qty = float(pos.get("qty", 0.0))
+            if qty == 0:
+                continue
+            side = "sell" if qty > 0 else "buy"
             client.submit_market_order(
                 symbol=pos.get("symbol", ""),
                 qty=abs(qty),
                 side=side,
             )
-        except AlpacaError as exc:
-            console.print(f"[red]FAIL[/red] Order submit failed: {exc}")
-            raise typer.Exit(1) from exc
+        time.sleep(15)
+        positions = client.list_positions()
 
-    # Log EOD flatten in DuckDB (best-effort; relies on DB matching Alpaca)
-    db_path = _get_db_path(config)
-    conn = get_connection(db_path)
+    reconciliation = reconcile_broker_orders(
+        conn,
+        client,
+        portfolio=None,
+        ledger_conn=conn,
+        pod_id=pod,
+        broker_positions=client.list_positions(),
+        log_fills_fn=log_broker_fills,
+        trade_date=now_et.date(),
+        log_kwargs={
+            "decision_id": None,
+            "decision_source": "system",
+            "sleeve": None,
+            "source_decision_id": None,
+            "exit_policy_state": dataclasses.asdict(exit_policy),
+        },
+    )
+    if client.list_positions():
+        conn.close()
+        raise RuntimeError("EOD FLATTEN FAILED")
+
     portfolio = Portfolio.from_db(conn, config.general.initial_capital, pod_id=pod)
+    _monitor_and_reconcile_broker_drift(
+        conn=conn,
+        client=client,
+        portfolio=portfolio,
+        pod_id=pod,
+        tracked_symbols=None,
+        decision_id=None,
+        resolved_signal_source="system",
+        strategy_set=None,
+        exit_policy_state=dataclasses.asdict(exit_policy),
+    )
 
     prices = {
-        pos.get("symbol", ""): float(pos.get("current_price", 0.0)) for pos in positions
+        symbol: float((position or {}).get("current_price", 0.0))
+        for symbol, position in (reconciliation.snapshot or {})
+        .get("intraday_position_state", {})
+        .items()
     }
     portfolio.update_prices(prices)
 
@@ -2006,7 +2293,7 @@ def crypto_status(
         f" | [bold]RTH Guard:[/bold] {config.execution.intraday_rth_guard}"
     )
 
-    def _as_utc(ts):
+    def _as_utc(ts: Any) -> Any:
         if ts is None:
             return None
         if getattr(ts, "tzinfo", None) is None:

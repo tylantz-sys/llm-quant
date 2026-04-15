@@ -1,16 +1,19 @@
 from datetime import UTC, datetime
 
-from llm_quant.broker.alpaca import AlpacaError
 from llm_quant.config import ExecutionConfig, RiskLimits
 from llm_quant.trading.exits import (
+    SyntheticExitContext,
     assess_eod_flatten,
     build_broker_exit_plan,
     build_exit_policy,
     build_exit_runtime,
     build_exit_telemetry_payload,
     evaluate_position_exits,
+    evaluate_synthetic_exit,
     parse_eod_time,
     resolve_take_profit_price,
+    synthetic_exit_execution_assumption,
+    synthetic_exit_parity_mode,
 )
 from llm_quant.trading.intraday import IntradayPositionState
 from llm_quant.trading.portfolio import Portfolio, Position
@@ -81,6 +84,106 @@ def test_synthetic_exit_engine_generates_partial_tp():
     assert signals[0].exit_reason == "tp_partial"
     assert telemetry[0].exit_mode == "synthetic"
     assert telemetry[0].partial_target_price == 102.0
+    assert telemetry[0].synthetic_exit_parity_tier == "tier1_close_only"
+
+
+def test_tier2_ohlc_partial_tp_can_trigger_without_close_reaching_target():
+    portfolio = _portfolio_with_position("SPY", 10, 100.0)
+    states = {"SPY": IntradayPositionState(symbol="SPY", entry_price=100.0)}
+    policy = build_exit_policy(
+        RiskLimits(
+            partial_take_profit_enabled=True,
+            partial_take_profit_pct=0.02,
+            partial_take_profit_size=0.5,
+        ),
+        ExecutionConfig(),
+    )
+    runtime = build_exit_runtime(
+        "paper",
+        ExecutionConfig(intraday_enabled=True, intraday_use_oco=False),
+    )
+
+    signals, telemetry = evaluate_position_exits(
+        portfolio,
+        {"SPY": 101.0},
+        states,
+        policy,
+        runtime,
+        bar_highs={"SPY": 102.5},
+        bar_lows={"SPY": 99.0},
+        parity_tier="tier2_ohlc_conservative",
+    )
+
+    assert len(signals) == 1
+    assert signals[0].exit_reason == "tp_partial"
+    assert telemetry[0].synthetic_exit_parity_tier == "tier2_ohlc_conservative"
+    assert "conservative daily OHLC reachability" in telemetry[0].synthetic_exit_execution_assumption
+
+
+def test_tier2_same_bar_stop_and_tp_resolves_pessimistically_to_stop():
+    portfolio = _portfolio_with_position("SPY", 10, 100.0)
+    states = {"SPY": IntradayPositionState(symbol="SPY", entry_price=100.0)}
+    policy = build_exit_policy(
+        RiskLimits(
+            partial_take_profit_enabled=True,
+            partial_take_profit_pct=0.02,
+            partial_take_profit_size=0.5,
+        ),
+        ExecutionConfig(),
+    )
+
+    signal = evaluate_synthetic_exit(
+        SyntheticExitContext(
+            position=portfolio.positions["SPY"],
+            price=100.5,
+            nav=portfolio.nav,
+            state=states["SPY"],
+            bar_high=102.5,
+            bar_low=94.5,
+            parity_tier="tier2_ohlc_conservative",
+        ),
+        policy,
+    )
+
+    assert signal is not None
+    assert signal.exit_reason == "stop_loss"
+    assert signal.action.value == "close"
+    assert "pessimistically resolving to stop-loss" in signal.reasoning
+
+
+def test_tier1_close_only_does_not_trigger_intrabar_partial_tp():
+    portfolio = _portfolio_with_position("SPY", 10, 100.0)
+    states = {"SPY": IntradayPositionState(symbol="SPY", entry_price=100.0)}
+    policy = build_exit_policy(
+        RiskLimits(
+            partial_take_profit_enabled=True,
+            partial_take_profit_pct=0.02,
+            partial_take_profit_size=0.5,
+        ),
+        ExecutionConfig(),
+    )
+    runtime = build_exit_runtime(
+        "paper",
+        ExecutionConfig(intraday_enabled=True, intraday_use_oco=False),
+    )
+
+    signals, telemetry = evaluate_position_exits(
+        portfolio,
+        {"SPY": 101.0},
+        states,
+        policy,
+        runtime,
+        bar_highs={"SPY": 102.5},
+        bar_lows={"SPY": 99.0},
+        parity_tier="tier1_close_only",
+    )
+
+    assert signals == []
+    assert telemetry[0].synthetic_exit_parity_tier == "tier1_close_only"
+    assert (
+        telemetry[0].synthetic_exit_execution_assumption
+        == synthetic_exit_execution_assumption()
+    )
 
 
 def test_native_exit_engine_emits_telemetry_without_signals():
@@ -202,6 +305,14 @@ def test_exit_telemetry_payload_contains_policy_and_position_data():
     assert payload["exit_engine"]["policy"]["take_profit_mode"] == policy.take_profit_mode
     assert payload["exit_engine"]["runtime"]["broker_exit_kind"] == runtime.broker_exit_kind
     assert payload["exit_engine"]["positions"][0]["symbol"] == "SPY"
+    assert (
+        payload["exit_engine"]["parity"]["synthetic_exit_parity_mode"]
+        == synthetic_exit_parity_mode()
+    )
+    assert (
+        payload["exit_engine"]["parity"]["synthetic_exit_execution_assumption"]
+        == synthetic_exit_execution_assumption()
+    )
 
 
 def test_exit_telemetry_marks_native_crypto_without_stop_as_unprotected():

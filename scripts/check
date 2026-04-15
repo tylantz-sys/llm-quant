@@ -8,10 +8,10 @@ case "$TIER" in
     ruff format --check . && ruff check .
     ;;
   slow)
-    pytest
+    ./scripts/test all
     ;;
   ci)
-    ruff format --check . && ruff check . && pytest
+    ruff format --check . && ruff check . && ./scripts/test all
     ;;
   *)
     echo "Unknown tier: $TIER — use: fast, slow, or ci" >&2

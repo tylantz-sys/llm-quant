@@ -83,6 +83,7 @@ The canonical exit engine decides the policy once. Runtime mode decides how that
 - Broker path: paper executor
 - Exit realization: synthetic / simulated
 - State tracking: portfolio + decision telemetry
+- Backtest parity: the backtest engine now uses the same canonical synthetic exit rules for stop-loss, partial TP, trailing stop, and EOD flatten timing instead of maintaining a separate profit-taking implementation
 
 ### Daily + Alpaca
 - Broker path: Alpaca bracket orders
@@ -131,7 +132,9 @@ This is now canonical behavior rather than an implementation detail buried in on
 ## EOD Flatten
 
 ### What it is
-`pq eod-flat` is the **operational EOD flatten override**. It is governed by the canonical exit policy:
+`pq eod-flat` is the **operational EOD flatten override**. It is governed by the canonical exit policy.
+
+The same policy vocabulary now also applies in synthetic backtests, where EOD flatten is evaluated against a canonical end-of-day timestamp for parity review.
 
 - `eod_flatten_enabled`
 - `eod_flatten_time`
@@ -176,6 +179,13 @@ The runtime now logs canonical exit-engine context into intraday context snapsho
 
 This gives one audit vocabulary across synthetic and native modes.
 
+For parity review, the repo should now be read as having three aligned layers:
+- runtime synthetic exits,
+- runtime native broker realization,
+- backtest synthetic exit simulation.
+
+The microstructure can still differ, but the policy semantics should not.
+
 ---
 
 ## Operational Checklist
@@ -194,10 +204,36 @@ This gives one audit vocabulary across synthetic and native modes.
   - OCO leg resolution failures,
   - unprotected position detection.
 
+### Explicit pod coverage
+
+Current repo evidence supports stock-session EOD flatten coverage for equity pods only:
+
+- `default` via `scripts/systemd/llm-quant-eod-flat.service`
+- `stock-bounded-paper` via `scripts/systemd/llm-quant-eod-flat-stock-bounded-paper.service`
+
+This coverage is justified because:
+
+- `stock-bounded-paper` explicitly sets `asset_class_filter = ["equity"]`
+- `stock-bounded-paper` explicitly enables `eod_flatten_enabled = true`
+- the stock bounded runbook describes supervised stock-lane validation with explainable EOD behavior
+- `pq eod-flat` itself skips crypto semantics when flatten assessment returns `disabled_for_crypto`
+
+Operationally, do not imply crypto coverage from the stock EOD units. If crypto ever needs a distinct flatten control, define and audit it separately.
+
 ---
+
+## Parity Matrix
+
+| Surface | Stop-loss | Partial TP | Trailing stop | EOD flatten | Notes |
+|---|---|---|---|---|---|
+| Intraday synthetic runtime | Canonical | Canonical | Canonical | Operational override | `trading/intraday.py` now delegates to canonical exit evaluation |
+| Intraday native Alpaca runtime | Canonical policy, broker-realized | Canonical policy, broker-realized | Canonical policy, broker-realized | Operational override | Telemetry remains the audit source of truth |
+| Daily / paper runtime | Canonical | N/A or synthetic by policy | N/A or synthetic by policy | Policy-governed | Daily path is policy-aligned even when no intraday loop exists |
+| Backtest engine | Canonical synthetic | Canonical synthetic | Canonical synthetic | Canonical synthetic | Backtest now shares the same synthetic exit vocabulary instead of separate TP logic |
 
 ## Notes
 
 - The exit engine standardizes policy; it does **not** guarantee profitable exits.
 - Synthetic and native paths can still differ in market microstructure and fill quality.
 - The important invariant is that the same exit policy vocabulary governs all modes.
+- Backtest parity reduces logic drift risk, but it does **not** eliminate the need for live-vs-paper and native-vs-synthetic behavior review.

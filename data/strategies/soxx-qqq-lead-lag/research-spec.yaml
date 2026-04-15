@@ -4,7 +4,7 @@ strategy_type: "lead_lag"
 frozen: true
 frozen_at: "2026-03-26T00:00:00Z"
 frozen_by: "claude-sonnet-4-6"
-frozen_hash: "placeholder-computed-on-freeze"
+frozen_hash: "d8e92e5a1be0d6ff003c48716b46939383a138f9206b94f7331600d64c7f6681"
 modification_lock: "This spec is FROZEN. Parameter changes require a new spec version."
 parameters:
   leader_symbol: "SOXX"

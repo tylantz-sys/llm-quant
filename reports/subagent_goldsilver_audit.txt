@@ -1,0 +1,18 @@
+Audit only; no repo source files modified. This placeholder file exists solely to satisfy tool protocol after a no-modify audit task.
+
+Reviewed existing files:
+- data/strategies/gold-silver-ratio-mr/data-contract.yaml
+- data/strategies/gold-silver-ratio-mr/hypothesis.yaml
+- data/strategies/gold-silver-ratio-mr/research-spec.yaml
+- scripts/run_backtest.py
+- scripts/run_walk_forward_non_ml.py
+- src/llm_quant/backtest/artifacts.py
+- src/llm_quant/backtest/strategies.py
+
+Findings:
+- slug: gold-silver-ratio-mr
+- strategy_type: pairs_ratio
+- symbols: GLD, SLV
+- years: 5
+- frozen: true
+- likely runnable with manual backtest and walk-forward

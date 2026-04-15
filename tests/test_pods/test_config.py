@@ -71,7 +71,7 @@ def test_commodities_pod_mandate():
 
 
 def test_crypto_pod_mandate():
-    """Crypto pod remains 24/7 with synthetic exits and faster scale-in."""
+    """Crypto pod remains 24/7 with broker-managed protection and faster scale-in."""
     cfg = load_config_for_pod("crypto")
     assert cfg.execution.intraday_enabled is True
     assert cfg.execution.signal_source == "strategy_overlay"
@@ -79,22 +79,8 @@ def test_crypto_pod_mandate():
     assert cfg.execution.asset_class_filter == ["crypto"]
     assert cfg.execution.claude_overlay_only is True
     assert cfg.execution.intraday_rth_guard is False
-    assert cfg.execution.intraday_use_oco is False
+    assert cfg.execution.intraday_use_oco is True
     assert cfg.execution.scale_in_tranches == 2
-
-
-def test_crypto_ethbtc_paper_pod_mandate():
-    """Dedicated ETH/BTC paper pod uses candidate set with conservative risk."""
-    cfg = load_config_for_pod("crypto-ethbtc-paper")
-    assert cfg.execution.signal_source == "strategy_overlay"
-    assert cfg.execution.strategy_set == "candidate_crypto"
-    assert cfg.execution.claude_overlay_only is True
-    assert cfg.execution.asset_class_filter == ["crypto"]
-    assert cfg.execution.intraday_enabled is True
-    assert cfg.execution.intraday_rth_guard is False
-    assert cfg.execution.intraday_use_oco is False
-    assert cfg.risk.max_trade_size == 0.02
-    assert cfg.risk.crypto_max_position_weight == 0.025
 
 
 def test_profit_taking_governance_defaults_loaded():

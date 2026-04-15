@@ -1,23 +1,24 @@
 # Paper Trading: soxx-qqq-lead-lag
 # Initialized: 2026-03-26
-# First strategy in llm-quant to pass all 4 robustness gates
+# Governed as paper-only on frozen spec after corrected lineage review
 
 strategy_slug: "soxx-qqq-lead-lag"
-spec_hash: "placeholder-computed-on-freeze"
-robustness_date: "2026-03-26"
-backtest_experiment_id: "57fba00d"
+spec_hash: "d8e92e5a1be0d6ff003c48716b46939383a138f9206b94f7331600d64c7f6681"
+robustness_date: "2026-04-01"
+backtest_experiment_id: "ee2f59e9"
 
 start_date: "2026-03-26"
 status: "active"  # active | paused | completed | failed
+runtime_posture: "alpaca_paper_only"
 
-# Backtest baseline (from robustness experiment)
+# Backtest baseline (from corrected canonical experiment and governed artifact set)
 backtest_baseline:
-  sharpe_ratio: 0.861
-  max_drawdown: 0.144
-  total_return: 0.545
-  dsr: 0.9603
-  cpcv_oos_sharpe: 0.8192
-  total_trades: 162
+  sharpe_ratio: 0.607
+  max_drawdown: 0.0684
+  total_return: 0.2835
+  dsr: 0.5675
+  cpcv_oos_sharpe: 0.7789
+  total_trades: 168
 
 # Performance tracking (updated as paper trading proceeds)
 performance:
@@ -35,20 +36,43 @@ performance:
 gate_criteria:
   min_days: 30
   min_trades: 50
-  sharpe_floor: 0.50      # OOS Sharpe must stay above floor
-  max_drawdown_limit: 0.15  # Must not exceed mandate constraint live
-  slippage_drift_limit: 5.0  # Max 5bps drift from modeled slippage
+  sharpe_floor: 0.50
+  max_drawdown_limit: 0.15
+  slippage_drift_limit: 5.0
+
+broker_evidence:
+  governed_broker_mode: "alpaca_paper_only"
+  governance_note: "docs/governance/soxx-qqq-lead-lag-governance-decision-2026-04-01.md"
+  eod_flat_service_configured: true
+  eod_flat_service_file: "scripts/systemd/llm-quant-eod-flat.service"
+  env_file_present_in_service: true
+  eod_flat_command: "pq eod-flat --pod default"
+  repo_runtime_support:
+    execution_script: "scripts/execute_decision.py"
+    paper_eval_pattern: "scripts/update_crypto_paper_eval.py"
+    telemetry_sources:
+      - "portfolio_snapshots"
+      - "trades"
+      - "llm_decisions"
+
+evidence_links:
+  governance_decision: "docs/governance/soxx-qqq-lead-lag-governance-decision-2026-04-01.md"
+  canonical_experiment: "data/strategies/soxx-qqq-lead-lag/experiments/ee2f59e9.yaml"
+  registry: "data/strategies/soxx-qqq-lead-lag/experiment-registry.jsonl"
 
 # Operations checklist
 operations_tested:
-  data_fetching: true           # confirmed via yfinance fetch 2026-03-30
-  indicator_computation: true   # 5-day returns computed and validated
-  signal_generation: true       # signal correctly stayed flat in risk-off
-  risk_checks: false            # no trades triggered yet
-  trade_execution: false        # no trades triggered yet
-  portfolio_persistence: false  # not yet tested
-  hash_chain_integrity: false   # not yet tested
-  performance_reporting: true   # NAV tracking confirmed
+  alpaca_paper_account_configured: false   # broker specified by governance; runtime confirmation not yet recorded here
+  alpaca_market_data_access: false         # no evidenced paper-broker data handshake recorded in this artifact yet
+  alpaca_order_routing_dry_run: false      # no evidenced order lifecycle test recorded in this artifact yet
+  data_fetching: true                      # confirmed via yfinance fetch 2026-03-30
+  indicator_computation: true              # 5-day returns computed and validated
+  signal_generation: true                  # signal correctly stayed flat in risk-off
+  risk_checks: false                       # no trades triggered yet
+  trade_execution: false                   # no trades triggered yet
+  portfolio_persistence: false             # not yet tested
+  hash_chain_integrity: false              # not yet tested
+  performance_reporting: true              # NAV tracking confirmed
 
 # Incidents log (fill in as they occur)
 incidents: []
@@ -61,17 +85,14 @@ daily_log:
     nav: 100000.00
     daily_pnl: 0.00
     daily_return_pct: 0.0
-    # Signal inputs
     soxx_price: 328.85
-    soxx_5d_return: -0.0334   # -3.34%
+    soxx_5d_return: -0.0334
     qqq_price: 573.79
-    # Signal evaluation
     signal: "no_entry"
     signal_reason: "SOXX 5d return -3.34% < 2% threshold"
     position_change: "none (initiated flat)"
-    # Benchmark context
-    spy_daily_return: -0.0179  # SPY -1.79%
-    qqq_daily_return: -0.0239  # QQQ -2.39%
+    spy_daily_return: -0.0179
+    qqq_daily_return: -0.0239
     regime_note: "Risk-off. Broad market selloff. Strategy correctly flat."
 
   - date: "2026-03-27"
@@ -80,21 +101,15 @@ daily_log:
     nav: 100000.00
     daily_pnl: 0.00
     daily_return_pct: 0.0
-    # Signal inputs
     soxx_price: 323.48
-    soxx_5d_return: -0.0272   # -2.72%
+    soxx_5d_return: -0.0272
     qqq_price: 562.58
-    # Signal evaluation
     signal: "no_entry"
     signal_reason: "SOXX 5d return -2.72% < 2% threshold"
     position_change: "none"
-    # Benchmark context
-    spy_daily_return: -0.0171  # SPY -1.71%
-    qqq_daily_return: -0.0195  # QQQ -1.95%
+    spy_daily_return: -0.0171
+    qqq_daily_return: -0.0195
     regime_note: "Continued risk-off. Strategy flat preserved capital vs QQQ -1.95%."
-
-  # 2026-03-28: Saturday (market closed)
-  # 2026-03-29: Sunday (market closed)
 
   - date: "2026-03-30"
     day_number: 3
@@ -110,15 +125,22 @@ daily_log:
 # Gate evaluation (filled in when paper period completes)
 gate_evaluation:
   days_active: 2
-  gate_passed: null
-  evaluated_at: "2026-03-30"
+  gate_passed: false
+  evaluated_at: "2026-04-01"
   notes: >
-    Paper trading initialized 2026-03-26. Strategy: SOXX→QQQ lead-lag with
-    5-day lag. Leader SOXX 5d return ≥2% → enter QQQ at 90% weight.
-    Days 1-2: Flat in cash. Risk-off regime, SOXX 5d return deeply negative
-    (-3.34%, -2.72%). Strategy correctly avoided QQQ which fell 2.39% and
-    1.95% on those days. Capital preservation working as designed.
-    2/30 days, 0/50 trades. Continue monitoring.
+    Governed lineage now points to frozen spec hash
+    d8e92e5a1be0d6ff003c48716b46939383a138f9206b94f7331600d64c7f6681 and
+    canonical experiment ee2f59e9. Walk-forward evidence passed on 2026-04-01,
+    but refreshed robustness on the same frozen spec is HOLD rather than PASS:
+    DSR failed at 0.5675 versus the >= 0.95 threshold and perturbation
+    stability failed at 2/5 stable variants. Promotion is therefore blocked on
+    this frozen spec despite continued paper monitoring. Paper trading remains
+    an Alpaca paper-only monitoring lane, not a production promotion path, and
+    any successor intended to pursue promotion must be introduced through a new
+    research spec/version rather than modifying this frozen artifact. Current
+    runtime log here only evidences initialization and flat monitoring through
+    2026-03-27 plus a pending 2026-03-30 placeholder; no live-paper execution
+    outcomes are asserted beyond those recorded entries.
 
 created_at: "2026-03-26"
-updated_at: "2026-03-30"
+updated_at: "2026-04-01"

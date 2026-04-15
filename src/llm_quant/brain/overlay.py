@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+from typing import Any, cast
 
 import anthropic
 
@@ -22,6 +24,15 @@ _COST_INPUT_PER_M: float = 3.0
 _COST_OUTPUT_PER_M: float = 15.0
 
 
+class OverlayUnavailableError(RuntimeError):
+    """Raised when the overlay engine cannot be used in the current environment."""
+
+
+def overlay_auth_configured() -> bool:
+    """Return True when Anthropic auth is available for overlay calls."""
+    return bool(os.getenv("ANTHROPIC_API_KEY"))
+
+
 def _estimate_cost(prompt_tokens: int, completion_tokens: int) -> float:
     input_cost = prompt_tokens / 1_000_000 * _COST_INPUT_PER_M
     output_cost = completion_tokens / 1_000_000 * _COST_OUTPUT_PER_M
@@ -38,13 +49,13 @@ class OverlayEngine:
     ) -> None:
         self._config = config
         self._config_dir = config_dir or CONFIG_DIR
-        self._client = anthropic.Anthropic()
+        self._client: anthropic.Anthropic | None = None
         self._system_prompt: str = load_overlay_system_prompt(self._config_dir)
 
     def get_overlay_signals(
         self,
         context: MarketContext,
-        candidate_signals: list[dict],
+        candidate_signals: list[dict[str, Any]],
     ) -> TradingDecision:
         user_prompt = render_overlay_prompt(
             context, candidate_signals, self._config_dir
@@ -56,7 +67,7 @@ class OverlayEngine:
                 user_prompt = f"{user_prompt}\n\n{crypto_append.strip()}\n"
         response = self._call_api(user_prompt)
 
-        raw_text: str = response.content[0].text
+        raw_text = cast(str, response.content[0].text)
         usage = response.usage
 
         prompt_tokens = usage.input_tokens
@@ -77,6 +88,10 @@ class OverlayEngine:
         return decision
 
     def _call_api(self, user_prompt: str) -> anthropic.types.Message:
+        if not overlay_auth_configured():
+            raise OverlayUnavailableError("overlay_auth_missing")
+        if self._client is None:
+            self._client = anthropic.Anthropic()
         return self._client.messages.create(
             model=self._config.llm.model,
             max_tokens=self._config.llm.max_tokens,

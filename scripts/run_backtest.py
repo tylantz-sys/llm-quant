@@ -19,12 +19,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import socket
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 # Ensure src is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
 
 from llm_quant.backtest.artifacts import (
     ExperimentRegistry,
@@ -42,6 +45,120 @@ from llm_quant.data.indicators import compute_indicators
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _now_iso() -> str:
+    return datetime.now(tz=UTC).replace(microsecond=0).isoformat()
+
+
+def _spec_backtest_symbols(spec: dict[str, Any]) -> list[str]:
+    backtest_spec = spec.get("backtest_spec", {}) or {}
+    tradable = backtest_spec.get("symbols", []) or []
+    signal = backtest_spec.get("signal_symbols", []) or []
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for symbol in [*tradable, *signal]:
+        symbol_str = str(symbol).strip()
+        if symbol_str and symbol_str not in seen:
+            ordered.append(symbol_str)
+            seen.add(symbol_str)
+    return ordered
+
+
+def _spec_fill_delay(spec: dict[str, Any]) -> int:
+    params = spec.get("parameters", {}) or {}
+    return int(params.get("execution_lag_days", spec.get("fill_delay", 1)) or 1)
+
+
+def _spec_warmup_days(spec: dict[str, Any]) -> int:
+    backtest_spec = spec.get("backtest_spec", {}) or {}
+    return int(backtest_spec.get("warmup_days", spec.get("warmup_days", 200)) or 200)
+
+
+def _spec_backtest_years(spec: dict[str, Any], fallback_years: int) -> int:
+    backtest_spec = spec.get("backtest_spec", {}) or {}
+    return int(backtest_spec.get("years", fallback_years) or fallback_years)
+
+
+def _build_policy_inputs(
+    args: argparse.Namespace,
+    spec: dict[str, Any],
+    symbols: list[str],
+    effective_years: int,
+    years_overridden_by_spec: bool,
+) -> dict[str, Any]:
+    return {
+        "initial_capital": float(args.initial_capital),
+        "years_requested_cli": int(args.years),
+        "years_effective": int(effective_years),
+        "years_overridden_by_spec": bool(years_overridden_by_spec),
+        "years": int(effective_years),
+        "symbols": symbols,
+        "spec_check_enforced": not bool(args.no_spec_check),
+        "volatility_target": args.volatility_target,
+        "vol_target_window": int(args.vol_target_window),
+        "vol_target_max_scale": float(args.vol_target_max_scale),
+        "regime_filter": bool(args.regime_filter),
+        "vix_threshold": float(args.vix_threshold),
+        "signal_strength": bool(args.signal_strength),
+        "signal_strength_scale": float(args.signal_strength_scale),
+        "signal_strength_cap": float(args.signal_strength_cap),
+        "ensemble_vote": bool(args.ensemble_vote),
+        "ensemble_min_votes": int(args.ensemble_min_votes),
+        "fill_delay": _spec_fill_delay(spec),
+        "warmup_days": _spec_warmup_days(spec),
+    }
+
+
+def _build_provenance(
+    *,
+    args: argparse.Namespace,
+    spec: dict[str, Any],
+    strategy_name: str,
+    symbols: list[str],
+    cost_model: CostModel,
+    warmup_days: int,
+    fill_delay: int,
+    effective_years: int,
+    years_overridden_by_spec: bool,
+) -> dict[str, Any]:
+    return {
+        "created_at": _now_iso(),
+        "runner": "scripts/run_backtest.py",
+        "runner_identity": {
+            "script": "scripts/run_backtest.py",
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "python_executable": sys.executable,
+        },
+        "strategy_slug": args.slug,
+        "strategy_name": strategy_name,
+        "frozen_spec_hash": spec.get("frozen_hash", ""),
+        "spec_hash": spec.get("frozen_hash", ""),
+        "spec_frozen": bool(spec.get("frozen", False)),
+        "spec_frozen_at": spec.get("frozen_at"),
+        "data_dir": str(Path(args.data_dir)),
+        "symbols": symbols,
+        "policy_inputs": {
+            **_build_policy_inputs(
+                args,
+                spec,
+                symbols,
+                effective_years,
+                years_overridden_by_spec,
+            ),
+            "warmup_days": int(warmup_days),
+            "fill_delay": int(fill_delay),
+            "cost_model": {
+                "spread_bps": cost_model.spread_bps,
+                "slippage_volatility_factor": cost_model.slippage_volatility_factor,
+                "flat_slippage_bps": cost_model.flat_slippage_bps,
+            },
+        },
+        "cli": {
+            "argv": sys.argv,
+        },
+    }
 
 
 def _build_strategy_config(strategy_name: str, spec: dict) -> StrategyConfig:
@@ -69,6 +186,37 @@ def _build_strategy_config(strategy_name: str, spec: dict) -> StrategyConfig:
         mapped_params["min_timeframes_positive"] = spec_params[
             "min_timeframes_positive"
         ]
+
+    if strategy_name == "vix_regime":
+        if "strategy_mode" in spec:
+            strategy_mode = spec["strategy_mode"]
+            if strategy_mode == "backwardation":
+                strategy_mode = "term_structure"
+            mapped_params["mode"] = strategy_mode
+        if "signal_symbol_near" in params:
+            mapped_params["vix_symbol"] = params["signal_symbol_near"]
+        if "signal_symbol_medium" in params:
+            mapped_params["vix3m_symbol"] = params["signal_symbol_medium"]
+        if "trading_symbol_risk_on" in params:
+            mapped_params["equity_symbol"] = params["trading_symbol_risk_on"]
+        if "trading_symbol_risk_off" in params:
+            mapped_params["risk_off_symbol"] = params["trading_symbol_risk_off"]
+        if "backwardation_threshold" in params:
+            mapped_params["vix_threshold"] = params["backwardation_threshold"]
+        if "contango_threshold" in params:
+            mapped_params["contango_threshold"] = params["contango_threshold"]
+        if "weight_spy_risk_on" in params:
+            mapped_params["target_weight"] = params["weight_spy_risk_on"]
+        if "weight_spy_risk_off" in params:
+            mapped_params["weight_spy_risk_off"] = float(params["weight_spy_risk_off"])
+            if "risk_off_symbol_weight" not in params:
+                mapped_params["risk_off_weight"] = 1.0 - float(
+                    params["weight_spy_risk_off"]
+                )
+        if "risk_off_symbol_weight" in params:
+            mapped_params["risk_off_symbol_weight"] = float(
+                params["risk_off_symbol_weight"]
+            )
 
     return StrategyConfig(
         name=strategy_name,
@@ -191,8 +339,10 @@ def main() -> None:
 
     data_dir = Path(args.data_dir)
     strat_dir = strategy_dir(data_dir, args.slug)
-    symbols = [s.strip() for s in args.symbols.split(",")]
-    lookback_days = args.years * 365
+    cli_symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    symbols = list(cli_symbols)
+    effective_years = int(args.years)
+    years_overridden_by_spec = False
 
     # Load or create research spec
     spec: dict = {}
@@ -201,22 +351,38 @@ def main() -> None:
     if not args.no_spec_check:
         try:
             spec = ensure_frozen_spec(strat_dir)
-            # Only use spec strategy_type if --strategy was not explicitly provided
+            # Only use spec-defined strategy class/type if --strategy was not explicitly provided
             if args.strategy is None:
-                strategy_name = spec.get("strategy_type", strategy_name)
-            logger.info("Loaded frozen research spec for %s", args.slug)
+                strategy_name = spec.get(
+                    "strategy_class",
+                    spec.get("strategy_type", strategy_name),
+                )
+            spec_symbols = _spec_backtest_symbols(spec)
+            if spec_symbols:
+                symbols = spec_symbols
+            spec_years = _spec_backtest_years(spec, args.years)
+            years_overridden_by_spec = spec_years != int(args.years)
+            effective_years = spec_years
+            logger.info(
+                "Loaded frozen research spec for %s (effective years=%d%s)",
+                args.slug,
+                effective_years,
+                ", overridden by spec" if years_overridden_by_spec else "",
+            )
         except (FileNotFoundError, ValueError):
             logger.exception("Spec check failed")
             sys.exit(1)
     else:
         logger.warning("Skipping spec check — results are exploratory only")
 
+    lookback_days = effective_years * 365
+
     config = _build_strategy_config(strategy_name, spec)
 
     strategy = create_strategy(strategy_name, config)
     cost_model = CostModel.from_spec(spec)
-    fill_delay = spec.get("fill_delay", 1)
-    warmup_days = spec.get("warmup_days", 200)
+    fill_delay = _spec_fill_delay(spec)
+    warmup_days = _spec_warmup_days(spec)
 
     # Benchmark from spec or default
     benchmark_weights = {"SPY": 0.60, "TLT": 0.40}
@@ -291,6 +457,18 @@ def main() -> None:
     registry = ExperimentRegistry(strat_dir)
     base_metrics = result.metrics.get("1.0x")
 
+    provenance = _build_provenance(
+        args=args,
+        spec=spec,
+        strategy_name=strategy_name,
+        symbols=symbols,
+        cost_model=cost_model,
+        warmup_days=warmup_days,
+        fill_delay=fill_delay,
+        effective_years=effective_years,
+        years_overridden_by_spec=years_overridden_by_spec,
+    )
+
     registry_entry = {
         "experiment_id": result.experiment_id,
         "strategy_name": result.strategy_name,
@@ -304,7 +482,16 @@ def main() -> None:
         "dsr": base_metrics.dsr if base_metrics else 0,
         "total_trades": base_metrics.total_trades if base_metrics else 0,
         "spec_hash": spec.get("frozen_hash", ""),
+        "frozen_spec_hash": spec.get("frozen_hash", ""),
         "parameters": config.parameters,
+        "runner": provenance["runner"],
+        "created_at": provenance["created_at"],
+        "policy_inputs": provenance["policy_inputs"],
+        "smoke_health": result.smoke_health,
+        "smoke_health_reason": result.smoke_health_reason,
+        "signal_count": result.signal_count,
+        "executed_trade_count": result.executed_trade_count,
+        "signal_noop_reasons": result.signal_noop_reasons,
     }
     trial_number = registry.append(registry_entry)
     result.trial_number = trial_number
@@ -345,17 +532,24 @@ def main() -> None:
         artifact = {
             "experiment_id": result.experiment_id,
             "trial_number": trial_number,
+            "strategy_slug": args.slug,
             "strategy_name": result.strategy_name,
             "start_date": str(result.start_date),
             "end_date": str(result.end_date),
+            "created_at": provenance["created_at"],
+            "runner": provenance["runner"],
+            "runner_identity": provenance["runner_identity"],
+            "provenance": provenance,
             "initial_capital": result.initial_capital,
             "symbols": result.symbols_used,
             "spec_hash": spec.get("frozen_hash", ""),
+            "frozen_spec_hash": spec.get("frozen_hash", ""),
             "cost_model": {
                 "spread_bps": cost_model.spread_bps,
                 "slippage_volatility_factor": cost_model.slippage_volatility_factor,
                 "flat_slippage_bps": cost_model.flat_slippage_bps,
             },
+            "policy_inputs": provenance["policy_inputs"],
             "metrics_1x": {
                 "total_return": base_metrics.total_return,
                 "annualized_return": base_metrics.annualized_return,
@@ -374,11 +568,38 @@ def main() -> None:
             "volatility_target": args.volatility_target,
             "daily_returns": result.daily_returns,
             "data_warnings": result.data_warnings,
+            "smoke_health": result.smoke_health,
+            "smoke_health_reason": result.smoke_health_reason,
+            "smoke_audit": result.smoke_audit,
+            "signal_count": result.signal_count,
+            "executed_trade_count": result.executed_trade_count,
+            "signal_noop_reasons": result.signal_noop_reasons,
+            "synthetic_exit_parity_mode": result.exit_parity_mode,
+            "synthetic_exit_parity_tier": result.synthetic_exit_parity_tier,
+            "synthetic_exit_execution_assumption": result.exit_execution_assumption,
         }
     else:
         artifact = {
             "experiment_id": result.experiment_id,
+            "strategy_slug": args.slug,
+            "strategy_name": result.strategy_name,
+            "created_at": provenance["created_at"],
+            "runner": provenance["runner"],
+            "runner_identity": provenance["runner_identity"],
+            "provenance": provenance,
+            "spec_hash": spec.get("frozen_hash", ""),
+            "frozen_spec_hash": spec.get("frozen_hash", ""),
+            "policy_inputs": provenance["policy_inputs"],
             "error": "No metrics computed",
+            "smoke_health": result.smoke_health,
+            "smoke_health_reason": result.smoke_health_reason,
+            "smoke_audit": result.smoke_audit,
+            "signal_count": result.signal_count,
+            "executed_trade_count": result.executed_trade_count,
+            "signal_noop_reasons": result.signal_noop_reasons,
+            "synthetic_exit_parity_mode": result.exit_parity_mode,
+            "synthetic_exit_parity_tier": result.synthetic_exit_parity_tier,
+            "synthetic_exit_execution_assumption": result.exit_execution_assumption,
         }
 
     save_artifact(experiments_dir / f"{result.experiment_id}.yaml", artifact)
@@ -386,6 +607,13 @@ def main() -> None:
     # Generate report
     report = generate_backtest_report(result)
     print(report)
+    print(
+        "SMOKE HEALTH:",
+        result.smoke_health,
+        "-",
+        result.smoke_health_reason,
+    )
+    print("SMOKE AUDIT:", result.smoke_audit)
 
     logger.info(
         "Experiment %s saved (trial #%d)",

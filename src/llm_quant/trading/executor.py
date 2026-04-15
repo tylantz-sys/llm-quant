@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from llm_quant.brain.models import Action, TradeSignal
@@ -19,6 +20,17 @@ if TYPE_CHECKING:
     from llm_quant.trading.portfolio import Position
 
 logger = logging.getLogger(__name__)
+
+
+class ExecutionMode(StrEnum):
+    """Execution mode for the portfolio mutation layer."""
+
+    PAPER = "paper"
+    ALPACA = "alpaca"
+
+
+class RuntimeExecutionNotAllowedError(RuntimeError):
+    """Raised when simulated execution is requested for a broker runtime."""
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +59,16 @@ class ExecutedTrade:
 # ---------------------------------------------------------------------------
 
 
+def ensure_runtime_execution_allowed(mode: ExecutionMode | str = ExecutionMode.PAPER) -> None:
+    """Guard the paper executor from being used in broker-authoritative runtimes."""
+    normalized = ExecutionMode(str(mode).lower())
+    if normalized == ExecutionMode.ALPACA:
+        raise RuntimeExecutionNotAllowedError(
+            "Simulated portfolio execution is forbidden in alpaca mode. "
+            "Use broker order submission and broker fill reconciliation only."
+        )
+
+
 def execute_signals(
     portfolio: Portfolio,
     signals: list[TradeSignal],
@@ -54,12 +76,17 @@ def execute_signals(
     nav: float,
     asset_class_map: dict[str, str] | None = None,
     reserve_cash: float = 0.0,
+    *,
+    mode: ExecutionMode | str = ExecutionMode.PAPER,
 ) -> list[ExecutedTrade]:
     """Execute a batch of trade signals against *portfolio*.
 
     The function mutates *portfolio* in place (cash, positions) and returns
-    the list of trades that were actually executed.  Signals that cannot be
+    the list of trades that were actually executed. Signals that cannot be
     executed (e.g. missing price, zero shares) are skipped with a warning.
+
+    In ``alpaca`` mode this function is explicitly disabled because the broker
+    must remain the only execution truth for live runtime state.
 
     Parameters
     ----------
@@ -77,6 +104,7 @@ def execute_signals(
     list[ExecutedTrade]
         Records of every trade that was applied.
     """
+    ensure_runtime_execution_allowed(mode)
     executed: list[ExecutedTrade] = []
 
     for signal in signals:
@@ -147,7 +175,10 @@ def _execute_buy(
     if existing is not None:
         current_notional = existing.market_value
 
-    target_notional = min(signal.target_weight * nav, current_notional + max(portfolio.cash - reserve_cash, 0.0))
+    target_notional = min(
+        signal.target_weight * nav,
+        current_notional + max(portfolio.cash - reserve_cash, 0.0),
+    )
     additional_notional = target_notional - current_notional
     if additional_notional <= 0.0:
         logger.debug(

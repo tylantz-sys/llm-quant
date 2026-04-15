@@ -11,7 +11,7 @@ import logging
 import math
 import uuid
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,9 +30,31 @@ from llm_quant.backtest.metrics import (
 )
 from llm_quant.backtest.strategy import Strategy
 from llm_quant.brain.models import Action, Conviction, TradeSignal
+from llm_quant.config import ExecutionConfig, RiskLimits, load_config
+from llm_quant.trading.exits import (
+    ExitPolicy,
+    ExitRuntime,
+    SyntheticExitContext,
+    SyntheticExitParityTier,
+    assess_eod_flatten,
+    build_exit_policy,
+    build_exit_runtime,
+    evaluate_synthetic_exit,
+    synthetic_exit_execution_assumption,
+    synthetic_exit_parity_mode,
+)
+from llm_quant.trading.intraday import IntradayPositionState
 from llm_quant.trading.portfolio import Portfolio
 
 logger = logging.getLogger(__name__)
+
+
+def current_date_to_et_close(current_date: date) -> datetime:
+    """Map a backtest trade date to a canonical end-of-day timestamp."""
+    return datetime.combine(current_date, datetime.min.time(), tzinfo=UTC).replace(
+        hour=20,
+        minute=0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +215,11 @@ class TradeRecord:
     cost: float
     pnl: float = 0.0
     reasoning: str = ""
+    is_synthetic_exit: bool = False
+    exit_parity_mode: str = ""
+    exit_execution_assumption: str = ""
+    exit_reason: str = ""
+    exit_parity_tier: str = "tier1_close_only"
 
 
 @dataclass
@@ -224,10 +251,44 @@ class BacktestResult:
     symbols_used: list[str] = field(default_factory=list)
     data_warnings: list[str] = field(default_factory=list)
 
+    # Exit parity telemetry
+    exit_parity_mode: str = ""
+    exit_execution_assumption: str = ""
+    synthetic_exit_trade_count: int = 0
+    synthetic_exit_parity_tier: str = "tier1_close_only"
+
+    # Operational health / execution diagnostics
+    signal_count: int = 0
+    executed_trade_count: int = 0
+    signal_noop_reasons: dict[str, int] = field(default_factory=dict)
+    smoke_health: str = "runtime_failure"
+    smoke_health_reason: str = ""
+    smoke_audit: dict[str, Any] = field(default_factory=dict)
+
 
 # ---------------------------------------------------------------------------
 # Backtest engine
 # ---------------------------------------------------------------------------
+
+
+def build_backtest_exit_components(
+    *,
+    config_dir: str | Path | None = None,
+    broker: str = "paper",
+) -> tuple[ExitPolicy, ExitRuntime, str, SyntheticExitParityTier, str]:
+    """Build governed backtest exit components from canonical config."""
+    app_config = load_config(Path(config_dir) if config_dir is not None else None)
+    exit_policy = build_exit_policy(app_config.risk, app_config.execution)
+    exit_runtime = build_exit_runtime(broker, app_config.execution)
+    parity_tier: SyntheticExitParityTier = "tier1_close_only"
+    execution_assumption = synthetic_exit_execution_assumption(parity_tier)
+    return (
+        exit_policy,
+        exit_runtime,
+        synthetic_exit_parity_mode(),
+        parity_tier,
+        execution_assumption,
+    )
 
 
 class BacktestEngine:
@@ -242,6 +303,7 @@ class BacktestEngine:
     6. Cost multiplier stress tests (1x, 1.5x, 2x, 3x)
     7. Append-only experiment registry
     8. Optional volatility targeting (scale positions to match target annualized vol)
+    9. Optional canonical synthetic exit-policy parity for profit-taking/EOD flatten
     """
 
     def __init__(
@@ -267,12 +329,17 @@ class BacktestEngine:
         self.meta_filter = meta_filter  # optional rule-based signal filters
 
         # Volatility targeting
-        # When set (e.g. 0.15 = 15% annualized), the engine scales each signal's
-        # target_weight so that realized portfolio vol tracks the target.
-        # Scale = vol_target / realized_vol, capped at vol_target_max_scale.
         self.volatility_target = volatility_target
         self.vol_target_window = vol_target_window
         self.vol_target_max_scale = vol_target_max_scale
+
+        (
+            self.backtest_exit_policy,
+            self.backtest_exit_runtime,
+            self.backtest_exit_parity_mode,
+            self.backtest_exit_parity_tier,
+            self.backtest_exit_execution_assumption,
+        ) = build_backtest_exit_components()
 
     def run(
         self,
@@ -287,43 +354,11 @@ class BacktestEngine:
         benchmark_rebalance_days: int = 21,
         trial_count: int | None = None,
     ) -> BacktestResult:
-        """Run a single backtest pass.
-
-        Parameters
-        ----------
-        prices_df : pl.DataFrame
-            Full OHLCV data with columns: symbol, date, open, high, low, close,
-            volume, adj_close.
-        indicators_df : pl.DataFrame
-            Pre-computed indicators (output of compute_indicators).
-        slug : str
-            Strategy slug for artifact storage.
-        cost_model : CostModel | None
-            Transaction cost model. Uses defaults if None.
-        fill_delay : int
-            Number of days between signal and execution (0=same day, 1=next day).
-        warmup_days : int
-            Number of trading days to skip for indicator warmup.
-        cost_multiplier : float
-            Cost multiplier for stress testing.
-        benchmark_weights : dict[str, float] | None
-            Benchmark portfolio weights for comparison.
-        benchmark_rebalance_days : int
-            Benchmark rebalance frequency.
-        trial_count : int | None
-            Override trial count for DSR. If None, reads from registry.
-
-        Returns
-        -------
-        BacktestResult
-            Complete backtest output with metrics.
-        """
+        """Run a single backtest pass."""
         if cost_model is None:
             cost_model = CostModel()
 
         experiment_id = str(uuid.uuid4())[:8]
-
-        # Get sorted unique trading dates
         all_dates = sorted(prices_df.select("date").unique().to_series().to_list())
         if len(all_dates) <= warmup_days:
             logger.warning(
@@ -341,34 +376,25 @@ class BacktestEngine:
         trading_dates = all_dates[warmup_days:]
         start_date = trading_dates[0]
         end_date = trading_dates[-1]
-
-        # Check data quality
         data_warnings = self._check_data_quality(prices_df, trading_dates)
         symbols_used = sorted(prices_df.select("symbol").unique().to_series().to_list())
-
-        # Initialize portfolio
         portfolio = Portfolio(initial_capital=self.initial_capital)
-
-        # Compute volume stats for cost model
         volume_stats = self._compute_volume_stats(prices_df)
-
-        # Pre-compute daily volatility per symbol
         vol_stats = self._compute_volatility_stats(prices_df)
 
-        # Run the daily loop
         snapshots: list[DailySnapshot] = []
         trades: list[TradeRecord] = []
         nav_series: list[float] = [self.initial_capital]
         pending_signals: list[tuple[date, list[TradeSignal]]] = []
         rebalance_counter = 0
-        # O(1) date-to-index lookup for fill-delay processing
+        intraday_states: dict[str, IntradayPositionState] = {}
         date_index_map = {d: idx for idx, d in enumerate(trading_dates)}
+        signal_count = 0
+        signal_noop_reasons: dict[str, int] = {}
 
         for i, current_date in enumerate(trading_dates):
-            # 4a. Get today's prices
             today_prices = self._get_prices_for_date(prices_df, current_date)
             if not today_prices:
-                # D5: carry forward previous NAV so nav_series stays aligned
                 nav_series.append(nav_series[-1])
                 snapshots.append(
                     DailySnapshot(
@@ -383,26 +409,27 @@ class BacktestEngine:
                 )
                 continue
 
-            # 4b. Mark portfolio to market at today's close
             portfolio.update_prices(today_prices)
 
-            # 4c. Check stop-losses at today's close
-            stop_signals = self._check_stop_losses(portfolio, today_prices)
+            exit_signals = self._check_exit_policy(
+                portfolio,
+                today_prices,
+                intraday_states,
+                current_date,
+                prices_df,
+            )
 
-            # 4d. Generate signals on rebalance days
             rebalance_freq = self.strategy.config.rebalance_frequency_days
             is_rebalance_day = rebalance_counter % rebalance_freq == 0
             rebalance_counter += 1
 
             strategy_signals: list[TradeSignal] = []
             if is_rebalance_day:
-                # Filter indicators to dates <= current_date (causal)
                 causal_indicators = indicators_df.filter(pl.col("date") <= current_date)
                 strategy_signals = self.strategy.generate_signals(
                     current_date, causal_indicators, portfolio, today_prices
                 )
 
-                # ML gate: filter BUY signals; CLOSE/SELL always pass
                 gate = self.ml_gate
                 if gate is not None and gate.is_trained() and strategy_signals:
                     follower = getattr(self.strategy, "follower_symbol", None) or (
@@ -424,38 +451,33 @@ class BacktestEngine:
                             gate_decision.confidence,
                         )
 
-            # Rule-based meta-filters: regime, strength, ensemble
             if self.meta_filter is not None and strategy_signals:
                 strategy_signals = self._apply_meta_filters(
                     strategy_signals, causal_indicators, current_date
                 )
 
-            # Volatility targeting: scale BUY signal weights to match target vol
             if self.volatility_target is not None and strategy_signals:
                 strategy_signals = self._apply_vol_scaling_to_signals(
                     strategy_signals, nav_series
                 )
 
-            # Deduplicate: stop-loss takes priority over strategy for same symbol
-            stop_symbols = {s.symbol for s in stop_signals}
+            exit_symbols = {s.symbol for s in exit_signals}
             deduped_strategy = [
-                s for s in strategy_signals if s.symbol not in stop_symbols
+                s for s in strategy_signals if s.symbol not in exit_symbols
             ]
-            all_signals = stop_signals + deduped_strategy
+            all_signals = exit_signals + deduped_strategy
 
-            # 4e. Risk filtering
             if self.risk_checks_enabled and self.risk_manager and all_signals:
                 approved, _rejected = self.risk_manager.filter_signals(
                     all_signals, portfolio, today_prices
                 )
                 all_signals = approved
 
-            # Split: stop-losses execute immediately, strategy signals follow fill delay
-            immediate_signals = [s for s in all_signals if s.symbol in stop_symbols]
-            delayed_signals = [s for s in all_signals if s.symbol not in stop_symbols]
+            immediate_signals = [s for s in all_signals if s.symbol in exit_symbols]
+            delayed_signals = [s for s in all_signals if s.symbol not in exit_symbols]
 
-            # Execute stop-losses immediately at today's close (no fill delay)
             if immediate_signals:
+                signal_count += len(immediate_signals)
                 day_trades = self._execute_signals(
                     immediate_signals,
                     portfolio,
@@ -465,12 +487,13 @@ class BacktestEngine:
                     cost_multiplier,
                     volume_stats,
                     vol_stats,
+                    signal_noop_reasons,
                 )
                 trades.extend(day_trades)
 
-            # Handle fill delay for strategy signals
             if fill_delay == 0:
                 if delayed_signals:
+                    signal_count += len(delayed_signals)
                     day_trades = self._execute_signals(
                         delayed_signals,
                         portfolio,
@@ -480,24 +503,22 @@ class BacktestEngine:
                         cost_multiplier,
                         volume_stats,
                         vol_stats,
+                        signal_noop_reasons,
                     )
                     trades.extend(day_trades)
             else:
-                # Queue for next day execution
                 if delayed_signals:
                     pending_signals.append((current_date, delayed_signals))
 
-                # Execute pending signals from fill_delay days ago
-                # Use date-to-index map for O(1) lookup
                 new_pending = []
                 for signal_date, signals in pending_signals:
                     signal_idx = date_index_map.get(signal_date, -1)
                     if signal_idx >= 0 and i - signal_idx >= fill_delay:
-                        # Execute at today's open
                         fill_prices = self._get_open_prices_for_date(
                             prices_df, current_date
                         )
                         if fill_prices:
+                            signal_count += len(signals)
                             day_trades = self._execute_signals(
                                 signals,
                                 portfolio,
@@ -507,15 +528,14 @@ class BacktestEngine:
                                 cost_multiplier,
                                 volume_stats,
                                 vol_stats,
+                                signal_noop_reasons,
                             )
                             trades.extend(day_trades)
-                            # Update prices after execution
                             portfolio.update_prices(today_prices)
                     else:
                         new_pending.append((signal_date, signals))
                 pending_signals = new_pending
 
-            # 4h. Record snapshot
             nav = portfolio.nav
             nav_series.append(nav)
             trades_today = sum(1 for t in trades if t.date == current_date)
@@ -531,7 +551,6 @@ class BacktestEngine:
                 )
             )
 
-        # Compute benchmark returns
         benchmark_returns = None
         if benchmark_weights:
             benchmark_returns = compute_benchmark_returns(
@@ -541,13 +560,11 @@ class BacktestEngine:
                 use_adj_close=True,
             )
 
-        # Get trial count from registry if not provided
         if trial_count is None:
             strat_d = strategy_dir(base_dir=self._resolve_data_dir(), slug=slug)
             registry = ExperimentRegistry(strat_d)
-            trial_count = registry.trial_count + 1  # include current run
+            trial_count = registry.trial_count + 1
 
-        # Compute metrics
         trade_dicts = [{"pnl": t.pnl, "notional": t.notional} for t in trades]
         metrics = compute_all_metrics(
             nav_series,
@@ -556,10 +573,18 @@ class BacktestEngine:
             benchmark_returns=benchmark_returns,
         )
         metrics.warnings.extend(data_warnings)
-
-        # W5: compute spec_hash from strategy config
         spec_hash = hash_content(
             yaml.dump(self.strategy.config.to_dict(), sort_keys=True)
+        )
+
+        synthetic_exit_trade_count = sum(1 for trade in trades if trade.is_synthetic_exit)
+        executed_trade_count = len(trades)
+        smoke_audit = self._build_smoke_audit(
+            trading_dates=trading_dates,
+            signal_count=signal_count,
+            executed_trade_count=executed_trade_count,
+            signal_noop_reasons=signal_noop_reasons,
+            snapshots=snapshots,
         )
 
         return BacktestResult(
@@ -579,6 +604,16 @@ class BacktestEngine:
             trial_number=trial_count,
             symbols_used=symbols_used,
             data_warnings=data_warnings,
+            exit_parity_mode=self.backtest_exit_parity_mode,
+            exit_execution_assumption=self.backtest_exit_execution_assumption,
+            synthetic_exit_trade_count=synthetic_exit_trade_count,
+            synthetic_exit_parity_tier=self.backtest_exit_parity_tier,
+            signal_count=signal_count,
+            executed_trade_count=executed_trade_count,
+            signal_noop_reasons=signal_noop_reasons,
+            smoke_health=smoke_audit["classification"],
+            smoke_health_reason=smoke_audit["reason"],
+            smoke_audit=smoke_audit,
         )
 
     def run_with_cost_sensitivity(
@@ -593,22 +628,17 @@ class BacktestEngine:
         benchmark_weights: dict[str, float] | None = None,
         benchmark_rebalance_days: int = 21,
     ) -> BacktestResult:
-        """Run backtest at multiple cost multipliers.
-
-        Returns a single BacktestResult with metrics for each multiplier.
-        """
+        """Run backtest at multiple cost multipliers."""
         if cost_multipliers is None:
             cost_multipliers = [1.0, 1.5, 2.0, 3.0]
 
         if cost_model is None:
             cost_model = CostModel()
 
-        # Get trial count once
         strat_d = strategy_dir(base_dir=self._resolve_data_dir(), slug=slug)
         registry = ExperimentRegistry(strat_d)
         trial_count = registry.trial_count + 1
 
-        # Run at base cost first
         base_result = self.run(
             prices_df=prices_df,
             indicators_df=indicators_df,
@@ -622,7 +652,6 @@ class BacktestEngine:
             trial_count=trial_count,
         )
 
-        # Run at other multipliers
         for mult in cost_multipliers:
             if mult == 1.0:
                 continue
@@ -644,15 +673,10 @@ class BacktestEngine:
 
         return base_result
 
-    # -------------------------------------------------------------------
-    # Private helpers
-    # -------------------------------------------------------------------
-
     def _resolve_data_dir(self) -> Path:
         return Path(self.data_dir)
 
     def _get_prices_for_date(self, df: pl.DataFrame, d: date) -> dict[str, float]:
-        """Get close prices for all symbols on date *d*."""
         day_data = df.filter(pl.col("date") == d)
         if len(day_data) == 0:
             return {}
@@ -665,7 +689,6 @@ class BacktestEngine:
         )
 
     def _get_open_prices_for_date(self, df: pl.DataFrame, d: date) -> dict[str, float]:
-        """Get open prices for all symbols on date *d*."""
         day_data = df.filter(pl.col("date") == d)
         if len(day_data) == 0:
             return {}
@@ -677,17 +700,117 @@ class BacktestEngine:
             )
         )
 
+    def _get_bar_extremes_for_date(
+        self,
+        df: pl.DataFrame,
+        d: date,
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        day_data = df.filter(pl.col("date") == d)
+        if len(day_data) == 0:
+            return {}, {}
+        highs = dict(
+            zip(
+                day_data.select("symbol").to_series().to_list(),
+                day_data.select("high").to_series().to_list(),
+                strict=False,
+            )
+        )
+        lows = dict(
+            zip(
+                day_data.select("symbol").to_series().to_list(),
+                day_data.select("low").to_series().to_list(),
+                strict=False,
+            )
+        )
+        return highs, lows
+
     def _check_stop_losses(
         self, portfolio: Portfolio, prices: dict[str, float]
     ) -> list[TradeSignal]:
-        """Check if any positions have breached their stop-loss."""
+        states: dict[str, IntradayPositionState] = {}
         signals: list[TradeSignal] = []
         for symbol, pos in portfolio.positions.items():
-            if (
-                pos.stop_loss > 0
-                and symbol in prices
-                and prices[symbol] <= pos.stop_loss
-            ):
+            price = prices.get(symbol)
+            if price is None:
+                continue
+            state = IntradayPositionState(
+                symbol=symbol,
+                entry_batch=1,
+                entry_price=pos.avg_cost,
+                peak_price=max(pos.current_price, price),
+            )
+            signal = evaluate_synthetic_exit(
+                SyntheticExitContext(
+                    position=pos,
+                    price=price,
+                    nav=portfolio.nav,
+                    state=state,
+                    parity_tier="tier1_close_only",
+                ),
+                self.backtest_exit_policy,
+            )
+            if signal is not None and signal.exit_reason == "stop_loss":
+                signals.append(signal)
+        return signals
+
+    def _check_exit_policy(
+        self,
+        portfolio: Portfolio,
+        prices: dict[str, float],
+        states: dict[str, IntradayPositionState],
+        current_date: date,
+        prices_df: pl.DataFrame | None = None,
+    ) -> list[TradeSignal]:
+        """Check canonical synthetic exit-policy conditions for backtest parity."""
+        signals: list[TradeSignal] = []
+        bar_highs, bar_lows = ({}, {})
+        if (
+            self.backtest_exit_parity_tier == "tier2_ohlc_conservative"
+            and prices_df is not None
+        ):
+            bar_highs, bar_lows = self._get_bar_extremes_for_date(prices_df, current_date)
+
+        for symbol, pos in portfolio.positions.items():
+            price = prices.get(symbol, pos.current_price)
+            state = states.get(symbol)
+            observed_peak = max(price, bar_highs.get(symbol, price))
+            if state is None:
+                state = IntradayPositionState(
+                    symbol=symbol,
+                    entry_batch=1,
+                    entry_price=pos.avg_cost,
+                    peak_price=observed_peak,
+                )
+                states[symbol] = state
+            else:
+                state.peak_price = max(state.peak_price, observed_peak)
+
+            signal = evaluate_synthetic_exit(
+                SyntheticExitContext(
+                    position=pos,
+                    price=price,
+                    nav=portfolio.nav,
+                    state=state,
+                    bar_high=bar_highs.get(symbol),
+                    bar_low=bar_lows.get(symbol),
+                    parity_tier=self.backtest_exit_parity_tier,
+                ),
+                self.backtest_exit_policy,
+            )
+            if signal is not None:
+                signals.append(signal)
+
+        flatten_decision = assess_eod_flatten(
+            self.backtest_exit_policy,
+            current_date_to_et_close(current_date),
+            market_is_open=True,
+            runtime=self.backtest_exit_runtime,
+        )
+        if flatten_decision.due:
+            for symbol, pos in portfolio.positions.items():
+                if any(existing.symbol == symbol for existing in signals):
+                    continue
+                state = states.get(symbol)
                 signals.append(
                     TradeSignal(
                         symbol=symbol,
@@ -696,12 +819,13 @@ class BacktestEngine:
                         target_weight=0.0,
                         stop_loss=0.0,
                         reasoning=(
-                            f"Stop-loss triggered at "
-                            f"{prices[symbol]:.2f} <= "
-                            f"{pos.stop_loss:.2f}"
+                            "Canonical exit engine EOD flatten triggered in backtest parity mode."
                         ),
+                        exit_reason="eod_flatten",
+                        entry_batch=state.entry_batch if state is not None else 1,
                     )
                 )
+
         return signals
 
     def _execute_signals(
@@ -714,20 +838,26 @@ class BacktestEngine:
         cost_multiplier: float,
         volume_stats: dict[str, float],
         vol_stats: dict[str, float],
+        signal_noop_reasons: dict[str, int] | None = None,
     ) -> list[TradeRecord]:
-        """Execute signals and apply costs. Returns trade records."""
         records: list[TradeRecord] = []
         nav = portfolio.nav
+
+        def record_noop(reason: str) -> None:
+            if signal_noop_reasons is None:
+                return
+            signal_noop_reasons[reason] = signal_noop_reasons.get(reason, 0) + 1
 
         for signal in signals:
             price = prices.get(signal.symbol)
             if price is None or price <= 0:
+                record_noop("missing_or_invalid_price")
                 continue
 
             if signal.action == Action.HOLD:
+                record_noop("hold_signal")
                 continue
 
-            # Calculate shares
             if signal.action == Action.BUY:
                 target_notional = signal.target_weight * nav
                 current_notional = 0.0
@@ -736,12 +866,13 @@ class BacktestEngine:
                     current_notional = existing.market_value
                 additional = target_notional - current_notional
                 if additional <= 0:
+                    record_noop("buy_target_at_or_below_current")
                     continue
                 shares = math.floor(additional / price)
                 if shares <= 0:
+                    record_noop("buy_target_below_share_floor")
                     continue
 
-                # Check cash
                 cost_estimate = cost_model.compute_cost(
                     shares * price,
                     shares,
@@ -753,6 +884,7 @@ class BacktestEngine:
                 if total_cost > portfolio.cash:
                     shares = math.floor((portfolio.cash - cost_estimate) / price)
                     if shares <= 0:
+                        record_noop("insufficient_cash_after_costs")
                         continue
 
                 notional = shares * price
@@ -764,7 +896,6 @@ class BacktestEngine:
                     cost_multiplier,
                 )
 
-                # Update portfolio
                 portfolio.cash -= notional + cost
                 if existing:
                     total_shares = existing.shares + shares
@@ -795,12 +926,14 @@ class BacktestEngine:
                         notional=notional,
                         cost=cost,
                         reasoning=signal.reasoning,
+                        exit_reason=signal.exit_reason,
                     )
                 )
 
             elif signal.action in (Action.SELL, Action.CLOSE):
                 existing = portfolio.positions.get(signal.symbol)
                 if existing is None or existing.shares <= 0:
+                    record_noop("sell_without_position")
                     continue
 
                 if signal.action == Action.CLOSE:
@@ -810,9 +943,15 @@ class BacktestEngine:
                     current_notional = existing.shares * price
                     reduce = current_notional - target_notional
                     if reduce <= 0:
+                        record_noop("sell_target_at_or_above_current")
                         continue
                     shares = min(math.floor(reduce / price), existing.shares)
                     if shares <= 0:
+                        residual_notional = abs(current_notional - target_notional)
+                        if residual_notional < price:
+                            record_noop("sell_residual_below_share_floor")
+                        else:
+                            record_noop("sell_target_below_share_floor")
                         continue
 
                 notional = shares * price
@@ -824,10 +963,7 @@ class BacktestEngine:
                     cost_multiplier,
                 )
 
-                # PnL for this trade
                 pnl = (price - existing.avg_cost) * shares - cost
-
-                # Update portfolio
                 portfolio.cash += notional - cost
                 existing.shares -= shares
                 if existing.shares <= 0:
@@ -835,6 +971,7 @@ class BacktestEngine:
                 else:
                     existing.current_price = price
 
+                is_synthetic_exit = bool(signal.exit_reason)
                 records.append(
                     TradeRecord(
                         date=trade_date,
@@ -846,13 +983,57 @@ class BacktestEngine:
                         cost=cost,
                         pnl=pnl,
                         reasoning=signal.reasoning,
+                        is_synthetic_exit=is_synthetic_exit,
+                        exit_parity_mode=(
+                            self.backtest_exit_parity_mode if is_synthetic_exit else ""
+                        ),
+                        exit_execution_assumption=(
+                            self.backtest_exit_execution_assumption
+                            if is_synthetic_exit
+                            else ""
+                        ),
+                        exit_reason=signal.exit_reason,
+                        exit_parity_tier=(
+                            self.backtest_exit_parity_tier if is_synthetic_exit else "tier1_close_only"
+                        ),
                     )
                 )
 
         return records
 
+    def _build_smoke_audit(
+        self,
+        *,
+        trading_dates: list[date],
+        signal_count: int,
+        executed_trade_count: int,
+        signal_noop_reasons: dict[str, int],
+        snapshots: list[DailySnapshot],
+    ) -> dict[str, Any]:
+        if executed_trade_count > 0:
+            classification = "healthy_nonzero_trading"
+            reason = "Signals produced executable trades."
+        elif signal_count > 0:
+            classification = "degenerate_no_signal"
+            reason = "Signals were generated but none became executable trades."
+        elif any(snapshot.n_positions > 0 for snapshot in snapshots):
+            classification = "healthy_but_neutral_window"
+            reason = "No new trades, but existing positions remained allocated without churn."
+        else:
+            classification = "degenerate_no_signal"
+            reason = "No signals and no executed trades observed in the tested window."
+
+        return {
+            "classification": classification,
+            "reason": reason,
+            "trading_days": len(trading_dates),
+            "signal_count": signal_count,
+            "executed_trade_count": executed_trade_count,
+            "signal_noop_reasons": dict(signal_noop_reasons),
+            "ending_position_count": snapshots[-1].n_positions if snapshots else 0,
+        }
+
     def _compute_volume_stats(self, df: pl.DataFrame) -> dict[str, float]:
-        """Compute average daily volume per symbol."""
         if "volume" not in df.columns:
             return {}
         stats = df.group_by("symbol").agg(pl.col("volume").mean().alias("avg_volume"))
@@ -865,7 +1046,6 @@ class BacktestEngine:
         )
 
     def _compute_volatility_stats(self, df: pl.DataFrame) -> dict[str, float]:
-        """Compute daily return volatility per symbol."""
         result: dict[str, float] = {}
         symbols = df.select("symbol").unique().to_series().to_list()
         for symbol in symbols:
@@ -890,34 +1070,9 @@ class BacktestEngine:
         max_scale: float = 2.0,
         trading_days_per_year: int = 252,
     ) -> float:
-        """Compute volatility scaling factor for the current day.
-
-        Uses rolling *window*-day realized volatility of portfolio returns to
-        compute a scale factor such that:
-            scaled_vol ≈ vol_target
-
-        Parameters
-        ----------
-        nav_series : list[float]
-            NAV history up to and including today (not including current day yet).
-        vol_target : float
-            Annualized target volatility (e.g. 0.15 for 15%).
-        window : int
-            Rolling lookback in trading days for realized vol estimate.
-        max_scale : float
-            Maximum leverage multiplier (cap on Scale to prevent excess leverage).
-        trading_days_per_year : int
-            Annualization factor for daily vol.
-
-        Returns
-        -------
-        float
-            Scale factor in (0, max_scale]. Returns 1.0 when insufficient history.
-        """
         if len(nav_series) < window + 1:
             return 1.0
 
-        # Compute daily returns from the last *window* observations
         recent_nav = nav_series[-(window + 1):]
         daily_returns = [
             recent_nav[i] / recent_nav[i - 1] - 1.0
@@ -940,11 +1095,8 @@ class BacktestEngine:
 
         realized_ann_vol = realized_daily_vol * math.sqrt(trading_days_per_year)
         scale = vol_target / realized_ann_vol
-
-        # Cap scale to prevent excessive leverage
         scale = min(scale, max_scale)
-        scale = max(scale, 0.01)  # floor to avoid zero allocation
-
+        scale = max(scale, 0.01)
         return scale
 
     def _apply_vol_scaling_to_signals(
@@ -952,23 +1104,6 @@ class BacktestEngine:
         signals: list,
         nav_series: list[float],
     ) -> list:
-        """Scale target_weight of BUY signals by the vol-targeting factor.
-
-        CLOSE and SELL signals are not modified (exit logic should not be
-        filtered by vol-targeting).
-
-        Parameters
-        ----------
-        signals : list[TradeSignal]
-            List of signals to potentially scale.
-        nav_series : list[float]
-            Current NAV history (used to compute rolling vol).
-
-        Returns
-        -------
-        list[TradeSignal]
-            New list with adjusted target_weight on BUY signals.
-        """
         from llm_quant.brain.models import Action, TradeSignal
 
         if self.volatility_target is None or not signals:
@@ -993,7 +1128,6 @@ class BacktestEngine:
         result = []
         for sig in signals:
             if sig.action == Action.BUY:
-                # Clamp scaled weight at 1.0 (no more than 100% in one position)
                 new_weight = min(sig.target_weight * scale, 1.0)
                 scaled = TradeSignal(
                     symbol=sig.symbol,
@@ -1015,29 +1149,6 @@ class BacktestEngine:
         causal_indicators: pl.DataFrame,
         current_date: date,
     ) -> list[TradeSignal]:
-        """Apply rule-based meta-filters to strategy signals.
-
-        Filters operate on the full signal list:
-        - regime_filter: drops BUY signals when VIX is above threshold
-        - signal_strength_weight: scales target_weight of BUY signals by leader magnitude
-        - ensemble_vote: drops BUY signals when fewer than min_votes BUYs exist
-
-        SELL/CLOSE signals always pass — exits are never blocked by meta-filters.
-
-        Parameters
-        ----------
-        signals : list[TradeSignal]
-            Raw signals from the strategy (post-ML gate if enabled).
-        causal_indicators : pl.DataFrame
-            Indicators filtered to dates <= current_date.
-        current_date : date
-            The current trading date (used for indicator lookup).
-
-        Returns
-        -------
-        list[TradeSignal]
-            Filtered (and possibly weight-adjusted) signals.
-        """
         cfg = self.meta_filter
         if cfg is None:
             return signals
@@ -1048,9 +1159,7 @@ class BacktestEngine:
             signal_strength_weight,
         )
 
-        # --- Regime filter ---
         if cfg.regime_filter_enabled:
-            # Look up VIX on current_date from indicators
             vix_rows = causal_indicators.filter(
                 (pl.col("symbol") == "VIX") & (pl.col("date") == current_date)
             )
@@ -1074,7 +1183,6 @@ class BacktestEngine:
                     )
                 signals = [s for s in signals if s.action != Action.BUY]
 
-        # --- Ensemble vote ---
         if cfg.ensemble_vote_enabled:
             buy_signals = [s for s in signals if s.action == Action.BUY]
             non_buy = [s for s in signals if s.action != Action.BUY]
@@ -1090,10 +1198,7 @@ class BacktestEngine:
             else:
                 signals = non_buy + buy_signals
 
-        # --- Signal strength weighting ---
         if cfg.signal_strength_enabled:
-            # Look up leader_return from indicators on current_date
-            # Use strategy's leader_symbol parameter if available
             leader_symbol = getattr(self.strategy, "leader_symbol", None) or (
                 self.strategy.config.parameters.get("leader_symbol")
                 or self.strategy.config.parameters.get("leader", "SPY")
@@ -1142,7 +1247,6 @@ class BacktestEngine:
         return signals
 
     def _check_data_quality(self, df: pl.DataFrame, trading_dates: list) -> list[str]:
-        """Check data quality and return warnings."""
         warnings: list[str] = []
         total_dates = len(trading_dates)
         if total_dates == 0:
@@ -1159,7 +1263,7 @@ class BacktestEngine:
                     & (pl.col("date") <= last_trade_date)
                 )
                 .select("date")
-                .to_series()
+                    .to_series()
                 .to_list()
             )
             coverage = len(sym_dates) / total_dates

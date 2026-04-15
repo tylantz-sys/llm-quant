@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 from llm_quant.backtest.artifacts import (
     ExperimentRegistry,
@@ -106,16 +107,18 @@ class TestFrozenSpec:
     """Verify frozen spec enforcement."""
 
     def test_frozen_spec_loads(self):
-        """A frozen spec should load successfully."""
+        """A frozen spec with a valid hash should load successfully."""
         with tempfile.TemporaryDirectory() as tmpdir:
             d = Path(tmpdir)
             save_artifact(
                 d / "research-spec.yaml",
-                {"strategy_type": "sma", "frozen": True},
+                {"strategy_type": "sma", "frozen": False},
             )
+            content_hash = freeze_spec(d)
             spec = ensure_frozen_spec(d)
             assert spec["frozen"] is True
             assert spec["strategy_type"] == "sma"
+            assert spec["frozen_hash"] == content_hash
 
     def test_unfrozen_spec_raises(self):
         """An unfrozen spec should raise FrozenSpecError."""
@@ -135,6 +138,38 @@ class TestFrozenSpec:
             with pytest.raises(FrozenSpecError):
                 ensure_frozen_spec(d)
 
+    def test_frozen_spec_missing_hash_raises(self):
+        """A frozen spec without frozen_hash should be rejected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            d = Path(tmpdir)
+            save_artifact(
+                d / "research-spec.yaml",
+                {"strategy_type": "sma", "frozen": True},
+            )
+            with pytest.raises(FrozenSpecError, match="missing frozen_hash"):
+                ensure_frozen_spec(d)
+
+    def test_frozen_spec_hash_mismatch_raises(self):
+        """A frozen spec modified after freezing should be rejected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            d = Path(tmpdir)
+            save_artifact(
+                d / "research-spec.yaml",
+                {"strategy_type": "sma", "lookback": 20, "frozen": False},
+            )
+            freeze_spec(d)
+
+            spec_path = d / "research-spec.yaml"
+            spec = load_artifact(spec_path)
+            spec["lookback"] = 50
+            spec_path.write_text(
+                yaml.dump(spec, default_flow_style=False, sort_keys=False),
+                encoding="utf-8",
+            )
+
+            with pytest.raises(FrozenSpecError, match="does not match current contents"):
+                ensure_frozen_spec(d)
+
     def test_freeze_spec(self):
         """freeze_spec should set frozen=True and record hash."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -148,7 +183,11 @@ class TestFrozenSpec:
             spec = load_artifact(d / "research-spec.yaml")
             assert spec["frozen"] is True
             assert "frozen_at" in spec
-            assert "frozen_hash" in spec
+            assert spec["frozen_hash"] == content_hash
+
+            hashable = {k: v for k, v in spec.items() if k != "frozen_hash"}
+            content = yaml.dump(hashable, default_flow_style=False, sort_keys=False)
+            assert hash_content(content) == content_hash
 
 
 # ---------------------------------------------------------------------------

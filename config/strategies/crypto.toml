@@ -8,7 +8,7 @@ intraday_enabled = true
 intraday_timeframe_minutes = 5
 intraday_lookback_days = 10
 intraday_rth_guard = false
-intraday_use_oco = false
+intraday_use_oco = true
 skip_daily_fetch_when_intraday = true
 asset_class_filter = ["crypto"]
 claude_overlay_only = true
@@ -17,7 +17,7 @@ crypto_time_in_force = "gtc"
 initial_capital_source = "alpaca_equity"
 
 # Crypto profit-taking (tighter defaults due to higher volatility).
-# These apply because intraday_use_oco = false (synthetic exits).
+# These settings still inform canonical exit policy and broker-managed protection behavior.
 profit_take_partial_pct = 0.015
 profit_take_partial_size = 0.50
 profit_take_remainder_tp_mult = 2.0

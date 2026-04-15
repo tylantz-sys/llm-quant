@@ -1461,7 +1461,55 @@ class LeadLagStrategy(Strategy):
       exit_threshold (float, default -0.005): Leader return below which to exit.
       target_weight (float, default 0.90): Weight for follower when in trade.
       inverse (bool-like, default False): If True, leader up → short follower.
+
+    Extended structural controls used by governed successor variants such as
+    `soxx-qqq-lead-lag-v3`:
+      entry_threshold_lower / entry_threshold_upper: Tiered entry bands.
+      target_weight_lower / target_weight_upper: Tiered follower sizing.
+      confirmation_window / confirmation_threshold: Follower confirmation filter.
+      max_holding_days: Time stop for stale trades.
+      cooldown_days_after_exit: Re-entry cooldown after a close.
     """
+
+    @staticmethod
+    def _extract_position_days_held(position: object) -> int:
+        days_held = getattr(position, "days_held", None)
+        if isinstance(position, dict):
+            days_held = position.get("days_held", days_held)
+        if days_held is None:
+            return 0
+        try:
+            return int(days_held)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _extract_position_exit_cooldown(position: object) -> int:
+        cooldown = getattr(position, "exit_cooldown_days", None)
+        if isinstance(position, dict):
+            cooldown = position.get("exit_cooldown_days", cooldown)
+        if cooldown is None:
+            return 0
+        try:
+            return int(cooldown)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _trailing_return_from_prices(
+        prices_list: list[float],
+        window: int,
+        lag_days: int = 0,
+    ) -> float | None:
+        end_idx = len(prices_list) - lag_days
+        start_idx = end_idx - window
+        if start_idx < 0 or end_idx <= 0:
+            return None
+        start_price = prices_list[start_idx]
+        end_price = prices_list[end_idx - 1]
+        if start_price <= 0:
+            return None
+        return end_price / start_price - 1.0
 
     def generate_signals(
         self,
@@ -1475,59 +1523,125 @@ class LeadLagStrategy(Strategy):
         follower: str = str(params.get("follower_symbol", "SPY"))
         lag_days: int = int(params.get("lag_days", 2))
         sig_window: int = int(params.get("signal_window", 3))
-        entry_thresh: float = float(params.get("entry_threshold", 0.01))
         exit_thresh: float = float(params.get("exit_threshold", -0.005))
-        tgt_weight: float = float(params.get("target_weight", 0.90))
         inverse: bool = bool(params.get("inverse", False))
 
+        entry_thresh = params.get("entry_threshold")
+        entry_thresh_lower = float(
+            params.get(
+                "entry_threshold_lower",
+                entry_thresh if entry_thresh is not None else 0.01,
+            )
+        )
+        entry_thresh_upper = params.get("entry_threshold_upper")
+        if entry_thresh_upper is not None:
+            entry_thresh_upper = float(entry_thresh_upper)
+
+        target_weight = params.get("target_weight", 0.90)
+        target_weight_lower = float(params.get("target_weight_lower", target_weight))
+        target_weight_upper = float(
+            params.get(
+                "target_weight_upper",
+                target_weight if entry_thresh_upper is not None else target_weight_lower,
+            )
+        )
+
+        confirmation_window = params.get("confirmation_window")
+        confirmation_threshold = float(params.get("confirmation_threshold", 0.0))
+        max_holding_days = params.get("max_holding_days")
+        cooldown_days_after_exit = int(params.get("cooldown_days_after_exit", 0))
+
         lookback = sig_window + lag_days + 2
+        if confirmation_window is not None:
+            lookback = max(lookback, int(confirmation_window) + 2)
+
         leader_data = (
             indicators_df.filter(pl.col("symbol") == leader).sort("date").tail(lookback)
         )
         if len(leader_data) < sig_window + lag_days:
             return []
 
-        prices_list = leader_data["close"].to_list()
-        # Return computed lag_days ago (from [-(lag_days+sig_window)] to [-lag_days])
-        end_idx = len(prices_list) - lag_days
-        start_idx = end_idx - sig_window
-        if start_idx < 0 or prices_list[start_idx] <= 0:
+        leader_prices = leader_data["close"].to_list()
+        leader_ret = self._trailing_return_from_prices(
+            leader_prices,
+            sig_window,
+            lag_days=lag_days,
+        )
+        if leader_ret is None:
             return []
-        leader_ret = prices_list[end_idx - 1] / prices_list[start_idx] - 1.0
 
         follower_price = prices.get(follower, 0)
         if follower_price <= 0:
             return []
 
+        follower_confirmation_ret: float | None = None
+        if confirmation_window is not None:
+            follower_window = int(confirmation_window)
+            follower_data = (
+                indicators_df.filter(pl.col("symbol") == follower)
+                .sort("date")
+                .tail(follower_window + 2)
+            )
+            if len(follower_data) < follower_window:
+                return []
+            follower_prices = follower_data["close"].to_list()
+            follower_confirmation_ret = self._trailing_return_from_prices(
+                follower_prices,
+                follower_window,
+                lag_days=0,
+            )
+            if follower_confirmation_ret is None:
+                return []
+
+        position = portfolio.positions.get(follower)
         has_pos = follower in portfolio.positions
-        signal_long = (
-            (leader_ret >= entry_thresh)
-            if not inverse
-            else (leader_ret <= -entry_thresh)
+        days_held = self._extract_position_days_held(position) if has_pos else 0
+        cooldown_remaining = (
+            self._extract_position_exit_cooldown(position) if has_pos else 0
         )
-        signal_exit = (
-            (leader_ret <= exit_thresh) if not inverse else (leader_ret >= -exit_thresh)
+        if not has_pos and cooldown_days_after_exit > 0:
+            cooldown_remaining = cooldown_days_after_exit
+
+        confirmation_pass = (
+            True
+            if follower_confirmation_ret is None
+            else follower_confirmation_ret >= confirmation_threshold
         )
 
-        if signal_long and not has_pos:
-            logger.info(
-                "LeadLag: ENTER %s on %s (leader=%s ret=%.3f)",
-                follower,
-                as_of_date,
-                leader,
-                leader_ret,
+        if inverse:
+            signal_long_lower = leader_ret <= -entry_thresh_lower
+            signal_long_upper = (
+                leader_ret <= -entry_thresh_upper
+                if entry_thresh_upper is not None
+                else False
             )
-            return [
-                TradeSignal(
-                    symbol=follower,
-                    action=Action.BUY,
-                    conviction=Conviction.MEDIUM,
-                    target_weight=tgt_weight,
-                    stop_loss=follower_price * 0.95,
-                    reasoning=f"Lead-lag: {leader} {leader_ret:.3f}>={entry_thresh}",
+            signal_exit = leader_ret >= -exit_thresh
+        else:
+            signal_long_lower = leader_ret >= entry_thresh_lower
+            signal_long_upper = (
+                leader_ret >= entry_thresh_upper
+                if entry_thresh_upper is not None
+                else False
+            )
+            signal_exit = leader_ret <= exit_thresh
+
+        target_weight_for_signal = target_weight_lower
+        if signal_long_upper and entry_thresh_upper is not None:
+            target_weight_for_signal = target_weight_upper
+
+        if (
+            signal_exit
+            or (
+                max_holding_days is not None
+                and has_pos
+                and days_held >= int(max_holding_days)
+            )
+        ) and has_pos:
+            reason = f"Lead-lag: {leader} {leader_ret:.3f}<={exit_thresh}"
+            if max_holding_days is not None and days_held >= int(max_holding_days):
+                reason = (
+                    f"Lead-lag time stop: held {days_held}d >= {int(max_holding_days)}d"
                 )
-            ]
-        if signal_exit and has_pos:
             logger.info(
                 "LeadLag: EXIT %s on %s (leader=%s ret=%.3f)",
                 follower,
@@ -1542,7 +1656,41 @@ class LeadLagStrategy(Strategy):
                     conviction=Conviction.HIGH,
                     target_weight=0.0,
                     stop_loss=0.0,
-                    reasoning=f"Lead-lag: {leader} {leader_ret:.3f}<={exit_thresh}",
+                    reasoning=reason,
+                    metadata={
+                        "exit_cooldown_days": cooldown_days_after_exit,
+                    },
+                )
+            ]
+
+        if signal_long_lower and confirmation_pass and not has_pos and cooldown_remaining <= 0:
+            logger.info(
+                "LeadLag: ENTER %s on %s (leader=%s ret=%.3f)",
+                follower,
+                as_of_date,
+                leader,
+                leader_ret,
+            )
+            reasoning = (
+                f"Lead-lag: {leader} {leader_ret:.3f}>={entry_thresh_lower} "
+                f"target_weight={target_weight_for_signal:.2f}"
+            )
+            if follower_confirmation_ret is not None:
+                reasoning += (
+                    f", follower_confirm={follower_confirmation_ret:.3f}"
+                    f">={confirmation_threshold:.3f}"
+                )
+            return [
+                TradeSignal(
+                    symbol=follower,
+                    action=Action.BUY,
+                    conviction=Conviction.MEDIUM,
+                    target_weight=target_weight_for_signal,
+                    stop_loss=follower_price * 0.95,
+                    reasoning=reasoning,
+                    metadata={
+                        "days_held": 0,
+                    },
                 )
             ]
         return []
@@ -1668,25 +1816,23 @@ class VixRegimeStrategy(Strategy):
       - "vov": VIX 30-day rolling std dev above percentile_threshold → exit.
       - "level": VIX level above vix_threshold → defensive.
       - "vix_spike": Single-day VIX % change above spike_threshold → contrarian entry.
-      - "term_structure": Long equity when VIX term structure is in contango
-        (VIX3M/VIX > contango_threshold). Harvests volatility risk premium.
-        Cash when backwardated (VIX3M/VIX < contango_threshold = stressed regime).
+      - "term_structure": Allocate between equity and defensive assets using the
+        research-spec ratio medium/near = VIX / VIX9D. Ratio > backwardation_threshold
+        is risk-off, ratio < contango_threshold is risk-on, and values in between are
+        neutral/hold-current.
 
     Parameters:
       mode (str, default "level"): "vov", "level", "vix_spike", or "term_structure".
-      vix_symbol (str, default "VIX"): Short-term VIX ticker (internal symbol).
-      vix3m_symbol (str, default "VIX3M"): 3-month VIX ticker for term_structure mode.
-      equity_symbol (str, default "SPY"): Asset to trade.
-      vix_threshold (float, default 25.0): VIX level for "level" mode.
-      vov_window (int, default 30): Rolling window for VoV.
-      vov_percentile (float, default 0.80): Percentile for VoV threshold.
-      spike_threshold (float, default 0.20): 1-day VIX % rise for spike mode.
-      spike_exit_vix (float, default 20.0): Exit vix_spike position when VIX
-        drops below this level (fear subsided, bounce captured).
-      contango_threshold (float, default 1.05): VIX3M/VIX ratio above which
-        the term structure is considered contango (long equity). Default 1.05
-        means 3-month vol must exceed spot vol by 5% to confirm contango.
-      target_weight (float, default 0.90): Position weight in favourable regime.
+      vix_symbol (str, default "VIX"): Near-term VIX ticker for signal calculation.
+      vix3m_symbol (str, default "VIX3M"): Medium-term VIX ticker for term_structure mode.
+      equity_symbol (str, default "SPY"): Risk-on asset to trade.
+      risk_off_symbol (str, default "SHY"): Defensive asset for term_structure mode.
+      vix_threshold (float, default 25.0): VIX level for "level" mode; in term_structure
+        mode this is the backwardation threshold on medium/near ratio.
+      contango_threshold (float, default 0.95): Risk-on threshold on medium/near ratio.
+      target_weight (float, default 0.90): Equity target weight in favourable regime.
+      risk_off_weight (float, optional): Explicit defensive weight in backwardation.
+        When omitted, defaults to 1 - weight_spy_risk_off from the mapped spec.
     """
 
     def generate_signals(  # noqa: PLR0911
@@ -1715,13 +1861,15 @@ class VixRegimeStrategy(Strategy):
         vix_now = vix_prices[-1]
 
         equity_price = prices.get(equity_sym, 0)
-        if equity_price <= 0:
-            return []
         has_pos = equity_sym in portfolio.positions
 
         if mode == "level":
+            if equity_price <= 0:
+                return []
             defensive = vix_now > vix_thresh
         elif mode == "vov":
+            if equity_price <= 0:
+                return []
             if len(vix_prices) < vov_window + 1:
                 return []
 
@@ -1732,25 +1880,22 @@ class VixRegimeStrategy(Strategy):
                 mu = sum(vals) / w
                 return (sum((v - mu) ** 2 for v in vals) / w) ** 0.5
 
-            # Current VoV = std dev of last vov_window VIX prices
             vov_now = _rolling_std(vix_prices, vov_window)
-            # Historical VoV series: one value per past day (expanding window)
             hist_vov = [
                 _rolling_std(vix_prices[: i + 1], vov_window)
                 for i in range(vov_window - 1, len(vix_prices))
             ]
             if not hist_vov:
                 return []
-            # Percentile rank of current VoV in its own history
             n_below = sum(1 for v in hist_vov if v <= vov_now)
             pct = n_below / len(hist_vov)
-            # Defensive when VoV is elevated (top percentile of its own history)
             defensive = pct >= vov_pct
         elif mode == "vix_spike":
+            if equity_price <= 0:
+                return []
             if len(vix_prices) < 2 or vix_prices[-2] <= 0:
                 return []
             vix_change = vix_prices[-1] / vix_prices[-2] - 1.0
-            # Contrarian: spike → BUY equity (bounce play)
             if vix_change >= spike_thresh and not has_pos:
                 return [
                     TradeSignal(
@@ -1762,7 +1907,6 @@ class VixRegimeStrategy(Strategy):
                         reasoning=f"VIX spike {vix_change:.1%}>={spike_thresh:.1%}",
                     )
                 ]
-            # Exit when VIX returns to normal (fear subsided, bounce captured)
             if has_pos and vix_now < spike_exit_vix:
                 return [
                     TradeSignal(
@@ -1776,31 +1920,136 @@ class VixRegimeStrategy(Strategy):
                 ]
             return []
         elif mode == "term_structure":
-            # VIX term structure: contango (VIX3M > VIX) → long equity
-            # Backwardation (VIX3M <= VIX * threshold) → cash/defensive
-            vix3m_sym: str = str(params.get("vix3m_symbol", "VIX3M"))
-            contango_thresh: float = float(params.get("contango_threshold", 1.05))
-            vix3m_data = indicators_df.filter(pl.col("symbol") == vix3m_sym).sort(
+            medium_sym: str = str(params.get("vix3m_symbol", "VIX3M"))
+            contango_thresh: float = float(params.get("contango_threshold", 0.95))
+            risk_off_symbol: str = str(params.get("risk_off_symbol", "SHY"))
+            risk_off_price = prices.get(risk_off_symbol, 0.0)
+            medium_data = indicators_df.filter(pl.col("symbol") == medium_sym).sort(
                 "date"
             )
-            if len(vix3m_data) < 5 or vix_now <= 0:
+            if len(medium_data) < 5 or vix_now <= 0:
                 return []
-            vix3m_now = vix3m_data["close"].to_list()[-1]
-            if vix3m_now <= 0:
+
+            medium_now = medium_data["close"].to_list()[-1]
+            if medium_now <= 0:
                 return []
-            ratio = vix3m_now / vix_now
-            # Contango: VIX3M > VIX * threshold → risk-on, long equity
-            # Backwardation or flat: VIX3M <= VIX * threshold → risk-off, cash
-            defensive = ratio < contango_thresh
+
+            ratio = medium_now / vix_now
+            has_risk_off = risk_off_symbol in portfolio.positions
+            risk_off_weight_raw = params.get("risk_off_symbol_weight")
+            if risk_off_weight_raw is None:
+                risk_off_weight_raw = params.get("risk_off_weight")
+            if risk_off_weight_raw is None:
+                spy_risk_off_weight = float(params.get("weight_spy_risk_off", 0.0))
+                risk_off_weight = max(0.0, 1.0 - spy_risk_off_weight)
+            else:
+                risk_off_weight = float(risk_off_weight_raw)
+
+            regime = "neutral"
+            if ratio > vix_thresh:
+                regime = "backwardation"
+            elif ratio < contango_thresh:
+                regime = "contango"
+
             logger.debug(
-                "VIX term structure: VIX3M=%.2f VIX=%.2f"
-                " ratio=%.3f thresh=%.2f defensive=%s",
-                vix3m_now,
+                "VIX term structure: near=%s %.2f medium=%s %.2f ratio=%.3f backwardation_thresh=%.3f contango_thresh=%.3f regime=%s",
+                vix_sym,
                 vix_now,
+                medium_sym,
+                medium_now,
+                ratio,
+                vix_thresh,
+                contango_thresh,
+                regime,
+            )
+
+            signals: list[TradeSignal] = []
+            if regime == "backwardation":
+                if has_pos and risk_off_weight >= 1.0:
+                    signals.append(
+                        TradeSignal(
+                            symbol=equity_sym,
+                            action=Action.CLOSE,
+                            conviction=Conviction.HIGH,
+                            target_weight=0.0,
+                            stop_loss=0.0,
+                            reasoning=(
+                                f"VIX[{mode}]: backwardation ratio={ratio:.3f}"
+                                f" > {vix_thresh:.3f}, exit {equity_sym}"
+                            ),
+                        )
+                    )
+                elif equity_price > 0:
+                    signals.append(
+                        TradeSignal(
+                            symbol=equity_sym,
+                            action=Action.BUY,
+                            conviction=Conviction.MEDIUM,
+                            target_weight=max(0.0, 1.0 - risk_off_weight),
+                            stop_loss=equity_price * 0.95,
+                            reasoning=(
+                                f"VIX[{mode}]: backwardation ratio={ratio:.3f}"
+                                f" > {vix_thresh:.3f}, set {equity_sym} defensive weight"
+                            ),
+                        )
+                    )
+                if risk_off_weight > 0 and risk_off_price > 0:
+                    signals.append(
+                        TradeSignal(
+                            symbol=risk_off_symbol,
+                            action=Action.BUY,
+                            conviction=Conviction.MEDIUM,
+                            target_weight=risk_off_weight,
+                            stop_loss=risk_off_price * 0.99,
+                            reasoning=(
+                                f"VIX[{mode}]: backwardation ratio={ratio:.3f}"
+                                f" > {vix_thresh:.3f}, set {risk_off_symbol} defensive weight"
+                            ),
+                        )
+                    )
+                return signals
+
+            if regime == "contango":
+                if has_risk_off:
+                    signals.append(
+                        TradeSignal(
+                            symbol=risk_off_symbol,
+                            action=Action.CLOSE,
+                            conviction=Conviction.MEDIUM,
+                            target_weight=0.0,
+                            stop_loss=0.0,
+                            reasoning=(
+                                f"VIX[{mode}]: contango ratio={ratio:.3f}"
+                                f" < {contango_thresh:.3f}, exit defensive"
+                            ),
+                        )
+                    )
+                if equity_price > 0:
+                    signals.append(
+                        TradeSignal(
+                            symbol=equity_sym,
+                            action=Action.BUY,
+                            conviction=Conviction.MEDIUM,
+                            target_weight=tgt_weight,
+                            stop_loss=equity_price * 0.95,
+                            reasoning=(
+                                f"VIX[{mode}]: contango ratio={ratio:.3f}"
+                                f" < {contango_thresh:.3f}, set {equity_sym} risk-on weight"
+                            ),
+                        )
+                    )
+                return signals
+
+            logger.debug(
+                "VIX[%s]: neutral term structure on %s (ratio=%.3f within [%.3f, %.3f]); holding current allocation",
+                mode,
+                as_of_date,
                 ratio,
                 contango_thresh,
-                defensive,
+                vix_thresh,
             )
+            return []
+
         else:
             return []
 

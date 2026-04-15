@@ -78,7 +78,7 @@ These are the first strategies to move into active testing.
 | strategy | slug | track | readiness bucket | why now |
 |---|---|---|---|---|
 | ETH/BTC ratio mean reversion v5 | `eth-btc-ratio-mean-reversion-v5` | crypto | Bucket 1 | clearest documented candidate-to-promoted lane |
-| D7 — TQQQ stacked credit | `d7-tqqq-stacked-credit` | track_d | Bucket 1 | strongest near-term Track D candidate, blocked mainly on robustness completion |
+| D7 — TQQQ stacked credit | `tqqq-stacked-credit` | track_d | Bucket 3 | implemented research artifact exists, but fresh artifact-backed run is conditional and weaker than prior narrative review |
 | D2 — BTC momentum v2 | `d2-btc-momentum-v2` | track_d | Bucket 1 | strong reviewed candidate that needs formalized gate evidence |
 
 ## Wave 2 — Start After Wave 1 Blocker Boards Exist
@@ -87,6 +87,7 @@ These are the first strategies to move into active testing.
 |---|---|---|---|---|
 | D1 — TLT/TQQQ sprint | `d1-tlt-tqqq-sprint` | track_d | Bucket 1 | promising but lower priority than D7/D2 |
 | D6 — LQD/TQQQ sprint | `d6-lqd-tqqq-sprint` | track_d | Bucket 1 | promising, but may be redundant with D7 |
+| LQD/SPY credit lead-lag | `lqd-spy-credit-lead` | track_a | Bucket 3 | artifact lineage is now cleaner after WFO repair, but canonical 5-year baseline is weak and must supersede the earlier exploratory 10-year baseline before any promotion talk |
 
 ## Wave 3 — Validation Track, Not Promotion Track
 
@@ -177,35 +178,39 @@ A strategy should be advanced one stage at a time.
 
 ## 2. D7 — TQQQ stacked credit
 
-- **Slug:** `d7-tqqq-stacked-credit`
+- **Slug:** `tqqq-stacked-credit`
 - **Track:** track_d
-- **Current aim:** convert strong review evidence into promotion-grade evidence
-- **Readiness bucket:** Bucket 1 — Ready to Start Testing Now
+- **Current aim:** reconcile prior review claims with current artifact-backed evidence before any promotion discussion
+- **Readiness bucket:** Bucket 3 — Implemented but Under-Validated
 
 ### Start-testing blockers
-- confirm exact research spec state
-- confirm artifact ownership and location for current evidence
+- reconcile slug mismatch between narrative docs and on-disk artifacts
+- confirm whether `research_spec.yaml` is the canonical D7 artifact or only a preliminary combined-study output
+- formalize experiment lineage for the stacked result
 
 ### Promotion blockers
-- CPCV not yet complete
-- perturbation testing not yet complete
+- current artifact-backed result is conditional rather than passed
+- DSR is below Track D threshold in the fresh combined run
+- inter-signal correlation is high and did not clear the diversification claim threshold
+- CPCV not yet formalized as a standalone robustness artifact
+- perturbation testing not yet formalized as a standalone robustness artifact
 - 2x-cost survival not yet formalized
 - walk-forward not yet formalized
 - paper lane not yet passed
 
 ### Minimum next actions
-1. confirm and freeze the current spec
-2. run CPCV
-3. run perturbation testing
+1. normalize D7 naming to `tqqq-stacked-credit` across governance docs
+2. treat the current `research_spec.yaml` output as preliminary evidence, not promotion-grade proof
+3. create a formal robustness artifact for the stacked strategy
 4. run 2x-cost survival
 5. run walk-forward
-6. define or enter paper lane if prior stages pass
+6. only define a paper lane if the formal robustness stack passes
 
 ### Testing start status
-- **Can start now:** yes
+- **Can start now:** yes, but only as evidence reconciliation and under-validation work
 
 ### Current production blocker
-- incomplete robustness and no passed paper gate
+- current artifact-backed result is conditional and does not support promotion readiness
 
 ---
 
@@ -342,7 +347,40 @@ A strategy should be advanced one stage at a time.
 
 ---
 
-## 7. Default sleeve / broader Track A family
+## 7. LQD/SPY credit lead-lag
+
+- **Slug:** `lqd-spy-credit-lead`
+- **Track:** track_a
+- **Current aim:** treat as an evidence-reconciliation candidate, not a promotion candidate
+- **Readiness bucket:** Bucket 3 — Implemented but Under-Validated
+
+### Start-testing blockers
+- baseline lineage was mixed until this session
+- canonical baseline evidence had to be regenerated to match the frozen-spec / data-contract / WFO pathway
+- older exploratory artifact still exists and can be mistaken for the canonical baseline if not called out explicitly
+
+### Promotion blockers
+- canonical baseline backtest is now negative under the current 5-year lineage
+- canonical baseline materially underperforms the older exploratory 10-year artifact
+- robustness state was not revalidated after baseline lineage repair
+- paper artifact exists, but promotion logic should not lean on it while canonical baseline economics are weak
+- strategy remains partial within the broader Track A artifact debt context
+
+### Minimum next actions
+1. treat `e91c7cf3` as exploratory / non-canonical evidence in governance discussions
+2. use `5be70d7f` as the canonical current baseline because it matches the 5-year data-contract and repaired WFO lineage
+3. decide whether to retire the strategy, redesign the spec, or run a fresh robustness campaign only if there is a strong reason to believe the canonical baseline is still salvageable
+4. do not advance this strategy toward promotion until canonical baseline profitability is re-established
+
+### Testing start status
+- **Can start now:** yes, but only as evidence reconciliation / redesign review rather than promotion-track acceleration
+
+### Current production blocker
+- canonical baseline is unprofitable, so promotion readiness is not supported
+
+---
+
+## 8. Default sleeve / broader Track A family
 
 - **Slug:** `default` / track_a family
 - **Track:** track_a
@@ -373,7 +411,7 @@ A strategy should be advanced one stage at a time.
 
 ---
 
-## 8. D4 — sector sprint top-1 retry
+## 9. D4 — sector sprint top-1 retry
 
 - **Slug:** `d4-sector-sprint-top1`
 - **Track:** track_d
@@ -408,11 +446,12 @@ Close gaps in this order:
 1. missing or unfrozen research specs
 2. missing strategy identity / config clarity
 3. missing baseline backtest lineage
-4. missing robustness artifacts for Wave 1 strategies
-5. missing walk-forward artifacts for Wave 1 strategies
-6. missing paper-lane structure for near-term candidates
-7. portfolio-ranking and redundancy review
-8. broad family cleanup for deferred groups
+4. canonical-vs-exploratory baseline lineage cleanup for strategies with mixed evidence
+5. missing robustness artifacts for Wave 1 strategies
+6. missing walk-forward artifacts for Wave 1 strategies
+7. missing paper-lane structure for near-term candidates
+8. portfolio-ranking and redundancy review
+9. broad family cleanup for deferred groups
 
 This order is designed to unlock testing as quickly as possible while still maintaining valid promotion discipline.
 

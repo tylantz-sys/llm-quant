@@ -1,61 +1,157 @@
 # Crypto Strategy Promotion Standard
 
-Use this checklist before moving a slug from `candidate_crypto` to
-`promoted_crypto` in `config/strategies/catalog.toml`.
+This document defines the strategy-level promotion artifact expectations for crypto candidates. It complements `model-promotion-policy.md` and the pod/operator procedure in `crypto-paper-promotion-checklist.md`.
 
-## Required Gates
+Use this template when a crypto strategy is moving from research-complete to paper-trading review and eventual promotion between `candidate_crypto` and `promoted_crypto`.
 
-1. Frozen research spec exists with `frozen: true`.
-2. Backtest record exists and passes minimum thresholds:
-- `sharpe_ratio > 0`
-- `dsr >= 0.95`
+---
+
+## Required Strategy Artifacts
+
+A crypto strategy promotion candidate should have the following strategy-local artifacts under `data/strategies/<slug>/`:
+
+- `mandate.yaml`
+- `hypothesis.yaml`
+- `data-contract.yaml`
+- `research-spec.yaml`
+- `experiment-registry.jsonl`
+- `robustness.yaml`
+- `walk-forward.yaml`
+- `paper-trading.yaml`
+
+If any required artifact is missing, the strategy is not promotion-ready.
+
+---
+
+## Stage 0: Research Freeze
+
+Before promotion review begins, the research specification must be frozen.
+
+### Required conditions
+
+- `research-spec.yaml` exists
+- strategy slug matches the reviewed strategy
+- `frozen: true`
+- freeze timestamp is recorded
+- baseline experiment reference is identifiable from registry/history
+
+### Pass outcome
+
+The strategy becomes eligible for baseline validation review.
+
+---
+
+## Stage 1: Baseline Backtest Gate
+
+The registered backtest must demonstrate a positive, risk-aware baseline.
+
+### Minimum expectations
+
+- Sharpe ratio > 0
+- DSR >= 0.95 when available
+- max drawdown <= 0.25
+- experiment is recorded in `experiment-registry.jsonl`
+
+### Evidence
+
+- experiment registry entry
+- baseline experiment artifact(s)
+- any supporting review notes used in governance
+
+---
+
+## Stage 2: Robustness and Walk-Forward Gate
+
+The strategy must show evidence that the baseline is not a fragile artifact.
+
+### Required conditions
+
+- `robustness.yaml` exists and indicates a passing verdict
+- `walk-forward.yaml` exists and indicates a passing result
+- no unresolved evidence gap invalidates the reviewed baseline
+
+### Review focus
+
+- CPCV / fold-level out-of-sample behavior where available
+- parameter perturbation stability
+- drawdown containment
+- whether any passing verdict depends on narrow parameter choices
+
+---
+
+## Stage 3: Paper-Trading Gate
+
+Paper trading is the first operational gate.
+
+### Source of truth
+
+- `data/strategies/<slug>/paper-trading.yaml`
+
+### Minimum gate
+
+- `days_observed >= 30`
+- `closed_trades >= 50`
+- `sharpe >= 0.60`
 - `max_drawdown <= 0.25`
-3. Walk-forward artifact exists at `data/strategies/<slug>/walk-forward.yaml`
-with `passed: true`.
-4. Robustness gate exists at `data/strategies/<slug>/robustness.yaml`
-with `overall_passed: true`.
-5. Paper shadow artifact exists at `data/strategies/<slug>/paper-trading.yaml`
-and indicates pass/ready/complete status.
+- `operational_checks_required == true`
+- operational checks are healthy
 
-## Validation Utility
+### Expected operational checks
 
-Candidate-stage validation (pre-paper, strict):
+- scheduler/timer health
+- decision logging
+- order flow path healthy
+- no repeated DB lock failures
+- data freshness validated in runtime
 
-```bash
-python scripts/validate_crypto_promotion.py --set candidate_crypto --strict
-```
+---
 
-Promoted-stage validation (paper gate required):
+## Stage 4: Promotion Handoff
 
-```bash
-python scripts/validate_crypto_promotion.py --set promoted_crypto
-```
+After the strategy-level paper gate passes:
 
-Strict CI-style check:
+1. validate candidate set readiness
+2. review pod/runtime health
+3. move the slug from `candidate_crypto` to `promoted_crypto`
+4. re-run strict validator on the promoted set
+5. restart/reload runtime as required
+6. keep rollback path available briefly after promotion
 
-```bash
-python scripts/validate_crypto_promotion.py --set promoted_crypto --strict
-```
+---
 
-## Operator Checklist
+## Required Governance Record
 
-1. Confirm crypto pod uses `signal_source = "strategy_overlay"`.
-2. Confirm `strategy_set = "promoted_crypto"`.
-3. Confirm strict governor flags are enabled:
-- `overlay_governor_strict = true`
-- `overlay_max_upscale = 1.25`
-- `overlay_max_downscale = 0.0`
-4. Run one paper smoke cycle and verify:
-- candidate signals present,
-- no policy violations,
-- risk filters and profit-taking telemetry logged.
+A promotion review packet should explicitly record:
 
-## Dedicated Candidate Pod
+- strategy slug
+- frozen spec status
+- baseline experiment id
+- backtest pass/fail summary
+- robustness pass/fail summary
+- walk-forward pass/fail summary
+- paper-trading gate pass/fail summary
+- current runtime set membership
+- approval decision and date
 
-For ETH/BTC V2 paper shadow, use:
-- pod config: `config/strategies/crypto-ethbtc-paper.toml`
-- runtime mode: `signal_source = "strategy_overlay"`
-- strategy set: `strategy_set = "candidate_crypto"`
-- service/timer templates:
-  `scripts/systemd/llm-quant-crypto-ethbtc-paper.service`,
-  `scripts/systemd/llm-quant-crypto-ethbtc-paper.timer`
+---
+
+## Example Interpretation for `eth-btc-ratio-mean-reversion-v5`
+
+For `eth-btc-ratio-mean-reversion-v5`, a complete review should confirm:
+
+- frozen research spec exists
+- passed backtest baseline is recorded
+- passed robustness artifact exists
+- passed walk-forward artifact exists
+- `paper-trading.yaml` meets 30-day / 50-trade / Sharpe / drawdown gates
+- `crypto-paper-promotion-checklist.md` operator checks are all green
+
+Only then should it move from `candidate_crypto` to `promoted_crypto`.
+
+---
+
+## Version History
+
+| Version | Date | Change |
+|---------|------|--------|
+| 1.0 | 2026-04-01 | Created to document the strategy-level crypto promotion artifact pattern referenced by governance status notes. |

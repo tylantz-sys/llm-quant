@@ -1,5 +1,5 @@
 [Unit]
-Description=llm-quant end-of-day flatten
+Description=llm-quant end-of-day flatten (default equity pod)
 After=network-online.target
 Wants=network-online.target
 

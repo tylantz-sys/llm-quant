@@ -6,6 +6,7 @@ import numpy as np
 
 from llm_quant.backtest.robustness import (
     PerturbationResult,
+    build_robustness_gate_details,
     compute_pbo,
     generate_perturbations,
     run_cpcv,
@@ -193,6 +194,31 @@ class TestPerturbations:
 # ---------------------------------------------------------------------------
 # Robustness gate tests
 # ---------------------------------------------------------------------------
+
+
+class TestRobustnessArtifactNormalization:
+    def test_build_robustness_gate_details_uses_canonical_keys(self):
+        gate_details = build_robustness_gate_details(
+            dsr_passed=True,
+            pbo_passed=False,
+            cpcv_passed=True,
+            cost_2x_survives=True,
+            parameter_stability_passed=False,
+            shuffled_signal_passed=True,
+            marginal_sr_passed=False,
+            portfolio_correlation_passed=True,
+        )
+
+        assert gate_details == {
+            "dsr_>=_0.95": True,
+            "pbo_<=_0.10": False,
+            "cpcv_mean_oos_sharpe_>_0": True,
+            "2x_costs_survive": True,
+            "parameter_stability_>_50%": False,
+            "shuffled_signal_p_<_0.05": True,
+            "marginal_sr_contribution_>=_0.05": False,
+            "portfolio_correlation_<_0.30": True,
+        }
 
 
 class TestRobustnessGate:

@@ -10,6 +10,8 @@ Default split policy (pre-registered):
 from __future__ import annotations
 
 import argparse
+import os
+import socket
 import statistics
 import sys
 from datetime import UTC, date, datetime
@@ -31,6 +33,60 @@ from llm_quant.data.fetcher import fetch_ohlcv
 from llm_quant.data.indicators import compute_indicators
 
 
+def _now_iso() -> str:
+    return datetime.now(tz=UTC).replace(microsecond=0).isoformat()
+
+
+def _build_provenance(
+    *,
+    args: argparse.Namespace,
+    spec: dict[str, Any],
+    strategy_name: str,
+    symbols: list[str],
+    warmup_days: int,
+    fill_delay: int,
+    cost_model: CostModel,
+    rebalance_frequency_days: int,
+) -> dict[str, Any]:
+    return {
+        "created_at": _now_iso(),
+        "runner": "scripts/run_walk_forward_non_ml.py",
+        "runner_identity": {
+            "script": "scripts/run_walk_forward_non_ml.py",
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "python_executable": sys.executable,
+        },
+        "strategy_slug": args.slug,
+        "strategy_name": strategy_name,
+        "frozen_spec_hash": spec.get("frozen_hash", ""),
+        "spec_frozen": bool(spec.get("frozen", False)),
+        "spec_frozen_at": spec.get("frozen_at"),
+        "data_dir": str(Path(args.data_dir)),
+        "symbols": symbols,
+        "policy_inputs": {
+            "train_days": int(args.train_days),
+            "test_days": int(args.test_days),
+            "step_days": int(args.step_days),
+            "purge_days": int(args.purge_days),
+            "maxdd_threshold": float(args.maxdd_threshold),
+            "initial_capital": float(args.initial_capital),
+            "warmup_days": int(warmup_days),
+            "fill_delay": int(fill_delay),
+            "rebalance_frequency_days": int(rebalance_frequency_days),
+            "years": int(spec.get("backtest_spec", {}).get("years", 5)),
+            "cost_model": {
+                "spread_bps": cost_model.spread_bps,
+                "slippage_volatility_factor": cost_model.slippage_volatility_factor,
+                "flat_slippage_bps": cost_model.flat_slippage_bps,
+            },
+        },
+        "cli": {
+            "argv": sys.argv,
+        },
+    }
+
+
 def _resolve_symbols(spec: dict[str, Any]) -> list[str]:
     params = spec.get("parameters", {}) or {}
     configured = spec.get("backtest_spec", {}).get("symbols", [])
@@ -47,13 +103,42 @@ def _resolve_symbols(spec: dict[str, Any]) -> list[str]:
     return sorted({s for s in symbols if s})
 
 
+def _spec_fill_delay(spec: dict[str, Any]) -> int:
+    params = spec.get("parameters", {}) or {}
+    execution = spec.get("execution", {}) or {}
+    return int(params.get("execution_lag_days", execution.get("fill_delay", 1)) or 1)
+
+
+def _spec_warmup_days(spec: dict[str, Any]) -> int:
+    execution = spec.get("execution", {}) or {}
+    backtest_spec = spec.get("backtest_spec", {}) or {}
+    return int(
+        backtest_spec.get("warmup_days", execution.get("warmup_days", 30)) or 30
+    )
+
+
+def _spec_rebalance_frequency_days(spec: dict[str, Any]) -> int:
+    params = spec.get("parameters", {}) or {}
+    execution = spec.get("execution", {}) or {}
+    return int(
+        params.get(
+            "rebalance_frequency_days",
+            execution.get("rebalance_frequency_days", 1),
+        )
+        or 1
+    )
+
+
 def _build_strategy_config(spec: dict[str, Any], strategy_name: str) -> StrategyConfig:
     params = dict(spec.get("parameters", {}) or {})
-    if "rebalance_frequency_days" in params and "rebalance_frequency" not in params:
-        params["rebalance_frequency"] = params["rebalance_frequency_days"]
+    rebalance_frequency_days = _spec_rebalance_frequency_days(spec)
+    if "rebalance_frequency" not in params:
+        params["rebalance_frequency"] = rebalance_frequency_days
+    if "rebalance_frequency_days" not in params:
+        params["rebalance_frequency_days"] = rebalance_frequency_days
     return StrategyConfig(
-        name=spec.get("strategy_slug", strategy_name),
-        rebalance_frequency_days=int(params.get("rebalance_frequency_days", 1)),
+        name=strategy_name,
+        rebalance_frequency_days=rebalance_frequency_days,
         max_positions=10,
         target_position_weight=float(params.get("target_weight", 0.25)),
         stop_loss_pct=0.10,
@@ -145,12 +230,26 @@ def main() -> int:
         default=0.25,
         help="Pass threshold for worst fold max drawdown",
     )
+    parser.add_argument(
+        "--initial-capital",
+        type=float,
+        default=100_000.0,
+        help="Initial capital used for each fold run",
+    )
+    parser.add_argument(
+        "--warmup-days",
+        type=int,
+        default=None,
+        help="Override warmup days from frozen spec",
+    )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     strat_dir = strategy_dir(data_dir, args.slug)
     spec = ensure_frozen_spec(strat_dir)
-    strategy_name = str(spec.get("strategy_type", "pairs_ratio"))
+    strategy_name = str(
+        spec.get("strategy_class", spec.get("strategy_name", spec.get("strategy_type", "pairs_ratio")))
+    )
     symbols = _resolve_symbols(spec)
     if not symbols:
         msg = "No symbols resolved from strategy spec."
@@ -158,7 +257,10 @@ def main() -> int:
 
     years = int(spec.get("backtest_spec", {}).get("years", 5))
     lookback_days = max(years * 365, 365)
-    warmup_days = int(spec.get("backtest_spec", {}).get("warmup_days", 30))
+    warmup_days = int(
+        args.warmup_days if args.warmup_days is not None else _spec_warmup_days(spec)
+    )
+    fill_delay = _spec_fill_delay(spec)
 
     print(
         f"Fetching data for {args.slug}: symbols={symbols}, lookback_days={lookback_days}"
@@ -183,8 +285,9 @@ def main() -> int:
 
     config = _build_strategy_config(spec, strategy_name)
     strategy = create_strategy(strategy_name, config)
-    engine = BacktestEngine(strategy, initial_capital=100_000.0)
+    engine = BacktestEngine(strategy, initial_capital=args.initial_capital)
     cost_model = CostModel.from_spec(spec)
+    rebalance_frequency_days = _spec_rebalance_frequency_days(spec)
 
     fold_results: list[dict[str, Any]] = []
     for i, window in enumerate(windows, start=1):
@@ -203,7 +306,7 @@ def main() -> int:
             indicators_df=fold_indicators,
             slug=f"{args.slug}-wf-fold-{i}",
             cost_model=cost_model,
-            fill_delay=1,
+            fill_delay=fill_delay,
             warmup_days=warmup_days,
             cost_multiplier=1.0,
             trial_count=1,
@@ -249,10 +352,25 @@ def main() -> int:
         and worst_maxdd <= float(args.maxdd_threshold)
     )
 
+    provenance = _build_provenance(
+        args=args,
+        spec=spec,
+        strategy_name=strategy_name,
+        symbols=symbols,
+        warmup_days=warmup_days,
+        fill_delay=fill_delay,
+        cost_model=cost_model,
+        rebalance_frequency_days=rebalance_frequency_days,
+    )
+
     payload = {
         "strategy_slug": args.slug,
-        "created_at": datetime.now(tz=UTC).replace(microsecond=0).isoformat(),
+        "created_at": provenance["created_at"],
         "runner": "run_walk_forward_non_ml.py",
+        "runner_identity": provenance["runner_identity"],
+        "frozen_spec_hash": spec.get("frozen_hash", ""),
+        "provenance": provenance,
+        "policy_inputs": provenance["policy_inputs"],
         "policy": {
             "train_days": int(args.train_days),
             "test_days": int(args.test_days),

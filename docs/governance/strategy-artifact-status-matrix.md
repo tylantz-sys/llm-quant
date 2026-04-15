@@ -138,7 +138,9 @@ This section is the high-level operator view. Replace `unknown` values only when
 |---|---|---|---|---|---|---|---|---|
 | Default intraday sleeve | `default` pod | track_a / mixed runtime | multi_asset | backtest / runtime history | disabled | artifact-backed | 2026-03-31 | Historical DuckDB decisions/trades and portfolio snapshots exist for `default`, but current live paper-trading services were stopped and no active runtime verification remains. Lifecycle artifacts for many optimizer-linked Track A strategies are incomplete per the lifecycle gap audit. |
 | Crypto intraday sleeve | `crypto` pod | crypto | crypto | paper / evaluation candidate | disabled | mixed | 2026-03-31 | Runtime had been verified earlier on 2026-03-31 with fresh Alpaca 5-minute bars, fresh decisions, and repeated `risk_off / 0 signals`. This session intentionally stopped the active paper-trading services, so current runtime state is disabled even though the pod remains a paper-evaluation candidate. Promotion checklist exists for `crypto-ethbtc-paper`, with strategy-level detail now started for `eth-btc-ratio-mean-reversion-v5`. |
-| ETH/BTC ratio mean reversion v5 | `eth-btc-ratio-mean-reversion-v5` | crypto | crypto | paper / promotion candidate | candidate | artifact-backed | 2026-03-31 | `crypto-paper-promotion-checklist.md` and `crypto-strategy-promotion.md` define explicit artifact gates for this slug: frozen spec, passed backtest, passed walk-forward, passed robustness, and a paper-trading artifact meeting 30-day / 50-trade / Sharpe / drawdown gates before promotion. Current session verified the governance requirements and candidate-pod workflow, but not the underlying artifact files or live candidate-pod status, so strategy remains conservatively marked as candidate rather than paper/promotion-passed. |
+| ETH/BTC ratio mean reversion v5 | `eth-btc-ratio-mean-reversion-v5` | crypto | crypto | paper / promotion candidate | candidate | artifact-backed | 2026-04-01 | Current session verified the on-disk artifact chain for this slug: frozen research spec, experiment artifacts, passed robustness (`overall_passed: true`), passed walk-forward (`passed: true`), and an existing paper-trading artifact. Runtime/pod-level verification and promotion decision evidence were not re-verified in this pass, so the strategy remains conservatively tracked as a candidate rather than promotion-passed. |
+| GLD/SLV mean reversion v4 | `gld-slv-mean-reversion-v4` | other | commodity | robustness passed / paper candidate | candidate | artifact-backed | 2026-04-01 | Formalized in this session with a frozen research spec and passed registered backtest, robustness, walk-forward, and portfolio-fit review. No paper-trading artifact, canary evidence, or formal promotion decision was verified, so the strategy is tracked as a promotion-pipeline candidate rather than promotion-ready. |
+| LQD/SPY credit lead-lag | `lqd-spy-credit-lead` | track_a | fixed_income / equity | walk-forward passed / paper candidate | candidate | artifact-backed | 2026-04-01 | Current session repaired walk-forward lineage so the runner now honors frozen-spec strategy identity and execution assumptions, then reran WFO successfully (`passed: true`). Canonical 5-year baseline rerun under current frozen-spec lineage produced a weaker artifact (`5be70d7f`, Sharpe -0.141, MaxDD 7.23%, 76 trades, healthy_nonzero_trading), while older artifact `e91c7cf3` remains a non-canonical 10-year / 200-warmup exploratory baseline. Strategy now has a cleaner artifact chain, but baseline profitability under canonical assumptions is negative, so it should not be treated as promotion-ready. |
 | Track C arbitrage sleeve | `track_c` / arb family | track_c | arb | research spec / implementation candidate | disabled | artifact-backed | 2026-03-31 | `track-c-plan.md` documents approved priorities: Polymarket PROCEED, CEF PROCEED, funding rate CONDITIONAL, merger arb CONDITIONAL, VIX REJECT, basis DEFER. Plan says Polymarket scanner v1 is built but live scan / validation / paper trading remain incomplete, so sleeve is not runtime-promotable. |
 | Polymarket NegRisk + combinatorial arb | `polymarket-neg-risk-arb` | track_c | arb | implementation / paper candidate | candidate | artifact-backed | 2026-03-31 | `track-c-plan.md` identifies this as Priority 1 and says the module is already implemented in `src/llm_quant/arb/` with Gamma client, NegRisk scanner, Claude combinatorial detector, CLI runner, and DuckDB schema all marked complete. However the same plan leaves first live scan, historical validation, and paper trading unchecked, so it is evidence-backed as implemented but not yet paper-validated or runtime-promoted. |
 | Track D research sleeve | `track_d` family | track_d | equity / macro / leveraged ETF research | robustness / paper candidate | candidate | artifact-backed | 2026-03-31 | `track-d-review-2026-03-30.md` shows D1/D2/D6/D7 passing Track D gates, D3/D5 retired, D4 conditional retry. D7 still requires CPCV + perturbation robustness and then a 30-day paper gate before promotion, so family remains candidate rather than runtime promoted. |
@@ -153,7 +155,9 @@ This is the authoritative working table for status review. Initial entries below
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Default intraday sleeve | `default` pod | track_a / mixed | multi_asset | backtest / runtime history | mixed | mixed | mixed | mixed | unknown | mixed | mixed | unknown | unknown | n/a | unknown | disabled | partial | partial | not verified | mixed | 2026-03-31 | Historical decisions/trades/snapshots for `default` exist in DuckDB, but live paper-trading services were intentionally stopped this session. `lifecycle-gap-audit-2026-03-30.md` shows major artifact debt across optimizer-linked Track A strategies: only `soxx-qqq-lead-lag` is fully compliant, `lqd-spy-credit-lead` is partial, and 14 registered strategies have no experiment artifacts on disk. |
 | Crypto intraday sleeve | `crypto` pod | crypto | crypto | paper / evaluation candidate | mixed | mixed | mixed | mixed | unknown | mixed | mixed | mixed | mixed | n/a | unknown | disabled | unknown | partial | not verified | mixed | 2026-03-31 | Earlier on 2026-03-31 runtime was verified active with fresh bars and fresh decisions plus repeated no-trade / risk-off behavior. `crypto-paper-promotion-checklist.md` provides explicit paper-gate and promotion requirements for `eth-btc-ratio-mean-reversion-v5` in `crypto-ethbtc-paper`, but this session stopped the active services so current runtime is disabled. |
-| ETH/BTC ratio mean reversion v5 | `eth-btc-ratio-mean-reversion-v5` | crypto | crypto | paper / promotion candidate | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | candidate | unknown | partial | not verified | artifact-backed | 2026-03-31 | `crypto-strategy-promotion.md` defines required gates for this slug: frozen research spec, passed backtest (`sharpe_ratio > 0`, `dsr >= 0.95`, `max_drawdown <= 0.25`), passed walk-forward artifact, passed robustness artifact, and a passing paper-trading artifact. `crypto-paper-promotion-checklist.md` further specifies the candidate pod `crypto-ethbtc-paper`, scheduler health checks, runtime health checks, paper metrics (`days_observed >= 30`, `closed_trades >= 50`, `sharpe >= 0.60`, `max_drawdown <= 0.25`), and strict validator readiness before moving from `candidate_crypto` to `promoted_crypto`. Those requirements are documented, but the underlying per-strategy files and live candidate-pod evidence were not verified in this session, so artifact fields remain conservative/unknown and runtime stays candidate. |
+| ETH/BTC ratio mean reversion v5 | `eth-btc-ratio-mean-reversion-v5` | crypto | crypto | paper / promotion candidate | passed | passed | passed | frozen | yes | passed | passed | passed | passed | unknown | unknown | candidate | unknown | partial | not verified | artifact-backed | 2026-04-01 | Current session verified the on-disk strategy artifact chain: mandate, hypothesis, data contract, frozen research spec, experiment artifacts in `experiments/`, passed robustness (`overall_passed: true` in `robustness.yaml`), passed walk-forward (`passed: true` in `walk-forward.yaml`), and an existing `paper-trading.yaml`. Candidate runtime / pod verification, kill-switch wiring, telemetry completeness, canary evidence, and formal promotion decision remain unverified in this pass, so runtime stays candidate and promotion fields stay conservative. |
+| GLD/SLV mean reversion v4 | `gld-slv-mean-reversion-v4` | other | commodity | robustness passed / paper candidate | unknown | unknown | unknown | frozen | yes | passed | passed | passed | missing | unknown | missing | candidate | unknown | unknown | not verified | artifact-backed | 2026-04-01 | Current session formalized the strategy with `data/strategies/gld-slv-mean-reversion-v4/research-spec.yaml` and verified a passing registered backtest, passing robustness gates, passing walk-forward validation, and low portfolio correlation versus the existing strategy set. Paper-trading evidence, canary evidence, kill-switch verification, telemetry coverage, and a formal promotion decision were not verified, so the strategy is recorded conservatively as a promotion-pipeline candidate rather than as promoted or runtime-enabled. |
+| LQD/SPY credit lead-lag | `lqd-spy-credit-lead` | track_a | fixed_income / equity | walk-forward passed / paper candidate | unknown | unknown | passed | frozen | yes | failed | unknown | passed | passed | unknown | missing | candidate | unknown | unknown | not verified | artifact-backed | 2026-04-01 | Current session repaired walk-forward lineage and reran WFO successfully under frozen-spec identity/execution assumptions (`walk-forward.yaml` now `passed: true`, 11 folds, mean OOS Sharpe 1.653, max OOS drawdown 0.0088). A new canonical 5-year baseline artifact (`5be70d7f`) was then generated and is materially worse than the older exploratory 10-year baseline `e91c7cf3`: Sharpe -0.141 vs 0.514, MaxDD 7.23% vs 0.74%, trades 76 vs 41, smoke health healthy in both. Treat `e91c7cf3` as non-canonical exploratory evidence because it used `years: 10` and `warmup_days: 200`, whereas current data-contract/WFO lineage is 5 years. Promotion readiness is blocked because the canonical baseline backtest now fails profitability. |
 | Track C arbitrage sleeve | `track_c` | track_c | arb | research spec / implementation candidate | unknown | unknown | mixed | passed | no | mixed | unknown | unknown | unknown | unknown | unknown | disabled | partial | unknown | not verified | mixed | 2026-03-31 | `track-c-plan.md` is approved and states Polymarket scanner v1 is already implemented (`src/llm_quant/arb/`, CLI runner built, Gamma client/scanner/detector/schema complete), but live scan, historical validation, and paper trading are still unchecked. CEF/funding/merger work remains planned or conditional, so sleeve is not promotion-ready. |
 | Polymarket NegRisk + combinatorial arb | `polymarket-neg-risk-arb` | track_c | arb | implementation / paper candidate | unknown | unknown | unknown | passed | no | mixed | unknown | unknown | unknown | unknown | unknown | candidate | partial | unknown | not verified | artifact-backed | 2026-03-31 | `track-c-plan.md` marks this strategy UNANIMOUS PROCEED and explicitly says it is already implemented as `src/llm_quant/arb/`. Week-1 implementation checklist shows Gamma API client, NegRisk scanner, Claude combinatorial detector, CLI runner, and DuckDB schema complete, while first live scan, historical validation, and paper trading remain undone. This supports an evidence-backed implementation/candidate status, but not passed backtest, robustness, walk-forward, paper, or promotion fields. |
 | Track D family | `track_d` | track_d | research multi_asset | robustness / paper candidate | mixed | mixed | mixed | mixed | mixed | passed | mixed | unknown | unknown | unknown | unknown | candidate | unknown | unknown | not verified | artifact-backed | 2026-03-31 | `track-d-review-2026-03-30.md` shows D1, D2, D6, and D7 passing Track D gates; D3 and D5 retired; D4 conditional retry. D7 still needs CPCV and perturbation testing and then a 30-day paper gate before promotion. Family therefore remains candidate, with strongest evidence in research review rather than runtime deployment. |
@@ -179,8 +183,15 @@ A strategy/sleeve may only be treated as **promotion-ready** when all of the fol
 8. `kill_switches_wired = yes`
 9. `telemetry_coverage = complete`
 10. `runtime_verification = runtime-backed`
+11. exit-stack scenario testing has been reviewed
+12. canonical exit parity has been reviewed across runtime, paper, and backtest
 
 If any field is `unknown`, `missing`, `partial`, `failed`, or `narrative-only`, the strategy is not promotion-ready.
+
+For sleeves using profit-taking logic, promotion readiness also requires evidence that:
+- exit-stack scenario behavior has been reviewed,
+- canonical exit semantics are consistent across runtime, paper, and backtest,
+- and any native broker realization path is treated as an implementation detail rather than a separate policy.
 
 ---
 
@@ -258,10 +269,93 @@ This file should now become the canonical place to refine those statuses from `u
 
 ---
 
+## Catalog Semantics Freeze (Phase 1)
+
+To make `config/strategies/catalog.toml` obey `docs/governance/quant-lifecycle.md`, catalog membership must use the same lifecycle meanings as the governance documents. The catalog is not allowed to use `promoted` as a convenience label for research-stage or partially validated strategies.
+
+### Phase 1 policy
+
+Effective for cleanup planning, catalog buckets are interpreted as follows:
+
+| Catalog bucket | Required meaning |
+|---|---|
+| `promoted_default` | Fully lifecycle-complete, runtime-approved strategies only |
+| `candidate_default` | Research or validation candidates that are not promotion-approved |
+| `needs_revalidation` | Historically important or formerly promoted strategies that must re-earn promotion under the current governed funnel |
+| `retired` | Strategies not eligible for deployment absent a new thesis and a new lifecycle pass |
+| `candidate_crypto` | Crypto research/paper candidates not yet promotion-approved |
+| `promoted_crypto` | Fully lifecycle-complete crypto strategies only |
+
+### Hard inclusion rule for `promoted_default`
+
+A slug may appear in `promoted_default` only if all of the following are true:
+
+1. required upstream lifecycle artifacts exist and are current
+2. `research-spec.yaml` is frozen
+3. canonical backtest evidence is present and acceptable
+4. `robustness.yaml` is present and passed
+5. `walk-forward.yaml` is present and passed
+6. `paper-trading.yaml` is present and passed
+7. promotion decision evidence exists
+8. runtime/telemetry controls required for safe deployment are verified
+
+If any of the above is missing, failed, stale, or unknown, the slug is not promotion-clean and must not remain in `promoted_default`.
+
+### Strict interim posture
+
+Until the promoted roster has been revalidated against the lifecycle, the conservative target posture is:
+
+- `promoted_default = []`
+- unsupported or partially evidenced slugs move to `candidate_default` or `needs_revalidation`
+- historically weak slugs move to `retired`
+
+This posture prefers honest inactivity over false promotion confidence.
+
+### Interpretation rule
+
+Runtime-enabled state and catalog membership must not be conflated:
+- a strategy can be runtime-known without being promoted
+- a strategy can be artifact-backed without being runtime-enabled
+- a strategy is only catalog-promoted when lifecycle, artifacts, and runtime trust all align
+
+## Phase 2 Decision Ledger (Current Promoted Roster)
+
+The current `config/strategies/catalog.toml` `promoted_default` roster must be treated as provisional until each slug is classified against the lifecycle rules above. This ledger is the decision table that should drive the eventual catalog rewrite.
+
+| slug | current_catalog_bucket | artifact posture | current assessment | recommended_bucket | decision_status | reason |
+|---|---|---|---|---|---|---|
+| `lqd-spy-credit-lead` | `promoted_default` | partial but materially improved | canonical baseline currently unprofitable | `needs_revalidation` | reviewed | Walk-forward lineage was repaired and passed, but the current canonical baseline artifact is economically weak/negative, so the slug is not promotion-clean under current lifecycle semantics. |
+| `agg-spy-credit-lead` | `promoted_default` | incomplete | not fully reviewed in this audit pass | `candidate_default` | provisional | Historically grouped with promoted credit-lead names, but no fully reviewed lifecycle-complete evidence chain was confirmed in this pass. Keep visible as a candidate, not as promoted. |
+| `spy-overnight-momentum` | `promoted_default` | incomplete | not fully reviewed in this audit pass | `candidate_default` | provisional | Current catalog membership overstates certainty. Until lifecycle-complete artifacts are explicitly revalidated, it should be tracked as a candidate rather than a promoted strategy. |
+| `agg-qqq-credit-lead` | `promoted_default` | incomplete | not fully reviewed in this audit pass | `candidate_default` | provisional | No confirmed promotion-clean evidence chain was established in this pass. Candidate status is the conservative classification. |
+| `vcit-qqq-credit-lead` | `promoted_default` | incomplete | not fully reviewed in this audit pass | `candidate_default` | provisional | Promoted semantics are not justified by the currently reviewed artifact evidence. Reclassify as candidate until proven otherwise. |
+| `lqd-qqq-credit-lead` | `promoted_default` | incomplete | not fully reviewed in this audit pass | `candidate_default` | provisional | This slug remains runtime-known/research-known, but promotion cleanliness was not established in the audit. |
+| `emb-spy-credit-lead` | `promoted_default` | incomplete | not fully reviewed in this audit pass | `candidate_default` | provisional | No fully reviewed lifecycle-complete proof was established here; candidate bucket is the conservative home. |
+| `hyg-spy-5d-credit-lead` | `promoted_default` | incomplete | not fully reviewed in this audit pass | `candidate_default` | provisional | Remains interesting enough to keep visible, but not justified as promoted on currently reviewed evidence. |
+| `agg-efa-credit-lead` | `promoted_default` | incomplete | not fully reviewed in this audit pass | `candidate_default` | provisional | Catalog promotion currently outruns verified evidence. Candidate is the correct interim classification. |
+| `hyg-qqq-credit-lead` | `promoted_default` | incomplete | not fully reviewed in this audit pass | `candidate_default` | provisional | No promotion-clean artifact chain was confirmed in this pass. Maintain as candidate only. |
+| `soxx-qqq-lead-lag` | `promoted_default` | stronger than peers but still not fully re-promoted in this cleanup | best live candidate among audited promoted names | `candidate_default` | provisional | This is the strongest provisional survivor in the currently promoted roster, but this cleanup is deliberately using strict semantics: without an explicitly revalidated promotion decision, it remains candidate rather than promoted. |
+
+### Phase 2 decision rule
+
+The ledger is intentionally conservative:
+- `reviewed` means current audit work supports the decision directly
+- `provisional` means the slug has not yet earned promoted status in this cleanup and therefore defaults to a non-promoted bucket
+- no slug remains in `promoted_default` unless it has been affirmatively re-approved against the current lifecycle rules
+
+This means the Phase 2 output supports the strict interim target posture:
+- `promoted_default = []`
+- `candidate_default` contains the visible but not promotion-clean research roster
+- `needs_revalidation` contains historically important names with specific reasons they failed current promotion trust
+
 ## Version History
 
 | Version | Date | Change |
 |---------|------|--------|
+| 1.6 | 2026-04-01 | Added `lqd-spy-credit-lead` to the matrix after repairing walk-forward lineage, rerunning WFO successfully, and comparing a new canonical 5-year baseline artifact against the older non-canonical 10-year exploratory baseline; strategy remains candidate because the canonical baseline backtest is unprofitable. |
+| 1.5 | 2026-04-01 | Verified the on-disk artifact chain for `eth-btc-ratio-mean-reversion-v5` and updated its matrix row to artifact-backed passed statuses for mandate, hypothesis, data contract, frozen research spec, backtest, robustness, walk-forward, and paper-trading, while keeping runtime/promotion verification conservative. |
+| 1.4 | 2026-04-01 | Extended promotion-readiness interpretation to explicitly require exit-stack scenario review and canonical runtime/paper/backtest exit-parity review for profit-taking sleeves. |
+| 1.3 | 2026-04-01 | Added `gld-slv-mean-reversion-v4` as an artifact-backed promotion-pipeline candidate after formalized strategy spec, passed registered backtest, passed robustness, passed walk-forward, and completed portfolio-fit review. |
 | 1.2 | 2026-03-31 | Added an evidence-backed Track C strategy row for Polymarket NegRisk + combinatorial arbitrage, distinguishing implemented module status from still-pending live scan, validation, and paper-trading gates. |
 | 1.1 | 2026-03-31 | Added initial crypto strategy-level coverage for `eth-btc-ratio-mean-reversion-v5`, linking crypto promotion and paper-gate requirements into the canonical status matrix with conservative unverified artifact states. |
 | 1.0 | 2026-03-31 | Initial canonical status matrix created to unify artifact state, runtime state, and evidence quality across strategies and sleeves. |

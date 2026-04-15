@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 
 import duckdb
 
@@ -67,7 +68,11 @@ class Portfolio:
         self,
         initial_capital: float = 100_000.0,
         pod_id: str = "default",
+        cash: float | None = None,
     ) -> None:
+        if cash is not None:
+            initial_capital = cash
+
         self.cash: float = initial_capital
         self.positions: dict[str, Position] = {}
         self.initial_capital: float = initial_capital
@@ -182,6 +187,151 @@ class Portfolio:
                 for p in self.positions.values()
             ],
         }
+
+    def apply_broker_fill(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        fill_price: float,
+        stop_loss: float,
+        fill_time: datetime | None,
+        order_id: str | None,
+        intent_type: str | None,
+    ) -> None:
+        """Apply a broker-authoritative fill to cash and positions.
+
+        Parameters
+        ----------
+        symbol:
+            Filled symbol.
+        side:
+            Broker side string, typically ``buy`` or ``sell``.
+        qty:
+            Filled quantity.
+        fill_price:
+            Actual execution price.
+        stop_loss:
+            Stop loss to attach/update on resulting open position.
+        fill_time:
+            Fill timestamp for audit logging.
+        order_id:
+            Broker order id for diagnostics.
+        intent_type:
+            Order intent label such as ``entry``, ``stop_loss``, ``take_profit_1``,
+            ``take_profit_2``, ``trailing_stop``, or similar.
+
+        Notes
+        -----
+        This method is long-only oriented and mirrors the existing portfolio
+        semantics used by the paper executor. Buy fills create/increase a
+        position using weighted-average cost. Sell fills reduce/close an
+        existing position using broker-reported quantity and price.
+        """
+        normalized_side = (side or "").strip().lower()
+        if normalized_side not in {"buy", "sell"}:
+            raise ValueError(f"Unsupported broker fill side: {side!r}")
+
+        fill_qty = float(qty)
+        fill_px = float(fill_price)
+        if fill_qty <= 0.0:
+            logger.warning(
+                "Ignoring non-positive broker fill qty for %s: qty=%.6f side=%s order_id=%s",
+                symbol,
+                fill_qty,
+                normalized_side,
+                order_id,
+            )
+            return
+
+        position = self.positions.get(symbol)
+
+        if normalized_side == "buy":
+            notional = fill_qty * fill_px
+            self.cash -= notional
+
+            if position is None:
+                self.positions[symbol] = Position(
+                    symbol=symbol,
+                    shares=fill_qty,
+                    avg_cost=fill_px,
+                    current_price=fill_px,
+                    stop_loss=stop_loss,
+                )
+            else:
+                existing_shares = position.shares
+                new_total_shares = existing_shares + fill_qty
+                if new_total_shares <= 0.0:
+                    position.shares = 0.0
+                    position.avg_cost = 0.0
+                else:
+                    weighted_cost = (existing_shares * position.avg_cost) + notional
+                    position.shares = new_total_shares
+                    position.avg_cost = weighted_cost / new_total_shares
+                position.current_price = fill_px
+                if stop_loss > 0.0:
+                    position.stop_loss = stop_loss
+
+            logger.info(
+                "Applied broker BUY fill: %s qty=%.6f price=%.4f stop_loss=%.4f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+                symbol,
+                fill_qty,
+                fill_px,
+                stop_loss,
+                self.cash,
+                order_id,
+                intent_type,
+                fill_time,
+            )
+            return
+
+        # sell
+        proceeds = fill_qty * fill_px
+        self.cash += proceeds
+
+        if position is None:
+            logger.warning(
+                "Applied broker SELL fill for missing position: %s qty=%.6f price=%.4f order_id=%s intent_type=%s",
+                symbol,
+                fill_qty,
+                fill_px,
+                order_id,
+                intent_type,
+            )
+            return
+
+        remaining_shares = position.shares - fill_qty
+        position.current_price = fill_px
+
+        if remaining_shares <= 1e-9:
+            del self.positions[symbol]
+            logger.info(
+                "Applied broker SELL fill and closed position: %s qty=%.6f price=%.4f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+                symbol,
+                fill_qty,
+                fill_px,
+                self.cash,
+                order_id,
+                intent_type,
+                fill_time,
+            )
+            return
+
+        position.shares = remaining_shares
+        if stop_loss > 0.0:
+            position.stop_loss = stop_loss
+
+        logger.info(
+            "Applied broker SELL fill: %s qty=%.6f price=%.4f remaining=%.6f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+            symbol,
+            fill_qty,
+            fill_px,
+            position.shares,
+            self.cash,
+            order_id,
+            intent_type,
+            fill_time,
+        )
 
     # -- persistence -------------------------------------------------------
 

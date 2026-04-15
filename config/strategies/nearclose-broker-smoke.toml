@@ -1,0 +1,47 @@
+[general]
+initial_capital = 1000.0
+
+[execution]
+signal_source = "strategy_overlay"
+strategy_set = "candidate_crypto"
+overlay_governor_strict = true
+overlay_max_upscale = 1.0
+overlay_max_downscale = 0.0
+intraday_enabled = true
+intraday_timeframe_minutes = 5
+intraday_lookback_days = 3
+intraday_rth_guard = false
+asset_class_filter = ["crypto"]
+intraday_use_oco = false
+skip_daily_fetch_when_intraday = true
+initial_capital_source = "config"
+claude_overlay_only = true
+log_decisions_when_rth_closed = true
+expectancy_gate_enabled = false
+scale_in_tranches = 1
+reentry_cooldown_bars = 1
+crypto_order_sizing = "qty"
+crypto_time_in_force = "gtc"
+
+[strategy]
+sleeve = "crypto"
+
+[strategy_rotation]
+enabled = false
+
+[risk]
+max_position_weight = 0.02
+max_trade_size = 0.01
+max_positions = 1
+max_trades_per_session = 1
+min_cash_reserve = 0.95
+require_stop_loss = true
+default_stop_loss_pct = 0.03
+partial_take_profit_enabled = true
+partial_take_profit_pct = 0.01
+partial_take_profit_size = 0.50
+remainder_take_profit_mult = 1.5
+trailing_stop_enabled = true
+trailing_stop_pct = 0.01
+fail_on_unprotected_exits = true
+eod_flatten_enabled = false

@@ -1,8 +1,0 @@
-[Unit]
-Description=llm-quant ETH/BTC candidate crypto paper run
-
-[Service]
-Type=oneshot
-WorkingDirectory=/home/ty/Documents/llm-quant/llm-quant
-EnvironmentFile=/home/ty/Documents/llm-quant/llm-quant/.env
-ExecStart=/home/ty/Documents/llm-quant/llm-quant/.venv/bin/pq run --pod crypto-ethbtc-paper --broker paper

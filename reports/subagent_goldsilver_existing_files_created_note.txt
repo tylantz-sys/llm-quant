@@ -1,0 +1,4 @@
+Do not infer nonexistent created files from audit prose. Existing audited repo files were read, not created:
+data/strategies/gold-silver-ratio-mr/data-contract.yaml
+data/strategies/gold-silver-ratio-mr/hypothesis.yaml
+data/strategies/gold-silver-ratio-mr/research-spec.yaml

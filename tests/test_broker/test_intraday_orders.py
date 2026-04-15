@@ -166,6 +166,21 @@ class BrokenProtectionClient:
         raise AlpacaError("stop submit failed")
 
 
+class OCOCancelClient:
+    def __init__(self, orders: dict[str, dict[str, object]]) -> None:
+        self.orders = orders
+        self.cancelled: list[str] = []
+
+    def get_order(self, order_id, nested=False):
+        return self.orders[order_id]
+
+    def cancel_order(self, order_id):
+        self.cancelled.append(order_id)
+        if order_id in self.orders:
+            self.orders[order_id]["status"] = "canceled"
+        return None
+
+
 def test_place_oco_exits_for_buys_preserves_fractional_crypto_qty():
     client = FractionalClient()
     states = {}
@@ -222,3 +237,96 @@ def test_reconcile_orders_fail_closed_when_fractional_crypto_stop_cannot_be_rest
             trailing_pct=0.01,
             fail_on_unprotected=True,
         )
+
+
+def test_reconcile_orders_duplicate_cancels_are_idempotent_for_terminal_orders():
+    client = OCOCancelClient(
+        {
+            "tp1": {"id": "tp1", "status": "canceled", "filled_qty": 0},
+            "oco_tp": {"id": "oco_tp", "status": "canceled", "filled_qty": 0},
+            "oco_stop": {"id": "oco_stop", "status": "filled", "filled_qty": 5},
+        }
+    )
+    states = {
+        "SPY": IntradayOrderState(
+            symbol="SPY",
+            partial_tp_order_id="tp1",
+            oco_tp_order_id="oco_tp",
+            oco_stop_order_id="oco_stop",
+            stop_status="filled",
+            tp_status="canceled",
+            oco_tp_status="canceled",
+            hwm=100.0,
+            remaining_qty=5.0,
+        )
+    }
+
+    reconcile_orders(
+        client,
+        states,
+        positions={"SPY": 5.0},
+        trailing_pct=0.01,
+    )
+
+    assert client.cancelled == []
+    assert "SPY" not in states
+
+
+def test_reconcile_orders_same_bar_dual_trigger_uses_stop_precedence():
+    client = OCOCancelClient(
+        {
+            "tp1": {"id": "tp1", "status": "filled", "filled_qty": 5},
+            "oco_tp": {"id": "oco_tp", "status": "filled", "filled_qty": 5},
+            "oco_stop": {"id": "oco_stop", "status": "filled", "filled_qty": 5},
+        }
+    )
+    states = {
+        "SPY": IntradayOrderState(
+            symbol="SPY",
+            partial_tp_order_id="tp1",
+            oco_tp_order_id="oco_tp",
+            oco_stop_order_id="oco_stop",
+            hwm=100.0,
+            remaining_qty=5.0,
+        )
+    }
+
+    reconcile_orders(
+        client,
+        states,
+        positions={"SPY": 5.0},
+        trailing_pct=0.01,
+    )
+
+    assert client.cancelled == []
+    assert "SPY" not in states
+
+
+def test_reconcile_orders_cancel_after_fill_is_ignored_safely():
+    client = OCOCancelClient(
+        {
+            "tp1": {"id": "tp1", "status": "new", "filled_qty": 0},
+            "oco_tp": {"id": "oco_tp", "status": "filled", "filled_qty": 5},
+            "oco_stop": {"id": "oco_stop", "status": "filled", "filled_qty": 5},
+        }
+    )
+    states = {
+        "SPY": IntradayOrderState(
+            symbol="SPY",
+            partial_tp_order_id="tp1",
+            oco_tp_order_id="oco_tp",
+            oco_stop_order_id="oco_stop",
+            hwm=100.0,
+            remaining_qty=5.0,
+        )
+    }
+
+    reconcile_orders(
+        client,
+        states,
+        positions={"SPY": 5.0},
+        trailing_pct=0.01,
+    )
+
+    assert client.cancelled == ["tp1"]
+    assert "SPY" not in states

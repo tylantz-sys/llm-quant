@@ -8,8 +8,10 @@ full audit trail.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
+from typing import Any
 
 import duckdb
 
@@ -22,6 +24,69 @@ from llm_quant.trading.telemetry import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_REQUIRED_TELEMETRY_SNAPSHOT_FIELDS = (
+    "intraday_position_state",
+    "order_state",
+    "lifecycle_state",
+    "exit_policy_state",
+)
+
+
+def _fill_attr(fill: object, name: str, default: object = None) -> object:
+    if isinstance(fill, dict):
+        return fill.get(name, default)
+    return getattr(fill, name, default)
+
+
+def _fill_float(fill: object, name: str, default: float = 0.0) -> float:
+    value = _fill_attr(fill, name, default)
+    if value is None:
+        return float(default)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        return float(value)
+    return float(default)
+
+
+def _normalize_snapshot_mapping(snapshot: object | None) -> dict[str, Any]:
+    if snapshot is None:
+        return {}
+    if isinstance(snapshot, dict):
+        return dict(snapshot)
+    if hasattr(snapshot, "__dict__"):
+        return dict(vars(snapshot))
+    return {}
+
+
+def _snapshot_key_variants(field: str) -> tuple[str, ...]:
+    if field == "order_state":
+        return ("order_state", "intraday_order_state")
+    return (field,)
+
+
+def _require_complete_telemetry_snapshot(snapshot: object | None) -> dict[str, Any]:
+    normalized = _normalize_snapshot_mapping(snapshot)
+    missing = [
+        field
+        for field in _REQUIRED_TELEMETRY_SNAPSHOT_FIELDS
+        if not any(normalized.get(key) is not None for key in _snapshot_key_variants(field))
+    ]
+    if missing:
+        raise RuntimeError("INCOMPLETE TELEMETRY SNAPSHOT")
+    return normalized
+
+
+def _snapshot_reasoning_suffix(snapshot: dict[str, Any]) -> str:
+    payload = {
+        "intraday_position_state": snapshot.get("intraday_position_state"),
+        "order_state": snapshot.get("order_state", snapshot.get("intraday_order_state")),
+        "lifecycle_state": snapshot.get("lifecycle_state"),
+        "exit_policy_state": snapshot.get("exit_policy_state"),
+    }
+    return json.dumps(payload, sort_keys=True, default=str)
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +249,222 @@ def log_trades(
     return trade_ids
 
 
+def log_broker_fills(
+    conn: duckdb.DuckDBPyConnection,
+    fills: list[object],
+    trade_date: date,
+    pod_id: str,
+    decision_id: int | None,
+    decision_source: str | None,
+    sleeve: str | None,
+    source_decision_id: int | None,
+    snapshot: object | None = None,
+) -> list[int]:
+    """Persist broker-authoritative fills into the existing ``trades`` table.
+
+    Parameters
+    ----------
+    fills:
+        Iterable of fill-like objects exposing at least
+        ``symbol``, ``side``, ``fill_qty``, ``fill_price``, ``order_id``,
+        ``intent_type``, ``parent_order_id``, ``exit_reason``, and
+        ``lifecycle_state`` either as attributes or dict keys.
+
+    Returns
+    -------
+    list[int]
+        Trade ids inserted into ``trades`` in the same order as ``fills``.
+    """
+    trade_ids: list[int] = []
+    prev_hash = get_latest_hash(conn)
+    trade_cols = [c[0] for c in conn.execute("DESCRIBE trades").fetchall()]
+    telemetry_snapshot = _require_complete_telemetry_snapshot(snapshot)
+    telemetry_suffix = _snapshot_reasoning_suffix(telemetry_snapshot)
+
+    for fill in fills:
+        symbol = str(_fill_attr(fill, "symbol", ""))
+        side = str(_fill_attr(fill, "side", "")).lower()
+        shares = _fill_float(fill, "fill_qty", 0.0)
+        price = _fill_float(fill, "fill_price", 0.0)
+        order_id = _fill_attr(fill, "order_id")
+        intent_type = _fill_attr(fill, "intent_type")
+        parent_order_id = _fill_attr(fill, "parent_order_id")
+        exit_reason = _fill_attr(fill, "exit_reason")
+        lifecycle_state = _fill_attr(fill, "lifecycle_state")
+        fill_time = _fill_attr(fill, "fill_time")
+
+        if shares <= 0.0 or price <= 0.0 or not symbol:
+            logger.warning(
+                "Skipping invalid broker fill: symbol=%s side=%s qty=%.6f price=%.4f order_id=%s",
+                symbol,
+                side,
+                shares,
+                price,
+                order_id,
+            )
+            continue
+
+        row = conn.execute("SELECT nextval('seq_trade_id')").fetchone()
+        assert row is not None
+        trade_id: int = row[0]
+
+        action = "buy" if side == "buy" else "sell"
+        normalized_exit_reason = normalize_profit_take_reason(
+            str(exit_reason) if exit_reason is not None else None
+        )
+        broker_reason_bits = []
+        if order_id:
+            broker_reason_bits.append(f"order_id={order_id}")
+        if parent_order_id:
+            broker_reason_bits.append(f"parent_order_id={parent_order_id}")
+        if intent_type:
+            broker_reason_bits.append(f"intent_type={intent_type}")
+        if normalized_exit_reason:
+            broker_reason_bits.append(f"exit_reason={normalized_exit_reason}")
+        if lifecycle_state:
+            broker_reason_bits.append(f"lifecycle_state={lifecycle_state}")
+        if fill_time is not None:
+            broker_reason_bits.append(f"fill_time={fill_time}")
+
+        reasoning = "Broker fill reconciliation"
+        if broker_reason_bits:
+            reasoning = f"{reasoning} ({', '.join(broker_reason_bits)})"
+        reasoning = f"{reasoning} telemetry={telemetry_suffix}"
+
+        insert_cols = [
+            "trade_id",
+            "date",
+            "symbol",
+            "action",
+            "shares",
+            "price",
+            "notional",
+            "conviction",
+            "reasoning",
+            "llm_decision_id",
+        ]
+        insert_vals = [
+            trade_id,
+            trade_date,
+            symbol,
+            action,
+            shares,
+            price,
+            shares * price,
+            None,
+            reasoning,
+            decision_id,
+        ]
+
+        if "pod_id" in trade_cols:
+            insert_cols.insert(2, "pod_id")
+            insert_vals.insert(2, pod_id)
+
+        if "strategy_id" in trade_cols:
+            insert_cols.append("strategy_id")
+            insert_vals.append(None)
+        if "entry_batch" in trade_cols:
+            insert_cols.append("entry_batch")
+            insert_vals.append(None)
+        if "exit_reason" in trade_cols:
+            insert_cols.append("exit_reason")
+            insert_vals.append(normalized_exit_reason)
+        if "source_decision_id" in trade_cols:
+            insert_cols.append("source_decision_id")
+            insert_vals.append(source_decision_id if source_decision_id is not None else decision_id)
+        if "decision_source" in trade_cols:
+            insert_cols.append("decision_source")
+            insert_vals.append(decision_source)
+        if "sleeve" in trade_cols:
+            insert_cols.append("sleeve")
+            insert_vals.append(sleeve)
+        if "is_profit_take" in trade_cols:
+            insert_cols.append("is_profit_take")
+            insert_vals.append(is_profit_take_reason(normalized_exit_reason))
+        if "profit_take_reason" in trade_cols:
+            insert_cols.append("profit_take_reason")
+            insert_vals.append(
+                normalized_exit_reason if is_profit_take_reason(normalized_exit_reason) else None
+            )
+
+        cols_sql = ", ".join(insert_cols)
+        placeholders = ", ".join(["?"] * len(insert_cols))
+        conn.execute(
+            f"INSERT INTO trades ({cols_sql}) VALUES ({placeholders})",
+            insert_vals,
+        )
+
+        created_row = conn.execute(
+            "SELECT created_at FROM trades WHERE trade_id = ?", [trade_id]
+        ).fetchone()
+        assert created_row is not None
+        created_at = created_row[0]
+
+        row_hash = compute_trade_hash(
+            prev_hash,
+            trade_id,
+            trade_date,
+            symbol,
+            action,
+            shares,
+            price,
+            shares * price,
+            None,
+            reasoning,
+            decision_id,
+            created_at,
+        )
+
+        conn.execute(
+            "UPDATE trades SET prev_hash = ?, row_hash = ? WHERE trade_id = ?",
+            [prev_hash, row_hash, trade_id],
+        )
+
+        prev_hash = row_hash
+        trade_ids.append(trade_id)
+        logger.debug(
+            "Logged broker fill %d: %s %s %.4f shares @ %.4f order_id=%s intent_type=%s lifecycle_state=%s",
+            trade_id,
+            action,
+            symbol,
+            shares,
+            price,
+            order_id,
+            intent_type,
+            lifecycle_state,
+        )
+
+    if trade_ids:
+        conn.commit()
+        logger.info(
+            "Persisted %d broker fill trade row(s) for %s (ids=%s)",
+            len(trade_ids),
+            trade_date,
+            trade_ids,
+        )
+
+    return trade_ids
+
+
 # ---------------------------------------------------------------------------
 # Portfolio snapshots
 # ---------------------------------------------------------------------------
+
+
+def persist_reconciliation_snapshot(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    pod_id: str,
+    snapshot_date: date,
+    snapshot: object | None,
+) -> dict[str, Any]:
+    """Validate and normalize the broker reconciliation telemetry snapshot."""
+    normalized = _require_complete_telemetry_snapshot(snapshot)
+    return {
+        "pod_id": pod_id,
+        "snapshot_date": snapshot_date,
+        "snapshot": normalized,
+    }
 
 
 def save_portfolio_snapshot(
@@ -309,7 +587,7 @@ def get_recent_trades(
     conn: duckdb.DuckDBPyConnection,
     limit: int = 20,
     pod_id: str | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Return the most recent trades as a list of dicts.
 
     Parameters
@@ -448,7 +726,7 @@ def get_portfolio_history(
     conn: duckdb.DuckDBPyConnection,
     days: int = 30,
     pod_id: str | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Return portfolio snapshots for the last *days* calendar days.
 
     Parameters

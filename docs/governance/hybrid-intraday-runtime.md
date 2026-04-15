@@ -11,11 +11,14 @@
 - Strategy rotation can enable only the **Top‑N** performers (configurable).
 - Intraday bars (Alpaca) are stored in `market_data_intraday` and used for
   real-time context + profit-taking.
-- Profit-taking logic can trigger:
-  - **Partial take-profit** (default +2% for 50%)
-  - **Trailing stop** after partial (updated via order replace)
-  - **Scale-in** entries
-  - **1-bar re-entry cooldown**
+- Profit-taking policy is now described through the **canonical exit engine**
+  rather than broker-specific wording first.
+- Canonical policy semantics now cover:
+  - **Stop-loss**
+  - **Partial take-profit**
+  - **Trailing stop after partial**
+  - **EOD flatten policy**
+  - **Scale-in / cooldown context around entries**
 - Expectancy gate throttles new BUY sizes when recent realized expectancy is
   negative (pod-level).
 
@@ -28,16 +31,20 @@
   `strategy_set=promoted_crypto`) with Claude as strict governor and synthetic
   intraday exits (`intraday_use_oco=false`).
 
-## RTH Guard + Native Orders
-- Intraday runs **skip** when Alpaca clock reports market closed.
-- Profit-taking is implemented via **native Alpaca orders**:
-  - Partial TP limit order (50% by default)
-  - **OCO order for the remainder** (TP leg + stop leg)
-  - Trailing stop updates the **OCO stop leg** via order replace
-- The remainder TP is raised above the partial TP using
-  `profit_take_remainder_tp_mult` so trailing has room to work.
+## Canonical Exit Policy + Runtime Realization
+- Intraday runs **skip** when Alpaca clock reports market closed if
+  `intraday_rth_guard = true`.
+- The policy layer is the canonical exit engine; the broker path is only the
+  realization mechanism.
+- In synthetic modes, runtime emits exit signals using canonical rules.
+- In native Alpaca modes, runtime attempts to realize the same policy using:
+  - partial TP limit order,
+  - OCO protection for the remainder,
+  - trailing stop management where supported.
+- `profit_take_remainder_tp_mult` keeps the remainder TP above the partial TP
+  so trailing logic has room to work in native OCO mode.
 - Intraday order state + statuses persist in `intraday_order_state` so reports
-  can prove partial TP + trailing behavior.
+  can prove partial TP + trailing behavior where broker-native protection is used.
 - Overlay runs are tagged with `decision_type = overlay` in `llm_decisions`.
 
 ## Config (Revertable)
@@ -70,7 +77,14 @@ reentry_cooldown_bars = 1
   profit-taking exits.
 
 ## Operational Notes
-- Intraday runs disable bracket orders and rely on native OCO/limit orders.
+- Intraday runs do not imply a different exit policy; they imply a different
+  realization path for the same canonical policy.
+- `intraday_use_oco = true` means native Alpaca realization is preferred.
+- `intraday_use_oco = false` means synthetic monitoring is preferred.
+- Backtest parity now uses the same canonical synthetic exit vocabulary, so
+  runtime and research review should compare semantics first and fills second.
+- Intraday runs disable bracket orders and rely on native OCO/limit orders only
+  when that realization path is explicitly enabled.
 - Strategy signals are merged and capped by `risk.max_position_weight`.
 - Strategy group caps + regime multipliers can scale weights before execution.
 - Intraday runs are de-duped per 5‑minute slot via `data/locks/intraday_{pod}.lock`.
@@ -90,6 +104,7 @@ reentry_cooldown_bars = 1
 - Promotion criteria checklist:
   `docs/governance/crypto-strategy-promotion.md`.
 - See `docs/governance/runtime-truth-table.md` for mode-by-mode behavior.
+- See `docs/governance/eod-profit-taking.md` for the canonical parity matrix.
 
 ## Data Upsert Guardrails
 Daily and intraday fetch/upsert paths are protected so E2E runs don’t hang when

@@ -1,6 +1,13 @@
 [sets]
-promoted_default = [
-  "lqd-spy-credit-lead",
+# Strict governance mode:
+# promoted_default is intentionally empty until strategies re-earn promotion
+# through the current governed funnel.
+promoted_default = []
+
+# Research / shadow candidates that may still be worth further work,
+# but are not approved for live promoted runtime use.
+candidate_default = [
+  "soxx-qqq-lead-lag",
   "agg-spy-credit-lead",
   "spy-overnight-momentum",
   "agg-qqq-credit-lead",
@@ -10,15 +17,27 @@ promoted_default = [
   "hyg-spy-5d-credit-lead",
   "agg-efa-credit-lead",
   "hyg-qqq-credit-lead",
+]
+
+# Dedicated stock-focused candidate lane for bounded paper validation.
+# Keep this set intentionally narrow so runtime behavior is easy to interpret.
+candidate_stocks = [
   "soxx-qqq-lead-lag",
 ]
+
+# Historically promoted or otherwise important slugs that should not remain live
+# until they are rerun through the modern governed funnel.
+needs_revalidation = [
+  "lqd-spy-credit-lead",
+]
+
+# Strategies that currently look too weak for promotion and should not be live.
+retired = []
 
 # Candidate crypto set is used for validation + paper shadow only.
 candidate_crypto = [
   "eth-btc-ratio-mean-reversion-v5",
 ]
 
-# Promoted crypto set is intentionally empty until strict validation passes.
-# Move slugs from candidate_crypto to promoted_crypto only after:
-# 1) backtest pass, 2) robustness pass, 3) walk-forward pass, 4) paper gate pass.
+# Promoted crypto remains empty until strict validation passes.
 promoted_crypto = []

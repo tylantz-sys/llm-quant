@@ -1,7 +1,15 @@
 # Phase 6 Runtime Audit
 
 ## Scope
-Audit only. No project source files modified.
+Audit-focused runtime/governance review. This document is advisory and does not
+change source-of-truth runtime semantics by itself.
+
+This report should now be read alongside:
+- `docs/governance/eod-profit-taking.md`
+- `docs/governance/runtime-truth-table.md`
+- `docs/governance/hybrid-intraday-runtime.md`
+- `docs/governance/validation-requirements-matrix.md`
+- `docs/governance/strategy-artifact-status-matrix.md`
 
 ## Files reviewed
 - scripts/execute_decision.py
@@ -84,7 +92,7 @@ Current practical options:
 ### 6. `src/llm_quant/trading/exits.py`
 Useful pattern source for forced flatten.
 
-Phase 6 flatten should look like normal exit-engine output:
+Phase 6 flatten should look like normal canonical exit-engine output:
 - `TradeSignal(action=CLOSE, target_weight=0.0, conviction=HIGH, reasoning=...)`
 
 That avoids executor changes.
@@ -135,6 +143,9 @@ Good for reporting and lifecycle follow-up, but not immediate in-run enforcement
 Place Phase 6 config under existing profit-taking governance tree:
 - `governance.profit_taking.runtime_enforcement`
 
+This should be treated as a **runtime enforcement overlay on top of the
+canonical exit policy**, not as a separate exit policy namespace.
+
 Suggested fields:
 - `enabled`
 - `lookback_days`
@@ -179,8 +190,21 @@ One append-only evaluation record per run containing:
   - audit in `telemetry.py`
 - Demotion and paper revalidation are lifecycle outcomes, so runtime should recommend/record them rather than directly rewrite pod config.
 - Forced flatten should be represented as ordinary CLOSE signals.
+- Native broker order handling must remain a realization path, not a distinct
+  profit-taking policy.
+- Any Phase 6 enforcement should preserve canonical runtime/paper/backtest exit
+  vocabulary so governance review can compare semantics across surfaces.
 
 ## Blockers / gaps
 - No clear existing pod lifecycle state module was found in `src/llm_quant`.
 - No generic governance-event telemetry helper exists today.
 - Standard execution path does not currently carry rich governance provenance through ledger writes unless implementation adds it explicitly.
+- If Phase 6 is implemented without explicit canonical-parity review, runtime
+  enforcement could drift into a separate policy layer and undermine the new
+  promotion/readiness governance.
+
+## Governance implication
+If implemented, Phase 6 should be reviewed as part of:
+- exit-stack scenario testing,
+- canonical exit parity review across runtime / paper / backtest,
+- promotion-readiness interpretation for profit-taking sleeves.

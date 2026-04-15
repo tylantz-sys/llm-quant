@@ -2,8 +2,10 @@
 Description=llm-quant end-of-day flatten timer
 
 [Timer]
+# User-systemd on some hosts ignores Timezone=, so this schedule follows the
+# user manager's local timezone. Run under an America/New_York user/host
+# timezone when exact 15:55 ET semantics are required.
 OnCalendar=Mon..Fri *-*-* 15:55:00
-Timezone=America/New_York
 Persistent=true
 
 [Install]

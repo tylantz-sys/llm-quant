@@ -232,10 +232,29 @@ def generate_profit_taking_signals(
     partial_tp_size: float,
     trailing_stop_pct: float,
 ) -> list[TradeSignal]:
-    """Generate SELL/CLOSE signals based on intraday profit-taking rules."""
+    """Backward-compatible wrapper around the canonical exit engine."""
+    del now_ts
+
+    from llm_quant.config import ExecutionConfig, RiskLimits
+    from llm_quant.trading.exits import (
+        SyntheticExitContext,
+        build_exit_policy,
+        evaluate_synthetic_exit,
+    )
+
+    policy = build_exit_policy(
+        RiskLimits(
+            partial_take_profit_enabled=partial_tp_pct > 0 and partial_tp_size > 0,
+            partial_take_profit_pct=partial_tp_pct,
+            partial_take_profit_size=partial_tp_size,
+            trailing_stop_enabled=trailing_stop_pct > 0,
+            trailing_stop_pct=trailing_stop_pct,
+        ),
+        ExecutionConfig(),
+    )
+
     signals: list[TradeSignal] = []
     nav = portfolio.nav
-
     for symbol, pos in portfolio.positions.items():
         price = prices.get(symbol, pos.current_price)
         state = states.get(symbol)
@@ -248,64 +267,17 @@ def generate_profit_taking_signals(
             )
             states[symbol] = state
 
-        entry_price = state.entry_price or pos.avg_cost
-        if entry_price <= 0:
-            entry_price = pos.avg_cost
-
-        # Stop-loss check
-        if pos.stop_loss and price <= pos.stop_loss:
-            signals.append(
-                TradeSignal(
-                    symbol=symbol,
-                    action=Action.CLOSE,
-                    conviction=Conviction.HIGH,
-                    target_weight=0.0,
-                    stop_loss=0.0,
-                    reasoning="Intraday stop-loss triggered.",
-                    exit_reason="stop_loss",
-                    entry_batch=state.entry_batch or 1,
-                )
-            )
-            continue
-
-        partial_target = entry_price * (1.0 + partial_tp_pct)
-
-        if (not state.partial_exit_taken) and price >= partial_target:
-            current_weight = pos.market_value / nav if nav else 0.0
-            target_weight = max(current_weight * (1.0 - partial_tp_size), 0.0)
-            signals.append(
-                TradeSignal(
-                    symbol=symbol,
-                    action=Action.SELL,
-                    conviction=Conviction.HIGH,
-                    target_weight=round(target_weight, 4),
-                    stop_loss=pos.stop_loss,
-                    reasoning=(
-                        f"Partial TP: +{partial_tp_pct:.1%} reached."
-                    ),
-                    exit_reason="tp_partial",
-                    entry_batch=state.entry_batch or 1,
-                )
-            )
-            continue
-
-        if state.partial_exit_taken and trailing_stop_pct > 0:
-            trail_price = state.peak_price * (1.0 - trailing_stop_pct)
-            if price <= trail_price:
-                signals.append(
-                    TradeSignal(
-                        symbol=symbol,
-                        action=Action.CLOSE,
-                        conviction=Conviction.HIGH,
-                        target_weight=0.0,
-                        stop_loss=0.0,
-                        reasoning=(
-                            f"Trailing stop hit ({trailing_stop_pct:.2%})."
-                        ),
-                        exit_reason="trailing_stop",
-                        entry_batch=state.entry_batch or 1,
-                    )
-                )
+        signal = evaluate_synthetic_exit(
+            SyntheticExitContext(
+                position=pos,
+                price=price,
+                nav=nav,
+                state=state,
+            ),
+            policy,
+        )
+        if signal is not None:
+            signals.append(signal)
 
     return signals
 

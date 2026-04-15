@@ -190,6 +190,7 @@ These are strongly supported by the research/governance review and should be ele
 | Marginal Sharpe contribution gate | recommended | additions must improve portfolio quality | research/promotion review | Moves system toward portfolio-aware promotion |
 | Capacity/crowding assessment | recommended | size/liquidity constraints tested | research artifact | Especially relevant before live capital expansion |
 | Exit-stack scenario testing | recommended | TP/OCO/trailing/EOD behavior tested under multiple paths | test suite / backtest artifact | Directly affects realized profitability |
+| Canonical exit parity review | recommended | runtime, paper, and backtest reviewed against one canonical exit-policy vocabulary | governance review + test suite | Prevents broker-path wording from hiding policy drift |
 | Overlay veto-rate measurement | recommended | quantify how often overlay suppresses signals and with what value add | telemetry / analysis | Needed before loosening or redesigning overlay behavior |
 
 ---
@@ -232,6 +233,8 @@ A strategy should only be marked promotion-ready if every item below is explicit
 - [ ] Paper trades >= 50
 - [ ] Paper Sharpe >= 0.60
 - [ ] Operational systems tested
+- [ ] Exit-stack scenario testing reviewed
+- [ ] Canonical exit parity reviewed across runtime/paper/backtest
 - [ ] Canary passed
 - [ ] Kill switches active
 - [ ] Baseline metrics recorded
@@ -278,5 +281,6 @@ This matrix directly supports the broader program by making three critical impro
 
 | Version | Date | Change |
 |---------|------|--------|
+| 1.2 | 2026-04-01 | Added canonical exit parity review language to the recommended requirements and minimum promotion checklist so profit-taking validation is explicitly compared across runtime, paper, and backtest surfaces. |
 | 1.1 | 2026-03-31 | Cross-linked the strategy artifact/status matrix as the canonical per-strategy and per-sleeve status ledger, clarifying that this document defines requirements while the status matrix records verified state. |
 | 1.0 | 2026-03-31 | Initial canonical validation matrix created to unify lifecycle, robustness, promotion, crypto, and runtime-readiness requirements. |

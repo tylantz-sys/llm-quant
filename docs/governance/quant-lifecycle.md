@@ -617,6 +617,8 @@ The lifecycle enforces several anti-overfitting mechanisms:
 
 9. **Append-only experiment registry**: All results are recorded, preventing selective reporting of favorable outcomes.
 
+10. **Direct artifact review**: Walk-forward and robustness artifacts must be directly reviewable and tied back to the frozen spec and experiment record so reviewers can distinguish complete, fresh results from stale or incomplete evidence.
+
 ---
 
 ## Version History
@@ -624,3 +626,4 @@ The lifecycle enforces several anti-overfitting mechanisms:
 | Version | Date | Change |
 |---------|------|--------|
 | 1.0 | 2026-03-25 | Initial lifecycle reference. Covers all 9 states, artifact schemas, DSR/PBO/CPCV formulas, cost model, benchmark requirements, experiment registry. |
+| 1.1 | 2026-04-01 | Removed overnight WFO-specific governance language and restored direct walk-forward/robustness artifact review as the lifecycle requirement. |

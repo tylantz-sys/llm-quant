@@ -15,6 +15,22 @@ Stage 1: Hard Vetoes ──> Stage 2: Scorecard ──> Stage 3: Paper Trading �
 
 ---
 
+## Promotion Evidence Baseline
+
+Promotion decisions must rely on preserved, machine-reviewable evidence rather than terminal console output alone.
+
+A complete promotion packet should include:
+
+- frozen mandate, hypothesis, data contract, and research spec artifacts
+- experiment registry entries supporting the baseline backtest record
+- robustness artifacts and supporting statistical outputs
+- paper-trading evidence where required by stage
+- walk-forward and robustness evidence where required by stage
+
+Promotion review is based on strategy artifacts, registered experiments, walk-forward outputs, robustness outputs, paper-trading evidence, and runtime/promotion governance records. Unattended overnight batch-run artifacts are not part of the required promotion contract.
+
+---
+
 ## Stage 1: Hard Vetoes
 
 Hard vetoes are binary. **Any single failure is an automatic rejection.** These checks guard against the most common backtest pathologies: overfitting, data snooping, and insufficient out-of-sample validation.
@@ -27,6 +43,8 @@ Hard vetoes are binary. **Any single failure is an automatic rejection.** These 
 | Minimum Trail Length (MinTRL) | >= 1 OOS period | At least one full out-of-sample period must be available | Insufficient out-of-sample evidence. A strategy that has never been tested on unseen data has no credible performance claim. |
 
 **Evidence required:** Statistical test results with full methodology documentation. The specific implementation of DSR, PBO, and SPA must be recorded so results are reproducible.
+
+If Stage 1 evidence includes walk-forward or robustness outputs, those artifacts must be directly reviewable and tied back to the frozen spec and experiment record.
 
 ---
 
@@ -60,6 +78,8 @@ Composite = (Risk-Adjusted * 0.25) + (Drawdown * 0.20) + (Trade Stats * 0.20)
 | < 75 | **Reject.** Requires fundamental strategy revision before re-evaluation. |
 
 **Evidence required:** Completed scorecard with per-dimension scores, component values, and brief justification for each score. Scorecard must be stored in `strategy_changelog`.
+
+When walk-forward or robustness evidence feeds the robustness score, reviewers must use the underlying machine-reviewable artifacts rather than screenshots or ad hoc notes.
 
 ---
 
@@ -205,6 +225,11 @@ Every promotion must be recorded in `strategy_changelog` with the following info
 - Baseline metrics recorded: [yes/no]
 - Enhanced surveillance start date: [date]
 
+### Walk-forward / robustness evidence
+- Walk-forward artifact reviewed: [path]
+- Robustness artifact reviewed: [path]
+- Artifact freshness / completeness issues: [none/details]
+
 ### Approved by: [name/role]
 ### Approval date: [date]
 ```
@@ -216,3 +241,4 @@ Every promotion must be recorded in `strategy_changelog` with the following info
 | Version | Date | Change |
 |---------|------|--------|
 | 1.0 | 2026-03-25 | Initial policy. Covers all 5 promotion stages with acceptance criteria. |
+| 1.1 | 2026-04-01 | Replaced overnight WFO-specific promotion evidence requirements with direct walk-forward and robustness artifact review language. |

@@ -1,103 +1,122 @@
-# Robustness Analysis: soxx-qqq-lead-lag
-# Generated: 2026-03-26
-
-strategy_slug: "soxx-qqq-lead-lag"
-trial_family: "lead_lag_soxx_qqq"
+strategy_slug: soxx-qqq-lead-lag
+created_at: '2026-04-01T19:42:58+00:00'
+runner: scripts/run_a7_robustness.py
+runner_identity:
+  script: scripts/run_a7_robustness.py
+  pid: '641536'
+  hostname: tys-HP-ProBook
+  python_executable: /home/ty/Documents/llm-quant/llm-quant/.venv/bin/python
+frozen_spec_hash: d8e92e5a1be0d6ff003c48716b46939383a138f9206b94f7331600d64c7f6681
+provenance:
+  created_at: '2026-04-01T19:42:58+00:00'
+  runner: scripts/run_a7_robustness.py
+  runner_identity:
+    script: scripts/run_a7_robustness.py
+    pid: '641536'
+    hostname: tys-HP-ProBook
+    python_executable: /home/ty/Documents/llm-quant/llm-quant/.venv/bin/python
+  strategy_slug: soxx-qqq-lead-lag
+  strategy_name: lead_lag
+  frozen_spec_hash: d8e92e5a1be0d6ff003c48716b46939383a138f9206b94f7331600d64c7f6681
+  spec_frozen: true
+  spec_frozen_at: '2026-03-26T00:00:00Z'
+  data_dir: data
+  symbols:
+  - SOXX
+  - QQQ
+  canonical_experiment_id: ee2f59e9
+  canonical_metrics_1x:
+    total_return: 0.2834818358946125
+    annualized_return: 0.05268228677948139
+    sharpe_ratio: 0.6439601198866579
+    sortino_ratio: 1.0678124282976607
+    calmar_ratio: 0.770331079768905
+    max_drawdown: 0.068389148721983
+    dsr: 0.567470026051138
+    psr: 0.9292296105935409
+    total_trades: 168
+    win_rate: 0.39880952380952384
+  policy_inputs:
+    years: 5
+    initial_capital: 100000
+    warmup_days: 30
+    cost_model:
+      spread_bps: 5.0
+      flat_slippage_bps: 2.0
+      slippage_volatility_factor: 0.1
+      commission_per_share: 0.0
+      min_commission: 0.0
+    parameters:
+      leader_symbol: SOXX
+      follower_symbol: QQQ
+      lag_days: 5
+      signal_window: 5
+      entry_threshold: 0.02
+      exit_threshold: -0.01
+      target_weight: 0.9
+      rebalance_frequency_days: 1
+trial_family: lead_lag_soxx_qqq
 trial_count: 1
-
-# ============================================================
-# Gate Results Summary
-# ============================================================
-
-overall_result: "PASS"
-gates_passed: 4
-gates_failed: 0
+overall_result: HOLD
+gates_passed: 2
+gates_failed: 2
 gates_total: 4
-
 gate_results:
   dsr:
-    dsr_value: 0.9603
-    threshold: ">= 0.95"
-    result: "PASS"
-    notes: >
-      DSR from experiment 57fba00d (trial #1 in family).
-      With N=1 family trial, DSR is interpretable as statistical confidence
-      in the Sharpe estimate. 0.9603 exceeds the 0.95 threshold.
-
+    dsr_value: 0.5675
+    threshold: '>= 0.95'
+    result: FAIL
+    notes: DSR from canonical experiment ee2f59e9 under frozen repaired lineage.
   pbo:
-    value: "not_computed"
-    threshold: "<= 0.10"
-    result: "SKIP"
-    notes: >
-      PBO requires >= 2 distinct strategy variants. With only 1 valid experiment
-      in this family, PBO is undefined.
-
+    value: not_computed
+    threshold: <= 0.10
+    result: SKIP
+    notes: PBO not computed by this runner; family variant set not yet modeled here.
   cpcv:
-    mean_oos_sharpe: 0.8192
-    std_oos_sharpe: 0.5742
-    threshold: "> 0"
-    result: "PASS"
-    notes: >
-      CPCV with 6 groups, 2 test groups, 5-day purge on base experiment.
-      Mean OOS Sharpe of 0.8192 is positive and above mandate target of 0.80.
-      Std (0.5742) indicates moderate variance across folds -- some periods
-      stronger than others, consistent with cyclical semiconductor demand patterns.
-
+    mean_oos_sharpe: 0.7789
+    std_oos_sharpe: 0.4408
+    threshold: '> 0'
+    result: PASS
+    notes: CPCV computed from canonical repaired-lineage daily returns with 6 groups,
+      2 test groups, 5-day purge.
   perturbation:
-    n_stable: 5
+    n_stable: 2
     n_total: 5
-    result: "PASS"
-    threshold: ">= 60% stable"
+    result: FAIL
+    threshold: '>= 60% stable'
     details:
-      - name: "lag_days=4"
-        sharpe: 0.6845
-        pct_change: -4.1
-        stable: true
-      - name: "lag_days=6"
-        sharpe: 0.5311
-        pct_change: -25.6
-        stable: true
-      - name: "entry_threshold=0.01"
-        sharpe: 0.6605
-        pct_change: -7.4
-        stable: true
-      - name: "entry_threshold=0.04"
-        sharpe: 0.6431
-        pct_change: -9.9
-        stable: true
-      - name: "target_weight=0.70"
-        sharpe: 0.7157
-        pct_change: +0.3
-        stable: true
-
+    - name: lag_days=4
+      sharpe: -0.1927
+      pct_change: -131.8
+      stable: false
+    - name: lag_days=6
+      sharpe: 0.7765
+      pct_change: 28.0
+      stable: true
+    - name: entry_threshold=0.01
+      sharpe: 0.3699
+      pct_change: -39.0
+      stable: false
+    - name: entry_threshold=0.04
+      sharpe: 0.3494
+      pct_change: -42.4
+      stable: false
+    - name: target_weight=0.70
+      sharpe: 0.606
+      pct_change: -0.1
+      stable: true
 cost_sensitivity:
-  sharpe_1x: 0.861
-  sharpe_1_5x: 0.798
-  sharpe_2x: 0.730
-  sharpe_3x: 0.604
-  max_dd_1x: 14.40
-  notes: >
-    Sharpe degrades gracefully with cost. At 2x costs (pessimistic scenario)
-    Sharpe is 0.730. At 3x costs Sharpe falls to 0.604 below mandate target.
-    Strategy is cost-sensitive but viable at realistic cost levels.
-
+  sharpe_1x: 0.607
+  sharpe_1_5x: 0.418
+  sharpe_2x: 0.153
+  sharpe_3x: -0.602
+  max_dd_1x: 6.84
+  notes: Cost sensitivity computed from repaired frozen canonical spec.
 max_drawdown_check:
-  value: 14.40
-  threshold: "< 15.0"
-  result: "PASS"
-  notes: >
-    Max drawdown of 14.40% at 1x cost is within the 15% mandate constraint.
-    At 3x cost multiplier drawdown rises to 14.70%, still within constraint.
-    Perturbation variants show drawdowns up to 26.22% (lag_days=4) at 1x
-    cost-free level, indicating drawdown sensitivity to parameter choice.
-    Base spec with lag_days=5 is the best risk-adjusted parameterization.
-
-overall_passed: true
-rejection_reason: null
-promotion_notes: >
-  PASS: Sharpe=0.861 DSR=0.9603 MaxDD=14.40% CPCV_OOS=0.8192.
-  All 4 robustness gates passed. All 5 perturbations stable.
-  Strategy meets mandate targets at 1x cost. Recommend paper track record
-  before live promotion.
-
-created_at: "2026-03-26"
+  value: 6.84
+  threshold: < 15.0
+  result: PASS
+  notes: Base 1x-cost drawdown must remain inside mandate threshold.
+overall_passed: false
+rejection_reason: Refreshed robustness gates did not fully pass under corrected lineage.
+promotion_notes: 'HOLD: Sharpe=0.607 DSR=0.5675 MaxDD=6.84% CPCV_OOS=0.7789.'

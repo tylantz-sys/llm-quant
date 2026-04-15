@@ -16,6 +16,13 @@ logger = logging.getLogger(__name__)
 _ET = ZoneInfo("America/New_York")
 
 
+def _normalize_trading_base_url(raw_url: str | None) -> str:
+    url = (raw_url or "https://paper-api.alpaca.markets").strip().rstrip("/")
+    if url.endswith("/v2"):
+        return url[:-3]
+    return url
+
+
 class AlpacaError(RuntimeError):
     """Raised when Alpaca API calls fail."""
 
@@ -34,7 +41,7 @@ class AlpacaClient:
         load_dotenv_if_present()
         api_key = os.environ.get("ALPACA_API_KEY")
         api_secret = os.environ.get("ALPACA_SECRET_KEY")
-        base_url = os.environ.get("ALPACA_PAPER_URL", "https://paper-api.alpaca.markets")
+        base_url = _normalize_trading_base_url(os.environ.get("ALPACA_PAPER_URL"))
         if not api_key or not api_secret:
             raise AlpacaError("Missing ALPACA_API_KEY or ALPACA_SECRET_KEY in env")
         return cls(base_url=base_url, api_key=api_key, api_secret=api_secret)

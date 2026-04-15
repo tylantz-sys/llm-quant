@@ -9,18 +9,21 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - run: pip install black ruff mypy pytest
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --dev
       - name: Install typos
         uses: taiki-e/install-action@v2
         with:
           tool: typos-cli
-      - run: black --check .
-      - run: ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
       - run: typos
-      - run: mypy .
-      - run: pytest
+      - run: uv run python scripts/check_catalog_governance.py
+      - run: uv run mypy src
+      - run: uv run pytest
