@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Mapping
 from datetime import date
+from typing import cast
 
 import polars as pl
 
@@ -20,6 +22,9 @@ from llm_quant.brain.models import Action, Conviction, TradeSignal
 from llm_quant.trading.portfolio import Portfolio
 
 logger = logging.getLogger(__name__)
+
+RowDict = dict[str, object]
+ScoreEntry = dict[str, object]
 
 
 def _compute_momentum_scores(
@@ -34,10 +39,14 @@ def _compute_momentum_scores(
         if len(sym_data) < lookback:
             continue
         recent = sym_data.tail(lookback)
-        first_close = recent.row(0, named=True)["close"]
-        last_close = recent.row(-1, named=True)["close"]
-        if first_close > 0:
-            scores.append((symbol, last_close / first_close - 1.0))
+        row0 = cast(RowDict, recent.row(0, named=True))
+        row_last = cast(RowDict, recent.row(-1, named=True))
+        first_close_obj = row0.get("close")
+        last_close_obj = row_last.get("close")
+        if isinstance(first_close_obj, (int, float)) and isinstance(
+            last_close_obj, (int, float)
+        ) and first_close_obj > 0:
+            scores.append((symbol, float(last_close_obj) / float(first_close_obj) - 1.0))
     scores.sort(key=lambda x: x[1], reverse=True)
     return scores
 
@@ -439,8 +448,9 @@ def _detect_regime_from_vix(
     """Classify regime as risk_on or risk_off based on VIX level."""
     vix_data = indicators_df.filter(pl.col("symbol") == "VIX").sort("date")
     if len(vix_data) > 0:
-        vix_close = vix_data.tail(1).row(0, named=True)["close"]
-        if vix_close >= vix_threshold:
+        vix_row = cast(RowDict, vix_data.tail(1).row(0, named=True))
+        vix_close = vix_row.get("close")
+        if isinstance(vix_close, (int, float)) and vix_close >= vix_threshold:
             return "risk_off"
     return "risk_on"
 
@@ -453,8 +463,10 @@ def _get_atr_stop(
 ) -> float:
     """Compute ATR-based stop-loss, falling back to percentage-based."""
     if "atr_14" in sym_data.columns and len(sym_data) > 0:
-        atr_val = sym_data.tail(1).row(0, named=True).get("atr_14")
-        if atr_val and atr_val > 0:
+        atr_row = cast(RowDict, sym_data.tail(1).row(0, named=True))
+        atr_val_obj = atr_row.get("atr_14")
+        if isinstance(atr_val_obj, (int, float)) and atr_val_obj > 0:
+            atr_val = float(atr_val_obj)
             return close - (stop_mult * atr_val)
     return close * (1.0 - fallback_pct)
 
@@ -472,11 +484,15 @@ def _vol_target_weight(
     """
     if "atr_14" not in sym_data.columns or len(sym_data) == 0:
         return base_weight
-    row = sym_data.tail(1).row(0, named=True)
-    atr_val = row.get("atr_14")
-    close = row.get("close", 0)
-    if not atr_val or atr_val <= 0 or not close or close <= 0:
+    row = cast(RowDict, sym_data.tail(1).row(0, named=True))
+    atr_val_obj = row.get("atr_14")
+    close_obj = row.get("close", 0)
+    if not isinstance(atr_val_obj, (int, float)) or atr_val_obj <= 0:
         return base_weight
+    if not isinstance(close_obj, (int, float)) or close_obj <= 0:
+        return base_weight
+    atr_val = float(atr_val_obj)
+    close = float(close_obj)
     realized_vol = atr_val * math.sqrt(252) / close
     if realized_vol <= 0:
         return base_weight
@@ -489,10 +505,16 @@ def _trailing_return(sym_data: pl.DataFrame, lookback: int) -> float | None:
     if len(sym_data) < lookback:
         return None
     recent = sym_data.tail(lookback)
-    first_close = recent.row(0, named=True)["close"]
-    last_close = recent.row(-1, named=True)["close"]
-    if first_close <= 0:
+    row0 = cast(RowDict, recent.row(0, named=True))
+    row_last = cast(RowDict, recent.row(-1, named=True))
+    first_close_obj = row0.get("close")
+    last_close_obj = row_last.get("close")
+    if not isinstance(first_close_obj, (int, float)) or first_close_obj <= 0:
         return None
+    if not isinstance(last_close_obj, (int, float)):
+        return None
+    first_close = float(first_close_obj)
+    last_close = float(last_close_obj)
     return last_close / first_close - 1.0
 
 
@@ -500,11 +522,16 @@ def _close_above_sma(sym_data: pl.DataFrame, sma_col: str = "sma_200") -> bool:
     """Check if latest close is above the given SMA. True if SMA not available."""
     if sma_col not in sym_data.columns or len(sym_data) == 0:
         return True  # no SMA data = no filter applied
-    row = sym_data.tail(1).row(0, named=True)
-    sma_val = row.get(sma_col)
-    if sma_val is None:
+    row = cast(RowDict, sym_data.tail(1).row(0, named=True))
+    sma_val_obj = row.get(sma_col)
+    close_obj = row.get("close")
+    if sma_val_obj is None:
         return True
-    return row["close"] >= sma_val
+    if not isinstance(sma_val_obj, (int, float)) or not isinstance(close_obj, (int, float)):
+        return True
+    sma_val = float(sma_val_obj)
+    close = float(close_obj)
+    return close >= sma_val
 
 
 # ---------------------------------------------------------------------------
@@ -526,18 +553,39 @@ class TrendFollowingStrategy(Strategy):
         symbols: list[str],
         portfolio: Portfolio,
         prices: dict[str, float],
-        params: dict,
+        params: Mapping[str, object],
     ) -> list[TradeSignal]:
         """Evaluate each symbol independently for trend-following signals."""
         signals: list[TradeSignal] = []
-        lookback = params["lookback"]
-        sma_col = params["sma_col"]
-        target_vol = params["target_vol"]
-        weight_mult_risk_off = params["weight_mult_risk_off"]
-        stop_mult = params["stop_mult"]
-        regime = params["regime"]
+        lookback_obj = params["lookback"]
+        sma_col_obj = params["sma_col"]
+        target_vol_obj = params["target_vol"]
+        weight_mult_risk_off_obj = params["weight_mult_risk_off"]
+        stop_mult_obj = params["stop_mult"]
+        regime_obj = params["regime"]
 
-        min_positive = params.get("min_tf_positive", 1)
+        if not isinstance(lookback_obj, int):
+            return signals
+        if not isinstance(sma_col_obj, str):
+            return signals
+        if not isinstance(target_vol_obj, (int, float)):
+            return signals
+        if not isinstance(weight_mult_risk_off_obj, (int, float)):
+            return signals
+        if not isinstance(stop_mult_obj, (int, float)):
+            return signals
+        if not isinstance(regime_obj, str):
+            return signals
+
+        lookback = lookback_obj
+        sma_col = sma_col_obj
+        target_vol = float(target_vol_obj)
+        weight_mult_risk_off = float(weight_mult_risk_off_obj)
+        stop_mult = float(stop_mult_obj)
+        regime = regime_obj
+
+        min_positive_obj = params.get("min_tf_positive", 1)
+        min_positive = min_positive_obj if isinstance(min_positive_obj, int) else 1
 
         new_positions = 0
         for symbol in symbols:
@@ -547,17 +595,19 @@ class TrendFollowingStrategy(Strategy):
                 continue
 
             # Multi-timeframe momentum consensus
-            lookbacks = [
+            raw_lookbacks = [
                 params.get("lookback_short"),
                 params.get("lookback_medium"),
                 params.get("lookback_long"),
             ]
-            lookbacks = [lb for lb in lookbacks if lb is not None]
+            lookbacks = [lb for lb in raw_lookbacks if isinstance(lb, int)]
             if not lookbacks:
                 lookbacks = [lookback]  # fallback to single timeframe
 
             timeframe_returns: list[tuple[int, float]] = []
             for lb in lookbacks:
+                if not isinstance(lb, int):
+                    continue
                 ret = _trailing_return(sym_data, lb)
                 if ret is not None:
                     timeframe_returns.append((lb, ret))
@@ -644,24 +694,32 @@ class TrendFollowingStrategy(Strategy):
         prices: dict[str, float],
     ) -> list[TradeSignal]:
         params = self.config.parameters
-        lookback = params.get("lookback_days", 126)
-        sma_trend = params.get("sma_trend", 200)
-        vix_threshold = params.get("vix_threshold", 22)
+        lookback_obj = params.get("lookback_days", 126)
+        sma_trend_obj = params.get("sma_trend", 200)
+        vix_threshold_obj = params.get("vix_threshold", 22)
+
+        lookback = lookback_obj if isinstance(lookback_obj, int) else 126
+        sma_trend = sma_trend_obj if isinstance(sma_trend_obj, int) else 200
+        vix_threshold = (
+            float(vix_threshold_obj)
+            if isinstance(vix_threshold_obj, (int, float))
+            else 22.0
+        )
 
         regime = _detect_regime_from_vix(indicators_df, vix_threshold)
 
-        symbols = [
-            s
-            for s in indicators_df.select("symbol").unique().to_series().to_list()
-            if s != "VIX"
-        ]
+        symbol_values = indicators_df.select("symbol").unique().to_series().to_list()
+        symbols = [s for s in symbol_values if isinstance(s, str) and s != "VIX"]
 
         lookback_short = params.get("lookback_short", None)
-        lookback_medium = params.get("lookback_medium", lookback)
+        lookback_medium_obj = params.get("lookback_medium", lookback)
+        lookback_medium = (
+            lookback_medium_obj if isinstance(lookback_medium_obj, int) else lookback
+        )
         lookback_long = params.get("lookback_long", None)
         min_tf_positive = params.get("min_timeframes_positive", 1)
 
-        eval_params: dict = {
+        eval_params: dict[str, object] = {
             "lookback": lookback,
             "sma_col": f"sma_{sma_trend}",
             "target_vol": params.get("target_vol", 0.12),
@@ -697,15 +755,18 @@ class MultiFactorStrategy(Strategy):
         symbols: list[str],
         momentum_lookback: int,
         sma_col: str,
-    ) -> list[dict]:
+    ) -> list[ScoreEntry]:
         """Score each symbol on momentum, value, and quality factors."""
-        scored: list[dict] = []
+        scored: list[ScoreEntry] = []
         for symbol in symbols:
             sym_data = indicators_df.filter(pl.col("symbol") == symbol).sort("date")
             if len(sym_data) < momentum_lookback:
                 continue
-            row = sym_data.tail(1).row(0, named=True)
-            close = row["close"]
+            row = cast(RowDict, sym_data.tail(1).row(0, named=True))
+            close_obj = row.get("close")
+            if not isinstance(close_obj, (int, float)):
+                continue
+            close = float(close_obj)
             if close <= 0:
                 continue
 
@@ -713,13 +774,15 @@ class MultiFactorStrategy(Strategy):
             if mom is None:
                 continue
 
-            rsi = row.get("rsi_14") if "rsi_14" in sym_data.columns else None
-            if rsi is None:
+            rsi_obj = row.get("rsi_14") if "rsi_14" in sym_data.columns else None
+            if not isinstance(rsi_obj, (int, float)):
                 continue
+            rsi = float(rsi_obj)
             value = 100.0 - rsi
 
-            atr_val = row.get("atr_14") if "atr_14" in sym_data.columns else None
-            if atr_val and atr_val > 0:
+            atr_obj = row.get("atr_14") if "atr_14" in sym_data.columns else None
+            if isinstance(atr_obj, (int, float)) and atr_obj > 0:
+                atr_val = float(atr_obj)
                 vol_proxy = atr_val * math.sqrt(252) / close
                 quality = 1.0 / vol_proxy if vol_proxy > 0 else 0.0
             else:
@@ -742,31 +805,59 @@ class MultiFactorStrategy(Strategy):
 
     def _normalize_and_rank(
         self,
-        scored: list[dict],
+        scored: list[ScoreEntry],
         mom_w: float,
         val_w: float,
         qual_w: float,
-    ) -> list[dict]:
+    ) -> list[ScoreEntry]:
         """Z-score normalize factors and compute composite score."""
         if len(scored) < 2:
             return scored
 
         for factor in ("momentum", "value", "quality"):
-            vals = [s[factor] for s in scored]
+            vals = [
+                float(factor_value)
+                for s in scored
+                for factor_value in [s.get(factor)]
+                if isinstance(factor_value, (int, float))
+            ]
+            if len(vals) != len(scored):
+                continue
             mean = sum(vals) / len(vals)
             std = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
             for s in scored:
+                factor_value = s.get(factor)
+                numeric_factor = (
+                    float(factor_value)
+                    if isinstance(factor_value, (int, float))
+                    else 0.0
+                )
                 if std > 0:
-                    s[f"{factor}_z"] = (s[factor] - mean) / std
+                    s[f"{factor}_z"] = (numeric_factor - mean) / std
                 else:
                     s[f"{factor}_z"] = 0.0
 
         for s in scored:
-            s["composite"] = (
-                mom_w * s["momentum_z"] + val_w * s["value_z"] + qual_w * s["quality_z"]
+            momentum_z_obj = s.get("momentum_z", 0.0)
+            value_z_obj = s.get("value_z", 0.0)
+            quality_z_obj = s.get("quality_z", 0.0)
+            momentum_z = (
+                float(momentum_z_obj) if isinstance(momentum_z_obj, (int, float)) else 0.0
             )
+            value_z = float(value_z_obj) if isinstance(value_z_obj, (int, float)) else 0.0
+            quality_z = (
+                float(quality_z_obj) if isinstance(quality_z_obj, (int, float)) else 0.0
+            )
+            s["composite"] = mom_w * momentum_z + val_w * value_z + qual_w * quality_z
 
-        scored.sort(key=lambda x: x["composite"], reverse=True)
+        scored.sort(
+            key=lambda x: (
+                float(composite)
+                if isinstance((composite := x.get("composite", 0.0)), (int, float))
+                else 0.0
+            ),
+            reverse=True,
+        )
         return scored
 
     def generate_signals(
@@ -805,14 +896,24 @@ class MultiFactorStrategy(Strategy):
         scored = self._normalize_and_rank(scored, mom_w, val_w, qual_w)
 
         # Filter: composite > 0 AND above SMA trend filter
-        eligible = [s for s in scored if s["composite"] > 0 and s["above_sma"]]
-        top_symbols = {s["symbol"] for s in eligible[:top_n]}
-        all_scored_symbols = {s["symbol"] for s in scored}
+        eligible = [
+            s
+            for s in scored
+            if isinstance(s.get("composite"), (int, float))
+            and float(cast(int | float, s.get("composite"))) > 0
+            and bool(s.get("above_sma", False))
+        ]
+        top_symbols = {
+            str(s["symbol"]) for s in eligible[:top_n] if isinstance(s.get("symbol"), str)
+        }
+        all_scored_symbols = {
+            str(s["symbol"]) for s in scored if isinstance(s.get("symbol"), str)
+        }
 
         # Generate buy signals for top-N
         new_positions = 0
         for entry in eligible[:top_n]:
-            symbol = entry["symbol"]
+            symbol = str(entry["symbol"])
             if symbol in portfolio.positions:
                 continue
             if len(portfolio.positions) + new_positions >= self.config.max_positions:
@@ -824,9 +925,12 @@ class MultiFactorStrategy(Strategy):
             base_weight = self.config.target_position_weight
             if regime == "risk_off":
                 base_weight *= 0.5
-            weight = _vol_target_weight(entry["sym_data"], base_weight, target_vol)
+            sym_data = entry.get("sym_data")
+            if not isinstance(sym_data, pl.DataFrame):
+                continue
+            weight = _vol_target_weight(sym_data, base_weight, target_vol)
             stop_loss = _get_atr_stop(
-                entry["sym_data"], close, stop_mult, self.config.stop_loss_pct
+                sym_data, close, stop_mult, self.config.stop_loss_pct
             )
 
             signals.append(
@@ -938,7 +1042,7 @@ class CorrelationRegimeStrategy(Strategy):
             sy = (sum((y - my) ** 2 for y in ys)) ** 0.5
             if sx == 0 or sy == 0:
                 return 0.0
-            return cov / (sx * sy)
+            return float(cov / (sx * sy))
 
         corr_now = _corr(eq_rets[-corr_window:], hedge_rets[-corr_window:])
 
@@ -1206,9 +1310,15 @@ class CalendarEventStrategy(Strategy):
         prices: dict[str, float],
     ) -> list[TradeSignal]:
         params = self.config.parameters or {}
-        mode: str = str(params.get("mode", "month_end"))
-        pre_days: int = int(params.get("pre_days", 3))
-        tgt_weight: float = float(params.get("target_weight", 0.95))
+        mode = str(params.get("mode", "month_end"))
+        pre_days_obj = params.get("pre_days", 3)
+        target_weight_obj = params.get("target_weight", 0.95)
+        pre_days = int(pre_days_obj) if isinstance(pre_days_obj, (int, float, str)) else 3
+        tgt_weight = (
+            float(target_weight_obj)
+            if isinstance(target_weight_obj, (int, float, str))
+            else 0.95
+        )
 
         if mode == "pre_fomc":
             symbol = str(params.get("target_symbol", "TLT"))
@@ -1509,7 +1619,7 @@ class LeadLagStrategy(Strategy):
         end_price = prices_list[end_idx - 1]
         if start_price <= 0:
             return None
-        return end_price / start_price - 1.0
+        return float(end_price / start_price - 1.0)
 
     def generate_signals(
         self,
@@ -1524,7 +1634,13 @@ class LeadLagStrategy(Strategy):
         lag_days: int = int(params.get("lag_days", 2))
         sig_window: int = int(params.get("signal_window", 3))
         exit_thresh: float = float(params.get("exit_threshold", -0.005))
-        inverse: bool = bool(params.get("inverse", False))
+        inverse_raw = params.get("inverse", False)
+        if isinstance(inverse_raw, bool):
+            inverse = inverse_raw
+        elif isinstance(inverse_raw, str):
+            inverse = inverse_raw.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            inverse = bool(inverse_raw)
 
         entry_thresh = params.get("entry_threshold")
         entry_thresh_lower = float(
@@ -1537,17 +1653,35 @@ class LeadLagStrategy(Strategy):
         if entry_thresh_upper is not None:
             entry_thresh_upper = float(entry_thresh_upper)
 
-        target_weight = params.get("target_weight", 0.90)
-        target_weight_lower = float(params.get("target_weight_lower", target_weight))
-        target_weight_upper = float(
-            params.get(
-                "target_weight_upper",
-                target_weight if entry_thresh_upper is not None else target_weight_lower,
-            )
+        target_weight_raw = params.get("target_weight", 0.90)
+        target_weight_base = (
+            float(target_weight_raw)
+            if isinstance(target_weight_raw, (int, float, str))
+            else 0.90
+        )
+        target_weight_lower_raw = params.get("target_weight_lower", target_weight_base)
+        target_weight_lower = (
+            float(target_weight_lower_raw)
+            if isinstance(target_weight_lower_raw, (int, float, str))
+            else target_weight_base
+        )
+        target_weight_upper_raw = params.get(
+            "target_weight_upper",
+            target_weight_base if entry_thresh_upper is not None else target_weight_lower,
+        )
+        target_weight_upper = (
+            float(target_weight_upper_raw)
+            if isinstance(target_weight_upper_raw, (int, float, str))
+            else target_weight_lower
         )
 
         confirmation_window = params.get("confirmation_window")
-        confirmation_threshold = float(params.get("confirmation_threshold", 0.0))
+        confirmation_threshold_raw = params.get("confirmation_threshold", 0.0)
+        confirmation_threshold = (
+            float(confirmation_threshold_raw)
+            if isinstance(confirmation_threshold_raw, (int, float, str))
+            else 0.0
+        )
         max_holding_days = params.get("max_holding_days")
         cooldown_days_after_exit = int(params.get("cooldown_days_after_exit", 0))
 
@@ -1599,8 +1733,6 @@ class LeadLagStrategy(Strategy):
         cooldown_remaining = (
             self._extract_position_exit_cooldown(position) if has_pos else 0
         )
-        if not has_pos and cooldown_days_after_exit > 0:
-            cooldown_remaining = cooldown_days_after_exit
 
         confirmation_pass = (
             True
@@ -1788,8 +1920,8 @@ class AssetRotationStrategy(Strategy):
         # Enter new top-K positions
         weight_per = tgt_weight / max(len(target_set), 1)
         for sym in target_set - current_set:
-            p = prices.get(sym, 0)
-            if p <= 0:
+            entry_price = prices.get(sym, 0.0)
+            if entry_price <= 0:
                 continue
             signals.append(
                 TradeSignal(
@@ -1797,7 +1929,7 @@ class AssetRotationStrategy(Strategy):
                     action=Action.BUY,
                     conviction=Conviction.MEDIUM,
                     target_weight=weight_per,
-                    stop_loss=p * 0.93,
+                    stop_loss=entry_price * 0.93,
                     reasoning=f"Rotation: {sym} entered top-{top_k} by {rank_by}",
                 )
             )
@@ -2280,8 +2412,20 @@ class OHLCVMomentumStrategy(Strategy):
             vol = row.get("volume")
             vsma = row.get("vol_sma_20")
             close = row.get("close")
-            if all(v is not None for v in [h20, atr, vol, vsma, close]) and vsma > 0:
-                in_signal = close > h20 + atr_mult * atr and vol > vol_multiplier * vsma
+            if (
+                isinstance(h20, (int, float))
+                and isinstance(atr, (int, float))
+                and isinstance(vol, (int, float))
+                and isinstance(vsma, (int, float))
+                and isinstance(close, (int, float))
+                and vsma > 0
+            ):
+                h20_f = float(h20)
+                atr_f = float(atr)
+                vol_f = float(vol)
+                vsma_f = float(vsma)
+                close_f = float(close)
+                in_signal = close_f > h20_f + atr_mult * atr_f and vol_f > vol_multiplier * vsma_f
 
         if in_signal and not has_pos:
             logger.info("OHLCVMomentum[%s]: ENTER %s on %s", mode, symbol, as_of_date)
@@ -2365,7 +2509,11 @@ class OvernightMomentumStrategy(Strategy):
         n = len(closes)
 
         overnight_rets = [
-            opens[i] / closes[i - 1] - 1 for i in range(1, n) if closes[i - 1] > 0
+            float(opens[i]) / float(closes[i - 1]) - 1.0
+            for i in range(1, n)
+            if isinstance(opens[i], (int, float))
+            and isinstance(closes[i - 1], (int, float))
+            and float(closes[i - 1]) > 0
         ]
         if len(overnight_rets) < window:
             return []
@@ -2433,10 +2581,12 @@ class SpyRegimeStarterStrategy(Strategy):
         weight = getattr(position, "weight", None)
         if weight is None and isinstance(position, dict):
             weight = position.get("weight")
-        try:
-            return float(weight)
-        except (TypeError, ValueError):
-            return 0.0
+        if isinstance(weight, (int, float, str)):
+            try:
+                return float(weight)
+            except ValueError:
+                return 0.0
+        return 0.0
 
     @staticmethod
     def _position_entry_price(position: object) -> float | None:
@@ -2445,12 +2595,14 @@ class SpyRegimeStarterStrategy(Strategy):
             entry_price = getattr(position, "avg_cost", None)
         if entry_price is None and isinstance(position, dict):
             entry_price = position.get("entry_price", position.get("avg_cost"))
-        try:
-            if entry_price is None:
-                return None
-            return float(entry_price)
-        except (TypeError, ValueError):
+        if entry_price is None:
             return None
+        if isinstance(entry_price, (int, float, str)):
+            try:
+                return float(entry_price)
+            except ValueError:
+                return None
+        return None
 
     @staticmethod
     def _position_metadata(position: object) -> dict[str, object]:
@@ -2476,21 +2628,25 @@ class SpyRegimeStarterStrategy(Strategy):
 
     @staticmethod
     def _extract_float(value: object) -> float | None:
-        try:
-            if value is None:
-                return None
-            return float(value)
-        except (TypeError, ValueError):
+        if value is None:
             return None
+        if isinstance(value, (int, float, str)):
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        return None
 
     @staticmethod
     def _extract_int(value: object) -> int:
-        try:
-            if value is None:
-                return 0
-            return int(value)
-        except (TypeError, ValueError):
+        if value is None:
             return 0
+        if isinstance(value, (int, float, str)):
+            try:
+                return int(value)
+            except ValueError:
+                return 0
+        return 0
 
     @staticmethod
     def _extract_date(value: object) -> date | None:
@@ -2603,10 +2759,10 @@ class SpyRegimeStarterStrategy(Strategy):
                 or rsi_14 < rsi_exit_threshold
                 or macd < macd_exit_max
             ):
-                cooldown_until = as_of_date.fromordinal(
+                exit_cooldown_until: date = as_of_date.fromordinal(
                     as_of_date.toordinal() + cooldown_days_after_exit
                 )
-                state["cooldown_until"] = cooldown_until
+                state["cooldown_until"] = exit_cooldown_until
                 state["adds_completed"] = 0
                 state["entry_atr_14"] = None
                 return [
@@ -2620,7 +2776,7 @@ class SpyRegimeStarterStrategy(Strategy):
                             "SPY regime exit: fixed ATR stop, VIX, RSI, or MACD threshold hit"
                         ),
                         metadata={
-                            "cooldown_until": cooldown_until.isoformat(),
+                            "cooldown_until": exit_cooldown_until.isoformat(),
                             "adds_completed": 0,
                         },
                     )
@@ -2635,7 +2791,7 @@ class SpyRegimeStarterStrategy(Strategy):
             if adds_completed >= max_adds:
                 return []
 
-            if macd > macd_add_min and vix_close < vix_add_max:
+            if vix_close is not None and macd > macd_add_min and vix_close < vix_add_max:
                 state["adds_completed"] = adds_completed + 1
                 stop_anchor = entry_atr_14 if entry_atr_14 is not None else atr_14
                 return [
@@ -2660,8 +2816,8 @@ class SpyRegimeStarterStrategy(Strategy):
 
             return []
 
-        cooldown_until = self._extract_date(state.get("cooldown_until"))
-        if self._cooldown_active(cooldown_until, as_of_date):
+        cooldown_until_value: date | None = self._extract_date(state.get("cooldown_until"))
+        if self._cooldown_active(cooldown_until_value, as_of_date):
             return []
 
         if block_new_risk or vix_close is None:
@@ -2697,6 +2853,290 @@ class SpyRegimeStarterStrategy(Strategy):
         return []
 
 
+class GldBreakoutConfirmedStrategy(Strategy):
+    """Deterministic GLD breakout strategy with metals and duration confirmation."""
+
+    def __init__(self, config: StrategyConfig) -> None:
+        super().__init__(config)
+        self._runtime_state: dict[str, dict[str, object]] = {}
+
+    def _latest_row(
+        self,
+        indicators_df: pl.DataFrame,
+        symbol: str,
+    ) -> dict[str, object] | None:
+        sym_data = indicators_df.filter(pl.col("symbol") == symbol).sort("date")
+        if len(sym_data) == 0:
+            return None
+        return dict(sym_data.tail(1).row(0, named=True))
+
+    @staticmethod
+    def _extract_float(value: object) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float, str)):
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _extract_date(value: object) -> date | None:
+        if isinstance(value, date):
+            return value
+        return None
+
+    @staticmethod
+    def _position_entry_price(position: object) -> float | None:
+        entry_price = getattr(position, "entry_price", None)
+        if entry_price is None:
+            entry_price = getattr(position, "avg_cost", None)
+        if entry_price is None and isinstance(position, dict):
+            entry_price = position.get("entry_price", position.get("avg_cost"))
+        if entry_price is None:
+            return None
+        if isinstance(entry_price, (int, float, str)):
+            try:
+                return float(entry_price)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _position_metadata(position: object) -> dict[str, object]:
+        metadata = getattr(position, "metadata", None)
+        if isinstance(metadata, dict):
+            return dict(metadata)
+        if isinstance(position, dict):
+            raw = position.get("metadata")
+            if isinstance(raw, dict):
+                return dict(raw)
+        return {}
+
+    def _get_state(self, symbol: str) -> dict[str, object]:
+        state = self._runtime_state.get(symbol)
+        if state is None:
+            state = {
+                "entry_atr_14": cast(object, None),
+                "cooldown_until": cast(object, None),
+            }
+            self._runtime_state[symbol] = state
+        return state
+
+    @staticmethod
+    def _cooldown_active(
+        cooldown_until: date | None,
+        as_of_date: date,
+    ) -> bool:
+        return cooldown_until is not None and as_of_date <= cooldown_until
+
+    def _hydrate_position_state(
+        self,
+        symbol: str,
+        position: object,
+        atr_14: float,
+    ) -> dict[str, object]:
+        state = self._get_state(symbol)
+        metadata = self._position_metadata(position)
+        entry_atr = self._extract_float(
+            metadata.get("entry_atr_14", state.get("entry_atr_14"))
+        )
+        state["entry_atr_14"] = atr_14 if entry_atr is None else entry_atr
+        return state
+
+    def _confirmation_close_above_sma_20(
+        self,
+        indicators_df: pl.DataFrame,
+        symbol: str,
+    ) -> bool | None:
+        row = self._latest_row(indicators_df, symbol)
+        if row is None:
+            return None
+        close = self._extract_float(row.get("close"))
+        sma_20 = self._extract_float(row.get("sma_20"))
+        if close is None or sma_20 is None:
+            return None
+        return close > sma_20
+
+    def generate_signals(
+        self,
+        as_of_date: date,
+        indicators_df: pl.DataFrame,
+        portfolio: Portfolio,
+        prices: dict[str, float],
+    ) -> list[TradeSignal]:
+        params = self.config.parameters or {}
+        trade_symbol = str(params.get("trade_symbol", "GLD"))
+        metals_confirm_symbol = str(params.get("metals_confirm_symbol", "SLV"))
+        raw_macro_confirm_symbols = params.get("macro_confirm_symbols", ["TLT", "IEF"])
+        macro_confirm_symbols = [
+            str(symbol) for symbol in raw_macro_confirm_symbols if symbol is not None
+        ]
+        starter_weight = float(params.get("starter_weight", 0.08))
+        breakout_lookback_days = int(params.get("breakout_lookback_days", 20))
+        require_close_above_sma_50_raw = params.get("require_close_above_sma_50", True)
+        if isinstance(require_close_above_sma_50_raw, bool):
+            require_close_above_sma_50 = require_close_above_sma_50_raw
+        elif isinstance(require_close_above_sma_50_raw, str):
+            require_close_above_sma_50 = (
+                require_close_above_sma_50_raw.strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+        else:
+            require_close_above_sma_50 = bool(require_close_above_sma_50_raw)
+        slv_confirmation_mode = str(
+            params.get("slv_confirmation_mode", "close_above_sma_20")
+        )
+        macro_confirmation_mode = str(
+            params.get("macro_confirmation_mode", "any_close_above_sma_20")
+        )
+        rsi_exit_threshold = float(params.get("rsi_exit_threshold", 48.0))
+        macd_exit_max = float(params.get("macd_exit_max", 0.0))
+        atr_stop_multiple = float(params.get("atr_stop_multiple", 1.2))
+        cooldown_days_after_exit = int(params.get("cooldown_days_after_exit", 3))
+        missing_confirmation_policy = str(
+            params.get(
+                "missing_confirmation_policy",
+                "block_new_entries_allow_risk_exits",
+            )
+        )
+
+        trade_row = self._latest_row(indicators_df, trade_symbol)
+        if trade_row is None:
+            return []
+
+        required_columns = ["close", "high_20", "sma_20", "rsi_14", "macd", "atr_14"]
+        if require_close_above_sma_50:
+            required_columns.append("sma_50")
+
+        values: dict[str, float] = {}
+        for column in required_columns:
+            value = self._extract_float(trade_row.get(column))
+            if value is None:
+                return []
+            values[column] = value
+
+        close = values["close"]
+        high_20 = values["high_20"]
+        sma_20 = values["sma_20"]
+        sma_50 = values.get("sma_50")
+        rsi_14 = values["rsi_14"]
+        macd = values["macd"]
+        atr_14 = values["atr_14"]
+
+        state = self._get_state(trade_symbol)
+        position = portfolio.positions.get(trade_symbol)
+        has_position = position is not None
+
+        if has_position:
+            state = self._hydrate_position_state(trade_symbol, position, atr_14)
+            entry_price = self._position_entry_price(position)
+            entry_atr_14 = self._extract_float(state.get("entry_atr_14"))
+            atr_stop_hit = False
+            if entry_price is not None and entry_atr_14 is not None:
+                atr_stop_hit = close < (entry_price - atr_stop_multiple * entry_atr_14)
+
+            breakout_failed = close < sma_20
+            if (
+                breakout_failed
+                or atr_stop_hit
+                or rsi_14 < rsi_exit_threshold
+                or macd < macd_exit_max
+            ):
+                exit_cooldown_until: date = as_of_date.fromordinal(
+                    as_of_date.toordinal() + cooldown_days_after_exit
+                )
+                state["cooldown_until"] = exit_cooldown_until
+                state["entry_atr_14"] = None
+                return [
+                    TradeSignal(
+                        symbol=trade_symbol,
+                        action=Action.CLOSE,
+                        conviction=Conviction.HIGH,
+                        target_weight=0.0,
+                        stop_loss=0.0,
+                        reasoning=(
+                            "GLD breakout exit: breakout failure, fixed ATR stop, RSI, "
+                            "or MACD threshold hit"
+                        ),
+                        metadata={
+                            "cooldown_until": exit_cooldown_until.isoformat(),
+                        },
+                    )
+                ]
+            return []
+
+        cooldown_until_value: date | None = self._extract_date(state.get("cooldown_until"))
+        if self._cooldown_active(cooldown_until_value, as_of_date):
+            return []
+
+        metals_confirmed: bool | None
+        if slv_confirmation_mode == "close_above_sma_20":
+            metals_confirmed = self._confirmation_close_above_sma_20(
+                indicators_df,
+                metals_confirm_symbol,
+            )
+        else:
+            metals_confirmed = None
+
+        macro_results: list[bool | None] = [
+            self._confirmation_close_above_sma_20(indicators_df, symbol)
+            for symbol in macro_confirm_symbols
+        ]
+        macro_confirmed: bool | None
+        if macro_confirmation_mode == "any_close_above_sma_20":
+            available_results = [result for result in macro_results if result is not None]
+            if not available_results:
+                macro_confirmed = None
+            else:
+                macro_confirmed = any(available_results)
+        else:
+            macro_confirmed = None
+
+        block_new_entries = (
+            missing_confirmation_policy == "block_new_entries_allow_risk_exits"
+            and (metals_confirmed is None or macro_confirmed is None)
+        )
+        if block_new_entries:
+            return []
+
+        breakout_confirmed = close > high_20
+        trend_confirmed = (
+            True if (not require_close_above_sma_50 or sma_50 is None) else close > sma_50
+        )
+
+        if (
+            breakout_confirmed
+            and trend_confirmed
+            and metals_confirmed is True
+            and macro_confirmed is True
+        ):
+            state["entry_atr_14"] = atr_14
+            state["cooldown_until"] = None
+            breakout_level = f"{breakout_lookback_days}d_high"
+            return [
+                TradeSignal(
+                    symbol=trade_symbol,
+                    action=Action.BUY,
+                    conviction=Conviction.MEDIUM,
+                    target_weight=starter_weight,
+                    stop_loss=max(close - atr_stop_multiple * atr_14, 0.0),
+                    reasoning=(
+                        "GLD breakout confirmed: close above prior "
+                        f"{breakout_level}, above SMA50, SLV confirmed, and "
+                        "at least one duration proxy confirmed"
+                    ),
+                    metadata={
+                        "entry_atr_14": atr_14,
+                        "signal_timing": "close_signal_next_open_fill",
+                    },
+                )
+            ]
+
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Strategy factory
 # ---------------------------------------------------------------------------
@@ -2720,6 +3160,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "ohlcv_momentum": OHLCVMomentumStrategy,
     "overnight_momentum": OvernightMomentumStrategy,
     "spy_regime_starter": SpyRegimeStarterStrategy,
+    "gld_breakout_confirmed": GldBreakoutConfirmedStrategy,
     "cef_discount": CEFDiscountRegistryStrategy,
     "nlp_signal": NlpSignalStrategy,
 }

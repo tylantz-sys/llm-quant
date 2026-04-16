@@ -1,0 +1,94 @@
+Recommended script path: scripts/run_btc_weekend_equity_event_study.py
+
+Pattern to mimic:
+- Follow scripts/run_hyg_qqq_robustness.py style: executable runner, constants, fetch_ohlcv, deterministic helpers, compact console report.
+- No experiment-registry writes, no strategy engine, no AI logic.
+
+Purpose:
+- Promote tmp/run_btc_weekend_qqq_event_clean.py into a repo-native deterministic event-study runner.
+- Compute BTC weekend events.
+- Map each qualifying event to the next available follower trading session.
+- Measure next-session follower return from entry open to next session close.
+- Report QQQ baseline plus robustness/falsification checks.
+
+Recommended constants:
+- LOOKBACK_DAYS = 5 * 365 + 30
+- LEADER_SYMBOL = "BTC-USD"
+- BASE_FOLLOWER = "QQQ"
+- ALT_FOLLOWERS = ["SPY", "IWM", "EFA"]
+- BASE_THRESHOLD = 0.01
+- BASE_MIN_WEEKEND_DAYS = 2
+- SHUFFLE_SEED = 42
+- COST_BPS_GRID = [0, 5, 10, 20]
+
+Recommended helpers:
+- _annualized_sharpe(returns, periods_per_year=52)
+- _max_drawdown(returns)
+- build_weekend_events(prices_df, threshold, min_weekend_days) -> list[dict]
+- map_events_to_follower_returns(prices_df, follower_symbol, events) -> list[dict]
+- compute_summary_metrics(returns) -> dict
+- deterministic shuffle helper preserving event count exactly
+
+Preferred event logic:
+- Keep temp script logic intact.
+- Detect BTC Sunday -> Monday transition.
+- Gather contiguous Sat/Sun BTC bars immediately preceding Monday.
+- Require weekend slice length >= min_weekend_days.
+- Compute weekend return as last_weekend_close / first_weekend_open - 1.0.
+- Keep event if weekend return >= threshold.
+- For follower: first trading date >= event_date, enter at open, exit at next session close.
+
+Recommended output sections:
+1. Header with leader, base follower, lookback, threshold, min weekend days.
+2. Assumptions:
+   - BTC-USD daily bars
+   - weekend move measured across contiguous Sat/Sun slice
+   - trigger weekend_return >= threshold
+   - follower trade = first session open -> next session close
+   - Sharpe annualized at 52 events/year
+   - fixed round-trip cost bps per event
+   - deterministic shuffled falsification seed
+3. Base QQQ results table:
+   follower, trades, mean, hit_rate, total_return, sharpe, max_dd
+4. Cost sensitivity table:
+   cost_bps, mean_net, sharpe_net, total_return_net
+   with net return = gross return - cost_bps / 10000 per event
+5. Shuffled-signal falsification:
+   actual_sharpe, shuffle_mean_sharpe, shuffle_median_sharpe, actual_minus_shuffle_mean
+6. Alternative follower comparison:
+   rows for QQQ, SPY, IWM, EFA
+7. Gate summary:
+   positive gross Sharpe, profitable at 2x base cost, actual > shuffled baseline, note whether effect is broad vs QQQ-specific
+
+Assumptions to document:
+- Daily bars only; no intraday claims.
+- BTC trades continuously, ETFs only on exchange sessions.
+- One event produces at most one follower trade.
+- No leverage or parameter optimization.
+- Fixed costs are synthetic robustness checks.
+- Exploratory event study only, not production strategy deployment.
+
+Required checks:
+1. Cost sensitivity:
+   - Evaluate 0, 5, 10, 20 bps round-trip.
+   - Highlight whether Sharpe and total return remain positive at 20 bps.
+2. Shuffled-signal falsification:
+   - Reproducible randomization with seed 42.
+   - Preserve event count and calendar sample.
+   - Prefer 100 shuffles with fixed seed stream.
+3. Alternative followers:
+   - Compare QQQ to SPY, IWM, EFA using identical parameters.
+   - Do not optimize per follower.
+
+Recommended minimal perturbations:
+- threshold=0.00
+- threshold=0.02
+- min_weekend_days=1
+- min_weekend_days=3
+
+Scope constraints:
+- No registry writing
+- No DSR/PBO/CPCV unless scope expands
+- No unsupported data sources
+- No brokerage/live trading assumptions
+- No best-follower selection logic

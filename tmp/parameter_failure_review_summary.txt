@@ -1,0 +1,40 @@
+Review of scripts/run_btc_momentum_v2_robustness.py perturbation failures:
+
+Conclusion:
+The perturbation FAIL is mixed evidence, not a clean proof of fatal brittleness. The 8-test basket combines true local sensitivity checks with several changes that materially alter the strategy’s regime definition or exposure. So 4/8 stable likely understates local robustness, but the local failures that remain still matter under the repo’s anti-overfit standard.
+
+Legitimate local robustness checks:
+- lookback_short=15
+- lookback_short=25
+- lookback_medium=40
+- lookback_medium=60
+
+These are proper neighboring-parameter checks around the 20/50 multi-timeframe thesis. They preserve the same economic story and should carry the most weight when judging parameter stability.
+
+Borderline but still defensible:
+- min_tf=2
+
+This keeps the same framework but changes the confirmation rule from one positive timeframe to two. That is not a different strategy class, but it is a meaningful tightening of signal gating, so failure here is more concerning than the extreme SMA tests.
+
+Mostly exposure sizing, not core signal robustness:
+- weight=0.50
+
+This is useful as implementation robustness, but it tests leverage/exposure sensitivity more than signal stability. A fail here would indicate sizing fragility, not necessarily thesis fragility.
+
+Regime/class changes masquerading as perturbations:
+- sma_trend=20
+- sma_trend=200
+
+These are not small perturbations around the selected SMA50 filter. SMA20 is a much faster trend regime; SMA200 is a long-horizon regime filter of a different character, and the script itself explicitly frames SMA50 as a fix versus SMA200 being “too slow for crypto.” Counting both as equal-weight “perturbations” overstates brittleness because they test different strategy variants, not just local robustness.
+
+Audit read on the observed failures:
+- Failures at sma_trend=20 and sma_trend=200 are weak evidence of brittleness. They mainly show the edge is not invariant to switching to substantially different trend filters, which is normal.
+- Failure at min_tf=2 is stronger evidence of genuine sensitivity because it is closer to the chosen operating point and tests whether the entry logic is overly dependent on a permissive one-timeframe trigger.
+- If the local lookback perturbations mostly passed, that argues the core 20/50 momentum idea has at least some neighborhood stability.
+- However, given the playbook’s skepticism about overfit and fragility, dependence on a narrow gating choice still weakens confidence, especially with base Sharpe already below threshold and the strategy run on only a 3-year window.
+
+Bottom line:
+- The current perturbation set is too wide to treat the 50% stability figure as a pure measure of local robustness.
+- This does not justify declaring btc-momentum-v2 dead solely because perturbation gate 5 failed.
+- But it also does not clear the strategy: the honest concern is local dependence on confirmation/gating choices, not the extreme SMA horizon failures.
+- So the perturbation result suggests “possibly salvageable but not convincingly robust yet,” rather than “fatal brittleness proven.”

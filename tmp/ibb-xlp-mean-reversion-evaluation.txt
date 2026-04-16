@@ -1,0 +1,41 @@
+IBB/XLP as Family 2 mean reversion — concise evaluation
+
+Mechanism quality:
+- Weak to medium at best.
+- A Family 2 mean-reversion candidate should have a credible equilibrium anchor in the spread/ratio.
+- IBB vs XLP is mostly biotech beta versus staples defensiveness, which is better described as a risk-on/risk-off style relationship than a naturally anchored relative-value pair.
+- That means any observed reversion may be episodic style rotation, not a persistent structural mean-reversion effect.
+
+Uniqueness vs current portfolio:
+- Some implementation diversity relative to credit->equity lead-lag.
+- But likely still overlaps economically with broad risk appetite / defensive rotation.
+- So it may add less true orthogonality than a cleaner mean-reversion relationship such as GLD/SLV.
+
+Likely fit with Family 2:
+- Formally possible as a ratio mean-reversion hypothesis.
+- Substantively weak under the alpha-hunting framework’s mechanism test.
+- It is harder to explain “why this should work” without leaning on vague historical co-movement or correlation language.
+
+Minimal defensible hypothesis:
+- “Short-horizon extreme dislocations in the IBB/XLP relative-performance ratio partially mean-revert over the next 3–10 trading days because biotech sentiment overshoots while staples act as a slower-moving defensive anchor.”
+- This is the strongest concise framing available, but conviction should remain low to medium because the anchor is behavioral and regime-dependent, not structural.
+
+Data / validation needed:
+1. One default-spec raw scan only, with theory-motivated parameters.
+2. Existence checks: Sharpe, trade count, max drawdown, time-in-market.
+3. Shuffled signal test to ensure any edge is not just drift/regime clustering.
+4. Economic regime split: must work in at least 2 of 3 distinct periods.
+5. Inversion test: opposite signal should lose, not go flat.
+6. ±20% parameter perturbation.
+7. Correlation to current portfolio and marginal portfolio Sharpe contribution.
+8. Comparison against cleaner approved-universe candidates, especially XLE/XLU and GLD/SLV.
+
+Governance / universe fit:
+- Weak.
+- IBB and XLP are outside the small starter ETF universe in the universe expansion plan.
+- Given the repo’s anti-sprawl rule, this pair needs unusually strong mechanism quality to justify inclusion, and it does not currently have that.
+
+Recommendation:
+- No-go for promotion-track research now.
+- At most, allow as a low-priority Hunt-phase exploratory screen.
+- If the objective is to salvage IBB in a repo-consistent way, IBB/XLP is not the strongest framing.
