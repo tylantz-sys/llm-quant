@@ -194,6 +194,10 @@ def required_symbols(specs: list[StrategySpec]) -> list[str]:
                 symbols.update(sym.strip() for sym in raw.split(","))
             elif isinstance(raw, list):
                 symbols.update(str(sym) for sym in raw)
+        # Additional symbol parameter names used by specific strategy classes
+        for key in ("trade_symbol", "vix_symbol", "regime_symbol", "signal_symbol"):
+            if key in params and params[key]:
+                symbols.add(str(params[key]))
     return sorted(sym for sym in symbols if sym)
 
 
