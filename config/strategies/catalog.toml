@@ -23,6 +23,7 @@ candidate_default = [
 # Keep this set intentionally narrow so runtime behavior is easy to interpret.
 candidate_stocks = [
   "soxx-qqq-lead-lag",
+  "spy-regime-starter-v1",
 ]
 
 # Historically promoted or otherwise important slugs that should not remain live

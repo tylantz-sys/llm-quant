@@ -2,6 +2,7 @@
 
 import dataclasses
 import logging
+import os
 import re
 import time
 from datetime import UTC, datetime, time as dt_time, timedelta
@@ -122,6 +123,31 @@ def _get_alpaca_account() -> dict[str, float | str]:
 
     client = AlpacaClient.from_env()
     return client.get_account()
+
+
+def _overlay_auth_present() -> bool:
+    return bool(os.getenv("ANTHROPIC_API_KEY"))
+
+
+def _resolve_signal_source(config: Any) -> tuple[bool, str]:
+    signal_source = str(config.execution.signal_source or "auto").lower()
+    if signal_source == "auto":
+        use_strategy_overlay = bool(config.execution.claude_overlay_only)
+    else:
+        use_strategy_overlay = signal_source == "strategy_overlay"
+    resolved_signal_source = "strategy_overlay" if use_strategy_overlay else "llm"
+    return use_strategy_overlay, resolved_signal_source
+
+
+def _resolve_overlay_auth_required(
+    config: Any,
+    *,
+    use_strategy_overlay: bool,
+    validation_mode: str,
+) -> bool:
+    return bool(config.execution.overlay_auth_required) or (
+        use_strategy_overlay and validation_mode == "paper"
+    )
 
 
 def _sync_live_alpaca_cash(portfolio: Any) -> dict[str, float] | None:
@@ -280,6 +306,7 @@ def _run_single_pod(
     *,
     dry_run: bool = False,
     broker: str = "paper",
+    validation_mode: str = "diagnostic",
 ) -> None:
     """Execute a full trading cycle for a single pod."""
     from llm_quant.brain.context import build_market_context
@@ -381,16 +408,24 @@ def _run_single_pod(
 
     config = _get_config_for_pod(pod_id)
     db_path = _get_db_path(config)
+    resolved_validation_mode = str(validation_mode or "diagnostic").lower()
+    use_strategy_overlay, resolved_signal_source = _resolve_signal_source(config)
     signal_source = str(config.execution.signal_source or "auto").lower()
-    if signal_source == "auto":
-        use_strategy_overlay = bool(config.execution.claude_overlay_only)
-    else:
-        use_strategy_overlay = signal_source == "strategy_overlay"
-    resolved_signal_source = "strategy_overlay" if use_strategy_overlay else "llm"
     strategy_set = str(config.execution.strategy_set or "promoted_default")
+    overlay_auth_required = _resolve_overlay_auth_required(
+        config,
+        use_strategy_overlay=use_strategy_overlay,
+        validation_mode=resolved_validation_mode,
+    )
     asset_class_map = {
         asset.symbol: asset.asset_class for asset in config.universe.assets
     }
+    if use_strategy_overlay and overlay_auth_required and not _overlay_auth_present():
+        console.print(
+            "[red]FAIL[/red] strategy_overlay requires ANTHROPIC_API_KEY for "
+            f"{resolved_validation_mode} validation mode."
+        )
+        raise typer.Exit(1)
     run_lock = None
     global_lock = None
     log_only = False
@@ -928,8 +963,6 @@ def _run_single_pod(
     exit_runtime = build_exit_runtime(broker, config.execution)
     exit_policy_state = dataclasses.asdict(exit_policy)
 
-    alpaca_client: AlpacaClient | None = None
-
     governance_runtime = load_latest_harvest_governance_result(
         conn,
         config=config,
@@ -1427,6 +1460,11 @@ def run(
         "--broker",
         help="Execution broker: paper | alpaca",
     ),
+    validation_mode: str = typer.Option(
+        "diagnostic",
+        "--validation-mode",
+        help="Validation mode: diagnostic | paper",
+    ),
 ):
     """Full cycle: fetch -> indicators -> Claude -> trade -> log."""
     _setup_logging()
@@ -1457,10 +1495,20 @@ def run(
 
         for (pid,) in rows:
             console.rule(f"[bold]Pod: {pid}")
-            _run_single_pod(pid, dry_run=dry_run, broker=broker)
+            _run_single_pod(
+                pid,
+                dry_run=dry_run,
+                broker=broker,
+                validation_mode=validation_mode,
+            )
         return
 
-    _run_single_pod(pod, dry_run=dry_run, broker=broker)
+    _run_single_pod(
+        pod,
+        dry_run=dry_run,
+        broker=broker,
+        validation_mode=validation_mode,
+    )
 
 
 @app.command()
@@ -1648,7 +1696,7 @@ def eod_flat(
     )
 
 
-def _display_decision(decision):
+def _display_decision(decision: Any) -> None:
     """Pretty-print a TradingDecision."""
 
     regime_colors = {"risk_on": "green", "risk_off": "red", "transition": "yellow"}

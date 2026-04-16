@@ -1,0 +1,12 @@
+[Unit]
+Description=Run llm-quant stock bounded paper on weekday market sessions
+
+[Timer]
+# User-systemd follows the user manager's local timezone. On this host,
+# 08:35 America/Chicago is 5 minutes after the regular U.S. equity session open.
+OnCalendar=Mon..Fri *-*-* 08:35:00
+Persistent=true
+Unit=llm-quant-stock-bounded-paper.service
+
+[Install]
+WantedBy=timers.target

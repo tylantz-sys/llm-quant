@@ -1,0 +1,44 @@
+Inspected source: data/strategies/xli-regime-starter-v1/data-contract.yaml
+
+Fields:
+- symbols:
+  - tradeable[]
+  - reference[]
+- date_range:
+  - start
+  - end
+  - rationale
+- frequency
+- required_fields[]
+- quality_grade
+- known_issues[]
+- data_source:
+  - provider
+  - method
+  - update_frequency
+  - reliability
+- freshness_requirement:
+  - max_staleness
+  - alert_threshold
+  - halt_threshold
+- benchmark_data:
+  - symbols
+  - return_type
+  - rebalance_frequency
+
+Narrative style:
+Operational, data-quality-aware, explicit about revisions and daily-bar limitations.
+
+Carry forward unchanged to v2:
+- schema
+- XLI / VIX symbol roles if unchanged
+- date range and rationale
+- daily frequency
+- required OHLCV fields
+- known issues
+- Yahoo Finance source and fetch method
+- freshness requirements
+- benchmark data block
+
+Change for v2:
+- likely only slug-adjacent references elsewhere; this file itself can remain materially unchanged if universe and provider stay the same

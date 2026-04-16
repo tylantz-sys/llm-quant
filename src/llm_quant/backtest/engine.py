@@ -173,8 +173,19 @@ class CostModel:
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> CostModel:
-        """Create a CostModel from research-spec cost_model section."""
-        cm = spec.get("cost_model", {})
+        """Create a CostModel from research-spec cost model configuration.
+
+        Resolution order:
+        1. execution.cost_model
+        2. legacy top-level cost_model
+        3. built-in defaults
+        """
+        execution = spec.get("execution", {}) or {}
+        cm = execution.get("cost_model")
+        if cm is None:
+            cm = spec.get("cost_model", {})
+        cm = cm or {}
+
         return cls(
             spread_bps=cm.get("spread_bps", 5.0),
             slippage_volatility_factor=cm.get("slippage_volatility_factor", 0.5),
@@ -577,7 +588,9 @@ class BacktestEngine:
             yaml.dump(self.strategy.config.to_dict(), sort_keys=True)
         )
 
-        synthetic_exit_trade_count = sum(1 for trade in trades if trade.is_synthetic_exit)
+        synthetic_exit_trade_count = sum(
+            1 for trade in trades if trade.is_synthetic_exit
+        )
         executed_trade_count = len(trades)
         smoke_audit = self._build_smoke_audit(
             trading_dates=trading_dates,
@@ -1263,7 +1276,7 @@ class BacktestEngine:
                     & (pl.col("date") <= last_trade_date)
                 )
                 .select("date")
-                    .to_series()
+                .to_series()
                 .to_list()
             )
             coverage = len(sym_dates) / total_dates

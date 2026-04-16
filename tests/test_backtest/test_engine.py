@@ -261,6 +261,38 @@ class TestCostModel:
         cost_2x = cm.compute_cost(10_000.0, 100, multiplier=2.0)
         assert abs(cost_2x - 2 * cost_1x) < 0.01
 
+    def test_from_spec_reads_execution_cost_model(self):
+        spec = {
+            "execution": {
+                "cost_model": {
+                    "spread_bps": 7.5,
+                    "flat_slippage_bps": 3.25,
+                    "slippage_volatility_factor": 0.6,
+                }
+            }
+        }
+
+        cm = CostModel.from_spec(spec)
+
+        assert cm.spread_bps == 7.5
+        assert cm.flat_slippage_bps == 3.25
+        assert cm.slippage_volatility_factor == 0.6
+
+    def test_from_spec_falls_back_to_top_level_cost_model(self):
+        spec = {
+            "cost_model": {
+                "spread_bps": 4.0,
+                "flat_slippage_bps": 1.5,
+                "slippage_volatility_factor": 0.2,
+            }
+        }
+
+        cm = CostModel.from_spec(spec)
+
+        assert cm.spread_bps == 4.0
+        assert cm.flat_slippage_bps == 1.5
+        assert cm.slippage_volatility_factor == 0.2
+
     def test_cost_reduces_nav(self):
         prices = _make_prices(["SPY"], n_days=400, trend=0.0)
         indicators = compute_indicators(prices)

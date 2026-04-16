@@ -4,6 +4,7 @@ initial_capital = 1000.0
 [execution]
 signal_source = "strategy_overlay"
 strategy_set = "candidate_stocks"
+overlay_auth_required = true
 overlay_governor_strict = true
 overlay_max_upscale = 1.0
 overlay_max_downscale = 0.0
@@ -24,15 +25,15 @@ sleeve = "default"
 enabled = false
 
 [risk]
-max_position_weight = 0.02
-max_trade_size = 0.01
-max_positions = 1
-max_trades_per_session = 1
-min_cash_reserve = 0.95
+max_position_weight = 0.10
+max_trade_size = 0.05
+max_positions = 2
+max_trades_per_session = 2
+min_cash_reserve = 0.75
 require_stop_loss = true
 default_stop_loss_pct = 0.03
 partial_take_profit_enabled = true
-partial_take_profit_pct = 0.01
+partial_take_profit_pct = 0.015
 partial_take_profit_size = 0.50
 remainder_take_profit_mult = 1.5
 trailing_stop_enabled = true

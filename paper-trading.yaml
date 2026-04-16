@@ -1,0 +1,62 @@
+Inspected source: data/strategies/xli-regime-starter-v1/paper-trading.yaml
+
+Fields:
+- strategy_slug
+- status
+- intent
+- broker
+- start_date
+- days_active
+- total_trades
+- performance:
+  - paper_sharpe
+  - cumulative_return
+  - max_drawdown
+  - win_rate
+  - profit_factor
+- trades[]
+- incidents[]
+- slippage_drift_bps
+- research_to_paper_parity:
+  - spec_hash
+  - close_based_signals
+  - next_open_execution_required
+  - required_signal_fields[]
+- runtime_path:
+  - pod
+  - broker
+  - command
+  - strategy_set
+  - signal_source
+  - asset_class_filter
+- promotion_gate:
+  - minimum_days
+  - minimum_trades
+  - minimum_paper_sharpe
+  - require_all_operations_tested
+- operations_tested:
+  - strategy_catalog_wiring
+  - alpaca_client_path
+  - signal_generation
+  - decision_logging
+  - order_submission
+  - broker_reconciliation
+  - portfolio_snapshot_persistence
+  - hash_chain_integrity
+- notes[]
+
+Narrative style:
+Conservative, shadow-only, operationally explicit, parity-focused.
+
+Carry forward unchanged to v2:
+- schema
+- shadow-paper intent
+- parity requirements
+- runtime path structure
+- promotion gate structure
+- conservative notes style
+
+Change for v2:
+- strategy_slug
+- spec hash once successor spec is frozen
+- any successor-specific note text only if needed

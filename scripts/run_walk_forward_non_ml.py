@@ -89,14 +89,30 @@ def _build_provenance(
 
 def _resolve_symbols(spec: dict[str, Any]) -> list[str]:
     params = spec.get("parameters", {}) or {}
-    configured = spec.get("backtest_spec", {}).get("symbols", [])
-    if isinstance(configured, list) and configured:
-        return [str(s) for s in configured]
+    backtest_spec = spec.get("backtest_spec", {}) or {}
+
     symbols: list[str] = []
-    for key in ("symbol", "leader_symbol", "follower_symbol", "symbol_a", "symbol_b"):
+    configured = backtest_spec.get("symbols", [])
+    if isinstance(configured, list):
+        symbols.extend(str(s) for s in configured)
+
+    signal_symbols = backtest_spec.get("signal_symbols", [])
+    if isinstance(signal_symbols, list):
+        symbols.extend(str(s) for s in signal_symbols)
+
+    for key in (
+        "symbol",
+        "trade_symbol",
+        "vix_symbol",
+        "leader_symbol",
+        "follower_symbol",
+        "symbol_a",
+        "symbol_b",
+    ):
         value = params.get(key)
         if value:
             symbols.append(str(value))
+
     raw_symbols = params.get("symbols")
     if isinstance(raw_symbols, list):
         symbols.extend(str(s) for s in raw_symbols)

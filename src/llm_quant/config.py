@@ -61,6 +61,7 @@ class ExecutionConfig(BaseModel):
 
     signal_source: str = "auto"  # auto | llm | strategy_overlay
     strategy_set: str = "promoted_default"
+    overlay_auth_required: bool = False
     overlay_governor_strict: bool = True
     overlay_max_upscale: float = 1.25
     overlay_max_downscale: float = 0.0

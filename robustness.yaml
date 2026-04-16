@@ -1,0 +1,63 @@
+Inspected source: data/strategies/xli-regime-starter-v1/robustness.yaml
+
+Fields:
+- strategy_slug
+- created_at
+- runner
+- runner_identity:
+  - script
+  - pid
+  - hostname
+  - python_executable
+- frozen_spec_hash
+- provenance:
+  - created_at
+  - strategy_slug
+  - strategy_name
+  - spec_frozen
+  - spec_frozen_at
+  - frozen_spec_hash
+  - data_dir
+  - symbols[]
+  - lookback_days
+  - artifact_dir
+- matrix_reference
+- promotion_checklist_reference
+- lane_summaries:
+  - baseline_reproducibility
+  - window_variation
+  - boundary_shift
+  - cost_stress
+  - parameter_perturbation
+  each with:
+    - status
+    - case_count
+    - passed_cases
+    - failed_cases
+    - cases[]
+- parameter_stability:
+  - stable_fraction
+  - threshold
+  - result
+- two_x_cost_survival:
+  - case_id
+  - passed
+- overall_result
+- overall_passed
+- case_count
+- cases[]
+- promotion_notes[]
+
+Narrative style:
+Template-like governed validation artifact with null/pending placeholders and explicit references to governance docs.
+
+Carry forward unchanged to v2:
+- schema
+- governance doc references
+- lane names and threshold style
+- placeholder/null style before runs
+- promotion-notes style
+
+Change for v2:
+- strategy_slug and artifact_dir references
+- eventual frozen hash and populated run results

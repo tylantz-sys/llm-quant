@@ -1,0 +1,10 @@
+[Unit]
+Description=llm-quant stock bounded paper run
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ty/Documents/llm-quant/llm-quant
+EnvironmentFile=/home/ty/Documents/llm-quant/llm-quant/.env
+ExecStart=/home/ty/Documents/llm-quant/llm-quant/.venv/bin/python /home/ty/Documents/llm-quant/llm-quant/scripts/systemd/run_stock_bounded_paper_if_trading_day.py

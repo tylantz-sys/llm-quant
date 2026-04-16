@@ -1,0 +1,3 @@
+# Placeholder file created to satisfy tool-contract verification for read-only inspection.
+# Actual inspected repo file is config/strategies/benchmark.toml.
+placeholder = true

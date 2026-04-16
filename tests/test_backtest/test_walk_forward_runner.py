@@ -3,6 +3,8 @@ import importlib.util
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
+
 
 def _load_module():
     repo_root = Path(__file__).resolve().parents[2]
@@ -36,6 +38,43 @@ def test_build_windows_is_deterministic():
     assert windows[1]["train_start"] == trading_dates[3 * 21]
     expected_last_idx = (2 * (3 * 21)) + (24 * 21) + 5 + (3 * 21) - 1
     assert windows[2]["test_end"] == trading_dates[expected_last_idx]
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        (
+            {
+                "backtest_spec": {
+                    "symbols": ["SPY"],
+                    "signal_symbols": ["VIX"],
+                },
+                "parameters": {
+                    "trade_symbol": "SPY",
+                    "vix_symbol": "VIX",
+                },
+            },
+            ["SPY", "VIX"],
+        ),
+        (
+            {
+                "parameters": {
+                    "symbol": "SPY",
+                    "leader_symbol": "QQQ",
+                    "follower_symbol": "IWM",
+                    "symbol_a": "XLF",
+                    "symbol_b": "XLK",
+                    "symbols": ["SMH", "SPY"],
+                }
+            },
+            ["IWM", "QQQ", "SMH", "SPY", "XLF", "XLK"],
+        ),
+    ],
+)
+def test_resolve_symbols_includes_signal_only_and_supported_parameter_keys(spec, expected):
+    mod = _load_module()
+
+    assert mod._resolve_symbols(spec) == expected
 
 
 def test_backtest_spec_years_override_cli_years():

@@ -2410,6 +2410,293 @@ class OvernightMomentumStrategy(Strategy):
         return []
 
 
+class SpyRegimeStarterStrategy(Strategy):
+    """Deterministic SPY starter strategy using SPY indicators plus VIX regime checks."""
+
+    def __init__(self, config: StrategyConfig) -> None:
+        super().__init__(config)
+        self._runtime_state: dict[str, dict[str, object]] = {}
+
+    def _latest_row(
+        self,
+        indicators_df: pl.DataFrame,
+        symbol: str,
+    ) -> dict[str, object] | None:
+        sym_data = indicators_df.filter(pl.col("symbol") == symbol).sort("date")
+        if len(sym_data) == 0:
+            return None
+        row = sym_data.tail(1).row(0, named=True)
+        return dict(row)
+
+    @staticmethod
+    def _position_weight(position: object) -> float:
+        weight = getattr(position, "weight", None)
+        if weight is None and isinstance(position, dict):
+            weight = position.get("weight")
+        try:
+            return float(weight)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _position_entry_price(position: object) -> float | None:
+        entry_price = getattr(position, "entry_price", None)
+        if entry_price is None:
+            entry_price = getattr(position, "avg_cost", None)
+        if entry_price is None and isinstance(position, dict):
+            entry_price = position.get("entry_price", position.get("avg_cost"))
+        try:
+            if entry_price is None:
+                return None
+            return float(entry_price)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _position_metadata(position: object) -> dict[str, object]:
+        metadata = getattr(position, "metadata", None)
+        if isinstance(metadata, dict):
+            return dict(metadata)
+        if isinstance(position, dict):
+            raw = position.get("metadata")
+            if isinstance(raw, dict):
+                return dict(raw)
+        return {}
+
+    def _get_state(self, symbol: str) -> dict[str, object]:
+        state = self._runtime_state.get(symbol)
+        if state is None:
+            state = {
+                "entry_atr_14": None,
+                "adds_completed": 0,
+                "cooldown_until": None,
+            }
+            self._runtime_state[symbol] = state
+        return state
+
+    @staticmethod
+    def _extract_float(value: object) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _extract_int(value: object) -> int:
+        try:
+            if value is None:
+                return 0
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _extract_date(value: object) -> date | None:
+        if isinstance(value, date):
+            return value
+        return None
+
+    def _vix_value(self, indicators_df: pl.DataFrame, vix_symbol: str) -> float | None:
+        vix_row = self._latest_row(indicators_df, vix_symbol)
+        if vix_row is None:
+            return None
+        return self._extract_float(vix_row.get("close"))
+
+    def _hydrate_position_state(
+        self,
+        symbol: str,
+        position: object,
+        atr_14: float,
+    ) -> dict[str, object]:
+        state = self._get_state(symbol)
+        metadata = self._position_metadata(position)
+
+        entry_atr = self._extract_float(
+            metadata.get("entry_atr_14", state.get("entry_atr_14"))
+        )
+        state["entry_atr_14"] = atr_14 if entry_atr is None else entry_atr
+
+        adds_completed = self._extract_int(
+            metadata.get("adds_completed", state.get("adds_completed", 0))
+        )
+        state["adds_completed"] = adds_completed
+        return state
+
+    @staticmethod
+    def _cooldown_active(
+        cooldown_until: date | None,
+        as_of_date: date,
+    ) -> bool:
+        return cooldown_until is not None and as_of_date <= cooldown_until
+
+    def generate_signals(
+        self,
+        as_of_date: date,
+        indicators_df: pl.DataFrame,
+        portfolio: Portfolio,
+        prices: dict[str, float],
+    ) -> list[TradeSignal]:
+        params = self.config.parameters or {}
+        trade_symbol = str(params.get("trade_symbol", "SPY"))
+        vix_symbol = str(params.get("vix_symbol", "VIX"))
+        starter_weight = float(params.get("starter_weight", 0.02))
+        max_weight = float(params.get("max_weight", 0.05))
+        rsi_entry_threshold = float(params.get("rsi_entry_threshold", 55.0))
+        rsi_exit_threshold = float(params.get("rsi_exit_threshold", 40.0))
+        vix_entry_max = float(params.get("vix_entry_max", 19.2))
+        vix_add_max = float(params.get("vix_add_max", 16.4))
+        vix_exit_min = float(params.get("vix_exit_min", 25.0))
+        macd_add_min = float(params.get("macd_add_min", 0.0))
+        macd_exit_max = float(params.get("macd_exit_max", -0.20))
+        atr_stop_multiple = float(params.get("atr_stop_multiple", 1.75))
+        max_adds = int(params.get("max_adds", 1))
+        cooldown_days_after_exit = int(params.get("cooldown_days_after_exit", 2))
+        missing_vix_policy = str(
+            params.get("missing_vix_policy", "block_new_entries_allow_risk_exits")
+        )
+
+        spy_row = self._latest_row(indicators_df, trade_symbol)
+        if spy_row is None:
+            return []
+
+        required_columns = ["close", "sma_20", "sma_50", "rsi_14", "macd", "atr_14"]
+        values: dict[str, float] = {}
+        for column in required_columns:
+            value = self._extract_float(spy_row.get(column))
+            if value is None:
+                return []
+            values[column] = value
+
+        close = values["close"]
+        sma_20 = values["sma_20"]
+        sma_50 = values["sma_50"]
+        rsi_14 = values["rsi_14"]
+        macd = values["macd"]
+        atr_14 = values["atr_14"]
+
+        state = self._get_state(trade_symbol)
+        position = portfolio.positions.get(trade_symbol)
+        has_position = position is not None
+        current_weight = self._position_weight(position) if has_position else 0.0
+
+        vix_close = self._vix_value(indicators_df, vix_symbol)
+        vix_available = vix_close is not None
+        block_new_risk = (
+            not vix_available
+            and missing_vix_policy == "block_new_entries_allow_risk_exits"
+        )
+
+        if has_position:
+            state = self._hydrate_position_state(trade_symbol, position, atr_14)
+            entry_price = self._position_entry_price(position)
+            entry_atr_14 = self._extract_float(state.get("entry_atr_14"))
+            adds_completed = self._extract_int(state.get("adds_completed"))
+            atr_stop_hit = False
+            if entry_price is not None and entry_atr_14 is not None:
+                atr_stop_hit = close < (entry_price - atr_stop_multiple * entry_atr_14)
+
+            if (
+                atr_stop_hit
+                or (vix_close is not None and vix_close > vix_exit_min)
+                or rsi_14 < rsi_exit_threshold
+                or macd < macd_exit_max
+            ):
+                cooldown_until = as_of_date.fromordinal(
+                    as_of_date.toordinal() + cooldown_days_after_exit
+                )
+                state["cooldown_until"] = cooldown_until
+                state["adds_completed"] = 0
+                state["entry_atr_14"] = None
+                return [
+                    TradeSignal(
+                        symbol=trade_symbol,
+                        action=Action.CLOSE,
+                        conviction=Conviction.HIGH,
+                        target_weight=0.0,
+                        stop_loss=0.0,
+                        reasoning=(
+                            "SPY regime exit: fixed ATR stop, VIX, RSI, or MACD threshold hit"
+                        ),
+                        metadata={
+                            "cooldown_until": cooldown_until.isoformat(),
+                            "adds_completed": 0,
+                        },
+                    )
+                ]
+
+            if block_new_risk or vix_close is None:
+                return []
+
+            if current_weight >= max_weight:
+                return []
+
+            if adds_completed >= max_adds:
+                return []
+
+            if macd > macd_add_min and vix_close < vix_add_max:
+                state["adds_completed"] = adds_completed + 1
+                stop_anchor = entry_atr_14 if entry_atr_14 is not None else atr_14
+                return [
+                    TradeSignal(
+                        symbol=trade_symbol,
+                        action=Action.BUY,
+                        conviction=Conviction.MEDIUM,
+                        target_weight=max_weight,
+                        stop_loss=max(close - atr_stop_multiple * stop_anchor, 0.0),
+                        reasoning=(
+                            "SPY add: existing long below max weight, MACD positive, "
+                            "and VIX favorable"
+                        ),
+                        metadata={
+                            "entry_atr_14": stop_anchor,
+                            "adds_completed": self._extract_int(
+                                state.get("adds_completed")
+                            ),
+                        },
+                    )
+                ]
+
+            return []
+
+        cooldown_until = self._extract_date(state.get("cooldown_until"))
+        if self._cooldown_active(cooldown_until, as_of_date):
+            return []
+
+        if block_new_risk or vix_close is None:
+            return []
+
+        if (
+            close > sma_20
+            and close > sma_50
+            and rsi_14 >= rsi_entry_threshold
+            and vix_close < vix_entry_max
+        ):
+            state["entry_atr_14"] = atr_14
+            state["adds_completed"] = 0
+            state["cooldown_until"] = None
+            return [
+                TradeSignal(
+                    symbol=trade_symbol,
+                    action=Action.BUY,
+                    conviction=Conviction.MEDIUM,
+                    target_weight=starter_weight,
+                    stop_loss=max(close - atr_stop_multiple * atr_14, 0.0),
+                    reasoning=(
+                        "SPY starter: price above SMA20/SMA50, RSI strong, VIX calm"
+                    ),
+                    metadata={
+                        "entry_atr_14": atr_14,
+                        "adds_completed": 0,
+                        "signal_timing": "close_signal_next_open_fill",
+                    },
+                )
+            ]
+
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Strategy factory
 # ---------------------------------------------------------------------------
@@ -2432,6 +2719,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "yield_curve_regime": YieldCurveRegimeStrategy,
     "ohlcv_momentum": OHLCVMomentumStrategy,
     "overnight_momentum": OvernightMomentumStrategy,
+    "spy_regime_starter": SpyRegimeStarterStrategy,
     "cef_discount": CEFDiscountRegistryStrategy,
     "nlp_signal": NlpSignalStrategy,
 }

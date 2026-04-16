@@ -1,0 +1,48 @@
+Inspected source: data/strategies/xli-regime-starter-v1/hypothesis.yaml
+
+Fields:
+- statement
+- expected_outcome:
+  - metric
+  - direction
+  - threshold
+  - comparison_basis
+- measurement_method:
+  - primary_metric
+  - secondary_metrics[]
+  - minimum_sample:
+    - min_backtest_years
+    - min_oos_periods
+    - min_paper_days
+- null_hypothesis
+- falsification_criteria[]
+- timeframe:
+  - backtest_period
+  - evaluation_horizon
+- conviction:
+  - level
+  - rationale
+- economic_rationale
+- risks[]
+
+Narrative style:
+Pre-registered, falsifiable, benchmark-aware, skeptical, implementation-realistic.
+
+Carry forward unchanged to v2:
+- schema
+- measurement structure
+- minimum sample requirements
+- timeframe structure
+- risk/falsification style
+- realistic execution and anti-overfitting tone
+
+What v2 hypothesis language should change:
+- explicitly acknowledge v1 did not demonstrate sufficient edge
+- narrow the claim from broad benchmark outperformance to a mechanism test
+- state that stricter trend/regime confirmation and earlier invalidation exits may improve hit rate relative to v1
+- pre-register tradeoffs: fewer trades, lower participation, possible lower return capture
+- preserve symmetric falsification if hit rate fails to improve or any gain is offset by worse expectancy, Sharpe, or drawdown
+- avoid certainty language such as “will fix”
+
+Suggested wording pattern:
+“The v1 baseline did not demonstrate sufficient edge. Before testing v2, I hypothesize that requiring stricter daily trend and volatility confirmation for XLI entries, combined with earlier exits when momentum or volatility conditions invalidate the trade, can improve hit rate and reduce false-positive exposure relative to v1, while potentially lowering trade frequency and overall participation.”

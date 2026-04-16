@@ -1,0 +1,142 @@
+case_id: B5
+lane: window_variation
+created_at: '2026-04-15T05:03:42+00:00'
+strategy_slug: spy-regime-starter-v1
+symbols:
+- SPY
+- VIX
+policy_inputs:
+  train_days: 504
+  test_days: 84
+  step_days: 84
+  purge_days: 5
+  start_offset: 0
+  warmup_days: 60
+  fill_delay: 1
+  rebalance_frequency_days: 1
+  cost_mode: baseline
+  cost_model:
+    spread_bps: 5.0
+    flat_slippage_bps: 2.0
+    slippage_volatility_factor: 0.1
+  parameter_overrides: {}
+summary:
+  fold_count: 14
+  mean_oos_sharpe: 0.81883
+  median_oos_sharpe: 1.448641
+  max_oos_drawdown: 0.001162
+folds:
+- fold: 1
+  train_start: '2019-04-18'
+  train_end: '2021-04-19'
+  test_start: '2021-04-27'
+  test_end: '2021-08-24'
+  test_days_used: 84
+  oos_sharpe: 2.028301
+  oos_max_drawdown: 0.000167
+- fold: 2
+  train_start: '2019-08-19'
+  train_end: '2021-08-17'
+  test_start: '2021-08-25'
+  test_end: '2021-12-22'
+  test_days_used: 84
+  oos_sharpe: 0.900448
+  oos_max_drawdown: 0.000245
+- fold: 3
+  train_start: '2019-12-17'
+  train_end: '2021-12-15'
+  test_start: '2021-12-23'
+  test_end: '2022-04-25'
+  test_days_used: 84
+  oos_sharpe: -1.41936
+  oos_max_drawdown: 0.000614
+- fold: 4
+  train_start: '2020-04-20'
+  train_end: '2022-04-18'
+  test_start: '2022-04-26'
+  test_end: '2022-08-24'
+  test_days_used: 84
+  oos_sharpe: -1.020513
+  oos_max_drawdown: 0.000311
+- fold: 5
+  train_start: '2020-08-18'
+  train_end: '2022-08-17'
+  test_start: '2022-08-25'
+  test_end: '2022-12-22'
+  test_days_used: 84
+  oos_sharpe: -2.457296
+  oos_max_drawdown: 0.000421
+- fold: 6
+  train_start: '2020-12-16'
+  train_end: '2022-12-15'
+  test_start: '2022-12-23'
+  test_end: '2023-04-26'
+  test_days_used: 84
+  oos_sharpe: -0.87068
+  oos_max_drawdown: 0.000838
+- fold: 7
+  train_start: '2021-04-20'
+  train_end: '2023-04-19'
+  test_start: '2023-04-27'
+  test_end: '2023-08-25'
+  test_days_used: 84
+  oos_sharpe: 1.196776
+  oos_max_drawdown: 0.00051
+- fold: 8
+  train_start: '2021-08-18'
+  train_end: '2023-08-18'
+  test_start: '2023-08-28'
+  test_end: '2023-12-26'
+  test_days_used: 84
+  oos_sharpe: 2.674384
+  oos_max_drawdown: 0.000392
+- fold: 9
+  train_start: '2021-12-16'
+  train_end: '2023-12-18'
+  test_start: '2023-12-27'
+  test_end: '2024-04-26'
+  test_days_used: 84
+  oos_sharpe: 1.700507
+  oos_max_drawdown: 0.00028
+- fold: 10
+  train_start: '2022-04-19'
+  train_end: '2024-04-19'
+  test_start: '2024-04-29'
+  test_end: '2024-08-27'
+  test_days_used: 84
+  oos_sharpe: 2.136637
+  oos_max_drawdown: 0.000475
+- fold: 11
+  train_start: '2022-08-18'
+  train_end: '2024-08-20'
+  test_start: '2024-08-28'
+  test_end: '2024-12-26'
+  test_days_used: 84
+  oos_sharpe: 1.800485
+  oos_max_drawdown: 0.000233
+- fold: 12
+  train_start: '2022-12-16'
+  train_end: '2024-12-18'
+  test_start: '2024-12-27'
+  test_end: '2025-04-30'
+  test_days_used: 84
+  oos_sharpe: -0.776875
+  oos_max_drawdown: 0.001162
+- fold: 13
+  train_start: '2023-04-20'
+  train_end: '2025-04-23'
+  test_start: '2025-05-01'
+  test_end: '2025-08-29'
+  test_days_used: 84
+  oos_sharpe: 3.708171
+  oos_max_drawdown: 0.000157
+- fold: 14
+  train_start: '2023-08-21'
+  train_end: '2025-08-22'
+  test_start: '2025-09-02'
+  test_end: '2025-12-30'
+  test_days_used: 84
+  oos_sharpe: 1.86263
+  oos_max_drawdown: 0.000348
+passed: true
+is_baseline: false

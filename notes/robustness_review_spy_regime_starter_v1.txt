@@ -1,0 +1,59 @@
+Reviewed file: data/strategies/spy-regime-starter-v1/robustness.yaml
+
+Overall result:
+- overall_result: PASS
+- overall_passed: true
+- case_count: 29
+- promotion_notes: PASS: robustness lanes acceptable for research-to-paper review.
+
+Provenance / anti-overfit controls:
+- spec_frozen: true
+- spec_frozen_at: 2026-04-14
+- frozen_spec_hash recorded at top level and in provenance
+- runner/script and artifact_dir are recorded for auditability
+
+Robustness dimensions covered:
+- baseline_reproducibility: 1/1 passed
+- window_variation: 5/5 passed
+- boundary_shift: 4/4 passed
+- cost_stress: 5/5 passed
+- parameter_perturbation: 14/14 passed
+
+Acceptance criteria visible in YAML:
+- all robustness lanes pass
+- parameter_stability threshold is > 0.50
+- actual stable_fraction is 1.0, result PASS
+- two_x_cost_survival (case D3) passed
+- overall robustness pass required and achieved
+
+Failure thresholds / blocker conditions visible in YAML:
+- parameter stability would fail if stable_fraction <= 0.50
+- failure of named 2x cost survival case D3 would be a blocker
+- any lane changing from pass to fail would block overall PASS
+
+Reported metrics by lane:
+- baseline_reproducibility: mean_oos_sharpe 0.618687, median_oos_sharpe 1.041095, max_oos_drawdown 0.001163
+- window_variation: all 5 passed; mean_oos_sharpe spans 0.618687 to 1.135909
+- boundary_shift: all 4 passed; mean_oos_sharpe spans 0.54409 to 0.747674
+- cost_stress: all 5 passed; mean_oos_sharpe spans 0.467084 to 0.618687
+- parameter_perturbation: all 14 passed; mean_oos_sharpe spans 0.563065 to 0.81249
+
+What must be true before paper trading from the robustness perspective:
+- robustness evidence exists and is recorded
+- baseline reproduces
+- alternate windows pass
+- shifted boundaries pass
+- stressed costs, including 2x cost survival, pass
+- parameter perturbations remain stable above threshold
+- no robustness blocker remains in this file
+
+Missing evidence / ambiguity that could stall handoff:
+- YAML does not show exact per-case parameter changes, window definitions, or boundary shifts inline
+- exact lane pass rules for Sharpe/drawdown are not embedded inline; reviewers may need the matrix or per-case artifacts
+- referenced artifacts could still be missing or need manual verification
+- cost model specifics are not stated inline
+- parameter names perturbed are not shown inline
+
+Parent integration note:
+- Robustness itself appears ready for research-to-paper review and is not the blocking gate.
+- Remaining blockers, if any, are more likely to come from paper-trading.yaml, walk-forward requirements, or missing referenced artifacts rather than from robustness.yaml itself.
