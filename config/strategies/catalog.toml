@@ -42,3 +42,10 @@ candidate_crypto = [
 
 # Promoted crypto remains empty until strict validation passes.
 promoted_crypto = []
+
+# BTC regime alt-momentum v3 paper validation set.
+# Strategy is in paper-trading lifecycle stage (Track B).
+# Only consumed by btc-regime-alt-momentum-paper pod.
+candidate_crypto_btcregime = [
+  "btc-regime-alt-momentum-v3",
+]

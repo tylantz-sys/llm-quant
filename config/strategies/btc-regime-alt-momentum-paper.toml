@@ -1,0 +1,42 @@
+# Pod: btc-regime-alt-momentum-paper
+# Paper trading validation for btc-regime-alt-momentum-v3 (Track B)
+# Runs via Alpaca paper account every 5 min during crypto market hours.
+# Capital sourced from Alpaca equity — uses real portfolio balance, not synthetic.
+#
+# Promotion gate: 60 days, >=50 trades, Sharpe >= 0.60, MaxDD < 30%
+# See: data/strategies/btc-regime-alt-momentum-v3/paper-trading.yaml
+
+[execution]
+signal_source = "strategy_overlay"
+strategy_set = "candidate_crypto_btcregime"
+overlay_governor_strict = true
+overlay_max_upscale = 1.25
+overlay_max_downscale = 0.0
+intraday_enabled = true
+intraday_timeframe_minutes = 5
+intraday_lookback_days = 10
+intraday_rth_guard = false
+intraday_use_oco = true
+skip_daily_fetch_when_intraday = true
+asset_class_filter = ["crypto"]
+claude_overlay_only = true
+crypto_order_sizing = "qty"
+crypto_time_in_force = "gtc"
+initial_capital_source = "alpaca_equity"
+
+# Exit policy overrides — CRITICAL for this strategy.
+# Default 2% partial TP + 1.5% trailing stop destroys momentum alpha in crypto.
+# These must match the values in the backtest spec exactly.
+profit_take_partial_pct = 0.12
+trailing_stop_pct = 0.12
+scale_in_tranches = 1
+
+[strategy]
+sleeve = "crypto"
+
+[strategy_rotation]
+enabled = false
+
+[risk]
+# Track B position limits
+crypto_max_position_weight = 0.30
