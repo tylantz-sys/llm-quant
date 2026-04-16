@@ -10,6 +10,11 @@ Usage:
     cd E:/llm-quant && PYTHONPATH=src \\
         python scripts/execute_decision.py --pod momo \\
         <<< '{"market_regime": "risk_on", ...}'
+
+    # Submit trades to Alpaca paper account (requires ALPACA_API_KEY / ALPACA_SECRET_KEY):
+    cd E:/llm-quant && PYTHONPATH=src \\
+        python scripts/execute_decision.py --broker alpaca \\
+        <<< '{"market_regime": "risk_on", ...}'
 """
 
 from __future__ import annotations
@@ -24,6 +29,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from llm_quant.brain.parser import parse_trading_decision
+from llm_quant.broker.alpaca import AlpacaClient, AlpacaError
+from llm_quant.broker.executor import submit_alpaca_orders
 from llm_quant.config import load_config_for_pod
 from llm_quant.db.schema import get_connection
 from llm_quant.risk.manager import RiskManager
@@ -46,11 +53,157 @@ logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 
-def main() -> None:
+def _submit_to_alpaca(
+    alpaca_client: AlpacaClient,
+    executed: list,
+    approved: list,
+    conn: object,
+    config: object,
+    asset_class_map: dict,
+    pod_id: str,
+    today: object,
+) -> list[dict]:
+    """Submit executed trades to Alpaca and reconcile fills. Returns broker order records."""
+    from llm_quant.broker.reconciliation import (
+        log_broker_fills,
+        persist_submitted_orders,
+        reconcile_broker_orders,
+    )
+
+    stop_losses = {sig.symbol: sig.stop_loss for sig in approved}
+    submitted_orders = submit_alpaca_orders(
+        alpaca_client,
+        executed,
+        stop_losses,
+        config.risk,
+        use_brackets=True,
+        asset_class_map=asset_class_map,
+        execution=config.execution,
+    )
+    persist_submitted_orders(conn, submitted_orders, pod_id=pod_id)
+    reconcile_broker_orders(
+        conn,
+        alpaca_client,
+        portfolio=None,
+        ledger_conn=conn,
+        pod_id=pod_id,
+        order_ids=[o.order_id for o in submitted_orders],
+        broker_positions=alpaca_client.list_positions(),
+        log_fills_fn=log_broker_fills,
+        trade_date=today,
+    )
+    return [
+        {
+            "order_id": o.order_id,
+            "symbol": o.symbol,
+            "side": o.side,
+            "qty": o.qty,
+            "order_type": o.order_type,
+            "status": o.status,
+        }
+        for o in submitted_orders
+    ]
+
+
+def _build_summary(
+    *,
+    pod_id: str,
+    broker: str,
+    today: object,
+    decision: object,
+    exit_signals: list,
+    all_signals: list,
+    governed_signals: list,
+    exit_telemetry: object,
+    exit_policy: object,
+    exit_runtime: object,
+    runtime_result: object,
+    approved: list,
+    rejected: list,
+    executed: list,
+    broker_orders: list,
+    portfolio: object,
+    snapshot_id: object,
+    trade_ids: list,
+) -> dict:
+    """Build the execution summary dict."""
+    return {
+        "pod_id": pod_id,
+        "broker": broker,
+        "date": str(today),
+        "decision": {
+            "market_regime": decision.market_regime.value,
+            "regime_confidence": decision.regime_confidence,
+            "regime_reasoning": decision.regime_reasoning,
+            "portfolio_commentary": decision.portfolio_commentary,
+            "total_signals": len(decision.signals),
+            "exit_engine_signals": len(exit_signals),
+            "total_signals_after_exit_merge": len(all_signals),
+            "total_signals_after_governance": len(governed_signals),
+        },
+        "exit_engine": build_exit_telemetry_payload(
+            exit_telemetry, exit_policy, exit_runtime
+        )["exit_engine"],
+        "harvest_governance": {
+            "active_mandate_name": runtime_result.active_mandate_name,
+            "active_mandate_type": runtime_result.active_mandate_type,
+            "allocation_scale": runtime_result.allocation_scale,
+            "force_flatten": runtime_result.force_flatten,
+            "conservative_mandate_name": runtime_result.conservative_mandate_name,
+            "lifecycle_recommendation": runtime_result.lifecycle_recommendation,
+            "breached_rules": runtime_result.breached_rules,
+            "actions": runtime_result.actions,
+            "metrics": runtime_result.metrics,
+        },
+        "risk_filter": {
+            "approved": len(approved),
+            "rejected": len(rejected),
+            "rejected_details": [
+                {
+                    "symbol": sig.symbol,
+                    "action": sig.action.value,
+                    "failures": [c.message for c in checks if not c.passed],
+                }
+                for sig, checks in rejected
+            ],
+        },
+        "executed_trades": [
+            {
+                "symbol": t.symbol,
+                "action": t.action,
+                "shares": t.shares,
+                "price": round(t.price, 2),
+                "notional": round(t.notional, 2),
+                "conviction": t.conviction,
+                "reasoning": t.reasoning,
+            }
+            for t in executed
+        ],
+        "broker_orders": broker_orders,
+        "portfolio_after": {
+            "nav": round(portfolio.nav, 2),
+            "cash": round(portfolio.cash, 2),
+            "positions": len(portfolio.positions),
+            "total_pnl": round(portfolio.total_pnl, 2),
+            "gross_exposure": round(portfolio.gross_exposure, 2),
+        },
+        "snapshot_id": snapshot_id,
+        "trade_ids": trade_ids,
+    }
+
+
+def main() -> None:  # noqa: PLR0915 — orchestration entry point; decomposing further adds no clarity
     parser = argparse.ArgumentParser(description="Execute trading decision")
     parser.add_argument("--pod", default="default", help="Pod ID to execute for")
+    parser.add_argument(
+        "--broker",
+        default="paper",
+        choices=["paper", "alpaca"],
+        help="Execution broker: 'paper' (default) or 'alpaca' to submit live orders",
+    )
     args = parser.parse_args()
     pod_id = args.pod
+    broker = args.broker.lower()
 
     # Read JSON from stdin
     raw_input = sys.stdin.read().strip()
@@ -66,6 +219,15 @@ def main() -> None:
     if not Path(db_path).is_absolute():
         db_path = str(project_root / db_path)
 
+    # Initialise Alpaca client early so we fail fast on missing credentials
+    alpaca_client: AlpacaClient | None = None
+    if broker == "alpaca":
+        try:
+            alpaca_client = AlpacaClient.from_env()
+        except AlpacaError as exc:
+            print(json.dumps({"error": f"Alpaca client init failed: {exc}"}))
+            sys.exit(1)
+
     conn = get_connection(db_path)
 
     try:
@@ -77,6 +239,10 @@ def main() -> None:
         portfolio = Portfolio.from_db(
             conn, config.general.initial_capital, pod_id=pod_id
         )
+
+        asset_class_map = {
+            asset.symbol: asset.asset_class for asset in config.universe.assets
+        }
 
         # Get latest prices
         prices: dict[str, float] = {}
@@ -106,7 +272,7 @@ def main() -> None:
         nav_before = portfolio.nav
 
         exit_policy = build_exit_policy(config.risk, config.execution)
-        exit_runtime = build_exit_runtime("paper", config.execution)
+        exit_runtime = build_exit_runtime(broker, config.execution)
         exit_signals, exit_telemetry = evaluate_position_exits(
             portfolio=portfolio,
             prices=prices,
@@ -138,8 +304,26 @@ def main() -> None:
             governed_signals, portfolio, prices
         )
 
-        # Execute approved signals
+        # Execute approved signals (paper simulation — updates local portfolio state)
         executed = execute_signals(portfolio, approved, prices, nav_before)
+
+        # Submit to Alpaca if broker mode is active
+        broker_orders: list[dict] = []
+        if alpaca_client and executed:
+            try:
+                broker_orders = _submit_to_alpaca(
+                    alpaca_client,
+                    executed,
+                    approved,
+                    conn,
+                    config,
+                    asset_class_map,
+                    pod_id,
+                    today,
+                )
+            except AlpacaError as exc:
+                print(json.dumps({"error": f"Alpaca order submission failed: {exc}"}))
+                sys.exit(1)
 
         # Log trades and save snapshot
         decision_id = None
@@ -169,67 +353,26 @@ def main() -> None:
         )
 
         # Build summary
-        summary = {
-            "pod_id": pod_id,
-            "date": str(today),
-            "decision": {
-                "market_regime": decision.market_regime.value,
-                "regime_confidence": decision.regime_confidence,
-                "regime_reasoning": decision.regime_reasoning,
-                "portfolio_commentary": decision.portfolio_commentary,
-                "total_signals": len(decision.signals),
-                "exit_engine_signals": len(exit_signals),
-                "total_signals_after_exit_merge": len(all_signals),
-                "total_signals_after_governance": len(governed_signals),
-            },
-            "exit_engine": build_exit_telemetry_payload(
-                exit_telemetry, exit_policy, exit_runtime
-            )["exit_engine"],
-            "harvest_governance": {
-                "active_mandate_name": runtime_result.active_mandate_name,
-                "active_mandate_type": runtime_result.active_mandate_type,
-                "allocation_scale": runtime_result.allocation_scale,
-                "force_flatten": runtime_result.force_flatten,
-                "conservative_mandate_name": runtime_result.conservative_mandate_name,
-                "lifecycle_recommendation": runtime_result.lifecycle_recommendation,
-                "breached_rules": runtime_result.breached_rules,
-                "actions": runtime_result.actions,
-                "metrics": runtime_result.metrics,
-            },
-            "risk_filter": {
-                "approved": len(approved),
-                "rejected": len(rejected),
-                "rejected_details": [
-                    {
-                        "symbol": sig.symbol,
-                        "action": sig.action.value,
-                        "failures": [c.message for c in checks if not c.passed],
-                    }
-                    for sig, checks in rejected
-                ],
-            },
-            "executed_trades": [
-                {
-                    "symbol": t.symbol,
-                    "action": t.action,
-                    "shares": t.shares,
-                    "price": round(t.price, 2),
-                    "notional": round(t.notional, 2),
-                    "conviction": t.conviction,
-                    "reasoning": t.reasoning,
-                }
-                for t in executed
-            ],
-            "portfolio_after": {
-                "nav": round(portfolio.nav, 2),
-                "cash": round(portfolio.cash, 2),
-                "positions": len(portfolio.positions),
-                "total_pnl": round(portfolio.total_pnl, 2),
-                "gross_exposure": round(portfolio.gross_exposure, 2),
-            },
-            "snapshot_id": snapshot_id,
-            "trade_ids": trade_ids,
-        }
+        summary = _build_summary(
+            pod_id=pod_id,
+            broker=broker,
+            today=today,
+            decision=decision,
+            exit_signals=exit_signals,
+            all_signals=all_signals,
+            governed_signals=governed_signals,
+            exit_telemetry=exit_telemetry,
+            exit_policy=exit_policy,
+            exit_runtime=exit_runtime,
+            runtime_result=runtime_result,
+            approved=approved,
+            rejected=rejected,
+            executed=executed,
+            broker_orders=broker_orders,
+            portfolio=portfolio,
+            snapshot_id=snapshot_id,
+            trade_ids=trade_ids,
+        )
 
         print(json.dumps(summary, indent=2))
 

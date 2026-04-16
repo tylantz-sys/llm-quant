@@ -75,13 +75,19 @@ Output your analysis and reasoning, then produce a **strictly formatted JSON dec
 
 ## Step 3: Execute Decision
 
-Pipe the JSON decision (raw, no markdown fencing) into the executor:
+Pipe the JSON decision (raw, no markdown fencing) into the executor.
 
+**Paper only (local simulation — default):**
 ```bash
 cd E:/llm-quant && PYTHONPATH=src python scripts/execute_decision.py <<< '<YOUR_JSON_HERE>'
 ```
 
-The executor runs 7 risk checks, executes approved trades, saves a portfolio snapshot with hash chain integrity, and returns a JSON execution summary.
+**With live Alpaca order submission (requires ALPACA_API_KEY / ALPACA_SECRET_KEY in env or .env):**
+```bash
+cd E:/llm-quant && PYTHONPATH=src python scripts/execute_decision.py --broker alpaca <<< '<YOUR_JSON_HERE>'
+```
+
+The executor runs 7 risk checks, executes approved trades, saves a portfolio snapshot with hash chain integrity, and returns a JSON execution summary. In `--broker alpaca` mode the summary also includes a `broker_orders` array with Alpaca order IDs and statuses.
 
 **If execution fails:**
 - Parse error: Check JSON is valid — no trailing commas, no comments, all required fields present
