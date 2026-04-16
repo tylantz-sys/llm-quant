@@ -236,6 +236,12 @@ def _build_strategy_config(strategy_name: str, spec: dict) -> StrategyConfig:
             "stop_loss_pct",
             spec.get("stop_loss_pct", 0.05),
         ),
+        fractional_shares=bool(
+            params.get(
+                "fractional_shares",
+                spec.get("fractional_shares", False),
+            )
+        ),
         parameters=mapped_params,
     )
 
@@ -441,6 +447,7 @@ def main() -> None:
         volatility_target=args.volatility_target,
         vol_target_window=args.vol_target_window,
         vol_target_max_scale=args.vol_target_max_scale,
+        exit_policy_overrides=spec.get("exit_policy_overrides") or None,
     )
 
     result = engine.run_with_cost_sensitivity(

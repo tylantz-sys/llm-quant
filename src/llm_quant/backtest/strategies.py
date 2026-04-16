@@ -39,14 +39,18 @@ def _compute_momentum_scores(
         if len(sym_data) < lookback:
             continue
         recent = sym_data.tail(lookback)
-        row0 = cast(RowDict, recent.row(0, named=True))
-        row_last = cast(RowDict, recent.row(-1, named=True))
+        row0 = cast("RowDict", recent.row(0, named=True))
+        row_last = cast("RowDict", recent.row(-1, named=True))
         first_close_obj = row0.get("close")
         last_close_obj = row_last.get("close")
-        if isinstance(first_close_obj, (int, float)) and isinstance(
-            last_close_obj, (int, float)
-        ) and first_close_obj > 0:
-            scores.append((symbol, float(last_close_obj) / float(first_close_obj) - 1.0))
+        if (
+            isinstance(first_close_obj, (int, float))
+            and isinstance(last_close_obj, (int, float))
+            and first_close_obj > 0
+        ):
+            scores.append(
+                (symbol, float(last_close_obj) / float(first_close_obj) - 1.0)
+            )
     scores.sort(key=lambda x: x[1], reverse=True)
     return scores
 
@@ -448,7 +452,7 @@ def _detect_regime_from_vix(
     """Classify regime as risk_on or risk_off based on VIX level."""
     vix_data = indicators_df.filter(pl.col("symbol") == "VIX").sort("date")
     if len(vix_data) > 0:
-        vix_row = cast(RowDict, vix_data.tail(1).row(0, named=True))
+        vix_row = cast("RowDict", vix_data.tail(1).row(0, named=True))
         vix_close = vix_row.get("close")
         if isinstance(vix_close, (int, float)) and vix_close >= vix_threshold:
             return "risk_off"
@@ -463,7 +467,7 @@ def _get_atr_stop(
 ) -> float:
     """Compute ATR-based stop-loss, falling back to percentage-based."""
     if "atr_14" in sym_data.columns and len(sym_data) > 0:
-        atr_row = cast(RowDict, sym_data.tail(1).row(0, named=True))
+        atr_row = cast("RowDict", sym_data.tail(1).row(0, named=True))
         atr_val_obj = atr_row.get("atr_14")
         if isinstance(atr_val_obj, (int, float)) and atr_val_obj > 0:
             atr_val = float(atr_val_obj)
@@ -484,7 +488,7 @@ def _vol_target_weight(
     """
     if "atr_14" not in sym_data.columns or len(sym_data) == 0:
         return base_weight
-    row = cast(RowDict, sym_data.tail(1).row(0, named=True))
+    row = cast("RowDict", sym_data.tail(1).row(0, named=True))
     atr_val_obj = row.get("atr_14")
     close_obj = row.get("close", 0)
     if not isinstance(atr_val_obj, (int, float)) or atr_val_obj <= 0:
@@ -505,8 +509,8 @@ def _trailing_return(sym_data: pl.DataFrame, lookback: int) -> float | None:
     if len(sym_data) < lookback:
         return None
     recent = sym_data.tail(lookback)
-    row0 = cast(RowDict, recent.row(0, named=True))
-    row_last = cast(RowDict, recent.row(-1, named=True))
+    row0 = cast("RowDict", recent.row(0, named=True))
+    row_last = cast("RowDict", recent.row(-1, named=True))
     first_close_obj = row0.get("close")
     last_close_obj = row_last.get("close")
     if not isinstance(first_close_obj, (int, float)) or first_close_obj <= 0:
@@ -522,12 +526,14 @@ def _close_above_sma(sym_data: pl.DataFrame, sma_col: str = "sma_200") -> bool:
     """Check if latest close is above the given SMA. True if SMA not available."""
     if sma_col not in sym_data.columns or len(sym_data) == 0:
         return True  # no SMA data = no filter applied
-    row = cast(RowDict, sym_data.tail(1).row(0, named=True))
+    row = cast("RowDict", sym_data.tail(1).row(0, named=True))
     sma_val_obj = row.get(sma_col)
     close_obj = row.get("close")
     if sma_val_obj is None:
         return True
-    if not isinstance(sma_val_obj, (int, float)) or not isinstance(close_obj, (int, float)):
+    if not isinstance(sma_val_obj, (int, float)) or not isinstance(
+        close_obj, (int, float)
+    ):
         return True
     sma_val = float(sma_val_obj)
     close = float(close_obj)
@@ -762,7 +768,7 @@ class MultiFactorStrategy(Strategy):
             sym_data = indicators_df.filter(pl.col("symbol") == symbol).sort("date")
             if len(sym_data) < momentum_lookback:
                 continue
-            row = cast(RowDict, sym_data.tail(1).row(0, named=True))
+            row = cast("RowDict", sym_data.tail(1).row(0, named=True))
             close_obj = row.get("close")
             if not isinstance(close_obj, (int, float)):
                 continue
@@ -842,9 +848,13 @@ class MultiFactorStrategy(Strategy):
             value_z_obj = s.get("value_z", 0.0)
             quality_z_obj = s.get("quality_z", 0.0)
             momentum_z = (
-                float(momentum_z_obj) if isinstance(momentum_z_obj, (int, float)) else 0.0
+                float(momentum_z_obj)
+                if isinstance(momentum_z_obj, (int, float))
+                else 0.0
             )
-            value_z = float(value_z_obj) if isinstance(value_z_obj, (int, float)) else 0.0
+            value_z = (
+                float(value_z_obj) if isinstance(value_z_obj, (int, float)) else 0.0
+            )
             quality_z = (
                 float(quality_z_obj) if isinstance(quality_z_obj, (int, float)) else 0.0
             )
@@ -900,11 +910,13 @@ class MultiFactorStrategy(Strategy):
             s
             for s in scored
             if isinstance(s.get("composite"), (int, float))
-            and float(cast(int | float, s.get("composite"))) > 0
+            and float(cast("int | float", s.get("composite"))) > 0
             and bool(s.get("above_sma", False))
         ]
         top_symbols = {
-            str(s["symbol"]) for s in eligible[:top_n] if isinstance(s.get("symbol"), str)
+            str(s["symbol"])
+            for s in eligible[:top_n]
+            if isinstance(s.get("symbol"), str)
         }
         all_scored_symbols = {
             str(s["symbol"]) for s in scored if isinstance(s.get("symbol"), str)
@@ -1313,7 +1325,9 @@ class CalendarEventStrategy(Strategy):
         mode = str(params.get("mode", "month_end"))
         pre_days_obj = params.get("pre_days", 3)
         target_weight_obj = params.get("target_weight", 0.95)
-        pre_days = int(pre_days_obj) if isinstance(pre_days_obj, (int, float, str)) else 3
+        pre_days = (
+            int(pre_days_obj) if isinstance(pre_days_obj, (int, float, str)) else 3
+        )
         tgt_weight = (
             float(target_weight_obj)
             if isinstance(target_weight_obj, (int, float, str))
@@ -1667,7 +1681,11 @@ class LeadLagStrategy(Strategy):
         )
         target_weight_upper_raw = params.get(
             "target_weight_upper",
-            target_weight_base if entry_thresh_upper is not None else target_weight_lower,
+            (
+                target_weight_base
+                if entry_thresh_upper is not None
+                else target_weight_lower
+            ),
         )
         target_weight_upper = (
             float(target_weight_upper_raw)
@@ -1795,7 +1813,12 @@ class LeadLagStrategy(Strategy):
                 )
             ]
 
-        if signal_long_lower and confirmation_pass and not has_pos and cooldown_remaining <= 0:
+        if (
+            signal_long_lower
+            and confirmation_pass
+            and not has_pos
+            and cooldown_remaining <= 0
+        ):
             logger.info(
                 "LeadLag: ENTER %s on %s (leader=%s ret=%.3f)",
                 follower,
@@ -2425,7 +2448,10 @@ class OHLCVMomentumStrategy(Strategy):
                 vol_f = float(vol)
                 vsma_f = float(vsma)
                 close_f = float(close)
-                in_signal = close_f > h20_f + atr_mult * atr_f and vol_f > vol_multiplier * vsma_f
+                in_signal = (
+                    close_f > h20_f + atr_mult * atr_f
+                    and vol_f > vol_multiplier * vsma_f
+                )
 
         if in_signal and not has_pos:
             logger.info("OHLCVMomentum[%s]: ENTER %s on %s", mode, symbol, as_of_date)
@@ -2791,7 +2817,11 @@ class SpyRegimeStarterStrategy(Strategy):
             if adds_completed >= max_adds:
                 return []
 
-            if vix_close is not None and macd > macd_add_min and vix_close < vix_add_max:
+            if (
+                vix_close is not None
+                and macd > macd_add_min
+                and vix_close < vix_add_max
+            ):
                 state["adds_completed"] = adds_completed + 1
                 stop_anchor = entry_atr_14 if entry_atr_14 is not None else atr_14
                 return [
@@ -2816,7 +2846,9 @@ class SpyRegimeStarterStrategy(Strategy):
 
             return []
 
-        cooldown_until_value: date | None = self._extract_date(state.get("cooldown_until"))
+        cooldown_until_value: date | None = self._extract_date(
+            state.get("cooldown_until")
+        )
         if self._cooldown_active(cooldown_until_value, as_of_date):
             return []
 
@@ -2918,8 +2950,8 @@ class GldBreakoutConfirmedStrategy(Strategy):
         state = self._runtime_state.get(symbol)
         if state is None:
             state = {
-                "entry_atr_14": cast(object, None),
-                "cooldown_until": cast(object, None),
+                "entry_atr_14": cast("object", None),
+                "cooldown_until": cast("object", None),
             }
             self._runtime_state[symbol] = state
         return state
@@ -3067,7 +3099,9 @@ class GldBreakoutConfirmedStrategy(Strategy):
                 ]
             return []
 
-        cooldown_until_value: date | None = self._extract_date(state.get("cooldown_until"))
+        cooldown_until_value: date | None = self._extract_date(
+            state.get("cooldown_until")
+        )
         if self._cooldown_active(cooldown_until_value, as_of_date):
             return []
 
@@ -3086,11 +3120,10 @@ class GldBreakoutConfirmedStrategy(Strategy):
         ]
         macro_confirmed: bool | None
         if macro_confirmation_mode == "any_close_above_sma_20":
-            available_results = [result for result in macro_results if result is not None]
-            if not available_results:
-                macro_confirmed = None
-            else:
-                macro_confirmed = any(available_results)
+            available_results = [
+                result for result in macro_results if result is not None
+            ]
+            macro_confirmed = None if not available_results else any(available_results)
         else:
             macro_confirmed = None
 
@@ -3103,7 +3136,9 @@ class GldBreakoutConfirmedStrategy(Strategy):
 
         breakout_confirmed = close > high_20
         trend_confirmed = (
-            True if (not require_close_above_sma_50 or sma_50 is None) else close > sma_50
+            True
+            if (not require_close_above_sma_50 or sma_50 is None)
+            else close > sma_50
         )
 
         if (
@@ -3138,6 +3173,415 @@ class GldBreakoutConfirmedStrategy(Strategy):
 
 
 # ---------------------------------------------------------------------------
+# BTC Regime + Alt Momentum (btc-regime-alt-momentum-v1)
+# ---------------------------------------------------------------------------
+
+
+class BtcRegimeAltMomentumStrategy(Strategy):
+    """BTC trend regime gate drives alt momentum selection.
+
+    Regime: bull when BTC price > SMA50 AND SMA20 > SMA50.
+    Signal: hold top-1 alt (by momentum_lookback-day return) in bull regime; cash otherwise.
+    Exit: regime flip OR position stop (stop_loss_pct from entry).
+    Guard: portfolio NAV circuit breaker — if drawdown from rolling peak exceeds
+           nav_drawdown_halt, exit all and stay flat for nav_cooloff_days days
+           (peak resets on re-entry to prevent immediate re-fire).
+    """
+
+    def __init__(self, config: StrategyConfig) -> None:
+        super().__init__(config)
+        # Persistent state across generate_signals() calls
+        self._nav_peak: float | None = None
+        self._cooloff_remaining: int = 0
+        self._entry_prices: dict[str, float] = {}  # symbol → entry close price
+
+    def generate_signals(
+        self,
+        as_of_date: date,
+        indicators_df: pl.DataFrame,
+        portfolio: Portfolio,
+        prices: dict[str, float],
+    ) -> list[TradeSignal]:
+        params = self.config.parameters
+        momentum_lb: int = int(params.get("momentum_lookback", 10))
+        n_top: int = int(params.get("n_top_alts", 1))
+        stop_pct: float = float(params.get("stop_loss_pct", self.config.stop_loss_pct))
+        nav_halt: float = float(params.get("nav_drawdown_halt", 0.18))
+        cooloff_days: int = int(params.get("nav_cooloff_days", 10))
+        regime_asset: str = str(params.get("regime_asset", "BTC-USD"))
+        alt_universe: list[str] = list(
+            params.get("tradeable_alts", ["ETH-USD", "ADA-USD", "SOL-USD", "XRP-USD"])
+        )
+
+        current_nav = portfolio.nav
+
+        # Initialise peak on first call
+        if self._nav_peak is None:
+            self._nav_peak = current_nav
+
+        # ── Portfolio-level NAV circuit breaker ─────────────────────────────
+        # Reset watermark when cooloff expires so we don't immediately re-fire
+        if self._cooloff_remaining == 1:
+            self._nav_peak = current_nav
+
+        if self._cooloff_remaining > 0:
+            self._cooloff_remaining -= 1
+            self._entry_prices.clear()
+            # Close any open positions
+            close_signals = [
+                TradeSignal(
+                    symbol=sym,
+                    action=Action.CLOSE,
+                    conviction=Conviction.LOW,
+                    target_weight=0.0,
+                    stop_loss=0.0,
+                    reasoning="NAV circuit breaker: cooling off",
+                )
+                for sym in portfolio.positions
+            ]
+            self._nav_peak = max(self._nav_peak, current_nav)
+            return close_signals
+
+        # Update rolling peak
+        self._nav_peak = max(self._nav_peak, current_nav)
+        nav_dd = (current_nav - self._nav_peak) / self._nav_peak
+        if nav_dd < -nav_halt:
+            self._cooloff_remaining = cooloff_days
+            self._entry_prices.clear()
+            return [
+                TradeSignal(
+                    symbol=sym,
+                    action=Action.CLOSE,
+                    conviction=Conviction.LOW,
+                    target_weight=0.0,
+                    stop_loss=0.0,
+                    reasoning=f"NAV circuit breaker triggered: dd={nav_dd:.2%}",
+                )
+                for sym in portfolio.positions
+            ]
+
+        # ── BTC regime detection ─────────────────────────────────────────────
+        btc_data = indicators_df.filter(pl.col("symbol") == regime_asset).sort("date")
+        if len(btc_data) < 50:
+            return []  # insufficient warmup
+
+        btc_row = cast("RowDict", btc_data.tail(1).row(0, named=True))
+        btc_close = btc_row.get("close")
+        btc_sma20 = btc_row.get("sma_20")
+        btc_sma50 = btc_row.get("sma_50")
+
+        if not all(
+            isinstance(v, (int, float)) for v in [btc_close, btc_sma20, btc_sma50]
+        ):
+            return []
+
+        bull_regime = float(btc_close) > float(
+            btc_sma50
+        ) and float(  # type: ignore[arg-type]
+            btc_sma20
+        ) > float(
+            btc_sma50
+        )  # type: ignore[arg-type]
+
+        signals: list[TradeSignal] = []
+
+        # ── Non-bull: exit all positions ────────────────────────────────────
+        if not bull_regime:
+            for sym in list(portfolio.positions):
+                signals.append(
+                    TradeSignal(
+                        symbol=sym,
+                        action=Action.CLOSE,
+                        conviction=Conviction.LOW,
+                        target_weight=0.0,
+                        stop_loss=0.0,
+                        reasoning="BTC regime: non-bull — exit to cash",
+                    )
+                )
+                self._entry_prices.pop(sym, None)
+            return signals
+
+        # ── Bull regime: rank alts by momentum ──────────────────────────────
+        alt_returns: list[tuple[str, float]] = []
+        for sym in alt_universe:
+            sym_data = indicators_df.filter(pl.col("symbol") == sym).sort("date")
+            ret = _trailing_return(sym_data, momentum_lb)
+            if ret is not None:
+                alt_returns.append((sym, ret))
+
+        if not alt_returns:
+            return []
+
+        alt_returns.sort(key=lambda x: x[1], reverse=True)
+        top_alts = {sym for sym, _ in alt_returns[:n_top]}
+
+        # ── Exit positions that rotated out or hit stop ──────────────────────
+        for sym in list(portfolio.positions):
+            current_price = prices.get(sym, 0.0)
+            entry_price = self._entry_prices.get(sym, current_price)
+
+            # Position stop-loss check
+            if (
+                current_price > 0
+                and entry_price > 0
+                and current_price < entry_price * (1.0 - stop_pct)
+            ):
+                signals.append(
+                    TradeSignal(
+                        symbol=sym,
+                        action=Action.CLOSE,
+                        conviction=Conviction.LOW,
+                        target_weight=0.0,
+                        stop_loss=0.0,
+                        reasoning=f"Stop-loss hit: {current_price:.2f} < {entry_price*(1-stop_pct):.2f}",
+                    )
+                )
+                self._entry_prices.pop(sym, None)
+            elif sym not in top_alts:
+                signals.append(
+                    TradeSignal(
+                        symbol=sym,
+                        action=Action.CLOSE,
+                        conviction=Conviction.LOW,
+                        target_weight=0.0,
+                        stop_loss=0.0,
+                        reasoning=f"Rotated out: {sym} no longer top-{n_top} by momentum",
+                    )
+                )
+                self._entry_prices.pop(sym, None)
+
+        # ── Enter new top-alt positions ──────────────────────────────────────
+        for sym in top_alts:
+            if sym in portfolio.positions:
+                continue
+            current_price = prices.get(sym, 0.0)
+            if current_price <= 0:
+                continue
+            stop_level = round(current_price * (1.0 - stop_pct), 2)
+            self._entry_prices[sym] = current_price
+            signals.append(
+                TradeSignal(
+                    symbol=sym,
+                    action=Action.BUY,
+                    conviction=Conviction.HIGH,
+                    target_weight=self.config.target_position_weight,
+                    stop_loss=stop_level,
+                    reasoning=(
+                        f"BTC bull regime + top-{n_top} alt momentum "
+                        f"({alt_returns[0][1]:.2%} over {momentum_lb}d)"
+                    ),
+                )
+            )
+
+        return signals
+
+
+class BtcRegimeAltMomentumV2Strategy(Strategy):
+    """BTC trend regime gate (SMA5/SMA20) drives alt momentum selection — v2.
+
+    Changes vs v1:
+    - Faster regime filter: SMA5 > SMA20 AND price > SMA20 (vs SMA20/SMA50 in v1)
+    - ADA removed from universe (illiquid in stress events)
+    - target_position_weight=0.40 (partial allocation to reduce MaxDD)
+    - Research simulation explicitly uses t+1 returns to match engine fill_delay=1
+    """
+
+    def __init__(self, config: StrategyConfig) -> None:
+        super().__init__(config)
+        self._nav_peak: float | None = None
+        self._cooloff_remaining: int = 0
+        self._entry_prices: dict[str, float] = {}
+
+    def generate_signals(  # noqa: PLR0911, PLR0915  # guard-clause pattern; refactoring would obscure intent
+        self,
+        as_of_date: date,
+        indicators_df: pl.DataFrame,
+        portfolio: Portfolio,
+        prices: dict[str, float],
+    ) -> list[TradeSignal]:
+        params = self.config.parameters
+        regime_fast: int = int(params.get("regime_sma_fast", 5))
+        regime_slow: int = int(params.get("regime_sma_slow", 20))
+        momentum_lb: int = int(params.get("momentum_lookback", 10))
+        n_top: int = int(params.get("n_top_alts", 1))
+        stop_pct: float = float(params.get("stop_loss_pct", self.config.stop_loss_pct))
+        nav_halt: float = float(params.get("nav_drawdown_halt", 0.18))
+        cooloff_days: int = int(params.get("nav_cooloff_days", 10))
+        regime_asset: str = str(params.get("regime_asset", "BTC-USD"))
+        alt_universe: list[str] = list(
+            params.get("tradeable_alts", ["ETH-USD", "SOL-USD", "XRP-USD"])
+        )
+
+        current_nav = portfolio.nav
+
+        if self._nav_peak is None:
+            self._nav_peak = current_nav
+
+        # Reset watermark when cooloff expires to prevent immediate re-fire
+        if self._cooloff_remaining == 1:
+            self._nav_peak = current_nav
+
+        if self._cooloff_remaining > 0:
+            self._cooloff_remaining -= 1
+            self._entry_prices.clear()
+            close_signals = [
+                TradeSignal(
+                    symbol=sym,
+                    action=Action.CLOSE,
+                    conviction=Conviction.LOW,
+                    target_weight=0.0,
+                    stop_loss=0.0,
+                    reasoning="NAV circuit breaker: cooling off",
+                )
+                for sym in portfolio.positions
+            ]
+            self._nav_peak = max(self._nav_peak, current_nav)
+            return close_signals
+
+        self._nav_peak = max(self._nav_peak, current_nav)
+        nav_dd = (current_nav - self._nav_peak) / self._nav_peak
+        if nav_dd < -nav_halt:
+            self._cooloff_remaining = cooloff_days
+            self._entry_prices.clear()
+            return [
+                TradeSignal(
+                    symbol=sym,
+                    action=Action.CLOSE,
+                    conviction=Conviction.LOW,
+                    target_weight=0.0,
+                    stop_loss=0.0,
+                    reasoning=f"NAV circuit breaker triggered: dd={nav_dd:.2%}",
+                )
+                for sym in portfolio.positions
+            ]
+
+        # ── BTC regime detection (SMA_fast/SMA_slow) ────────────────────────
+        sma_fast_col = f"sma_{regime_fast}"
+        sma_slow_col = f"sma_{regime_slow}"
+
+        btc_data = indicators_df.filter(pl.col("symbol") == regime_asset).sort("date")
+        if len(btc_data) < regime_slow:
+            return []
+
+        btc_row = cast("RowDict", btc_data.tail(1).row(0, named=True))
+        btc_close = btc_row.get("close")
+
+        # Compute SMAs inline if not pre-computed by indicators pipeline
+        btc_sma_fast = btc_row.get(sma_fast_col)
+        if btc_sma_fast is None:
+            close_series = btc_data.tail(regime_fast)["close"].to_list()
+            if len(close_series) >= regime_fast:
+                btc_sma_fast = sum(close_series) / len(close_series)
+
+        btc_sma_slow = btc_row.get(sma_slow_col)
+        if btc_sma_slow is None:
+            close_series = btc_data.tail(regime_slow)["close"].to_list()
+            if len(close_series) >= regime_slow:
+                btc_sma_slow = sum(close_series) / len(close_series)
+
+        if not all(
+            isinstance(v, (int, float)) for v in [btc_close, btc_sma_fast, btc_sma_slow]
+        ):
+            return []
+
+        bull_regime = float(btc_sma_fast) > float(
+            btc_sma_slow
+        ) and float(  # type: ignore[arg-type]
+            btc_close
+        ) > float(
+            btc_sma_slow
+        )  # type: ignore[arg-type]
+
+        signals: list[TradeSignal] = []
+
+        if not bull_regime:
+            for sym in list(portfolio.positions):
+                signals.append(
+                    TradeSignal(
+                        symbol=sym,
+                        action=Action.CLOSE,
+                        conviction=Conviction.LOW,
+                        target_weight=0.0,
+                        stop_loss=0.0,
+                        reasoning="BTC regime: non-bull — exit to cash",
+                    )
+                )
+                self._entry_prices.pop(sym, None)
+            return signals
+
+        # ── Bull regime: rank alts by momentum ──────────────────────────────
+        alt_returns: list[tuple[str, float]] = []
+        for sym in alt_universe:
+            sym_data = indicators_df.filter(pl.col("symbol") == sym).sort("date")
+            ret = _trailing_return(sym_data, momentum_lb)
+            if ret is not None:
+                alt_returns.append((sym, ret))
+
+        if not alt_returns:
+            return []
+
+        alt_returns.sort(key=lambda x: x[1], reverse=True)
+        top_alts = {sym for sym, _ in alt_returns[:n_top]}
+
+        for sym in list(portfolio.positions):
+            current_price = prices.get(sym, 0.0)
+            entry_price = self._entry_prices.get(sym, current_price)
+
+            if (
+                current_price > 0
+                and entry_price > 0
+                and current_price < entry_price * (1.0 - stop_pct)
+            ):
+                signals.append(
+                    TradeSignal(
+                        symbol=sym,
+                        action=Action.CLOSE,
+                        conviction=Conviction.LOW,
+                        target_weight=0.0,
+                        stop_loss=0.0,
+                        reasoning=f"Stop-loss hit: {current_price:.2f} < {entry_price*(1-stop_pct):.2f}",
+                    )
+                )
+                self._entry_prices.pop(sym, None)
+            elif sym not in top_alts:
+                signals.append(
+                    TradeSignal(
+                        symbol=sym,
+                        action=Action.CLOSE,
+                        conviction=Conviction.LOW,
+                        target_weight=0.0,
+                        stop_loss=0.0,
+                        reasoning=f"Rotated out: {sym} no longer top-{n_top} by momentum",
+                    )
+                )
+                self._entry_prices.pop(sym, None)
+
+        for sym in top_alts:
+            if sym in portfolio.positions:
+                continue
+            current_price = prices.get(sym, 0.0)
+            if current_price <= 0:
+                continue
+            stop_level = round(current_price * (1.0 - stop_pct), 2)
+            self._entry_prices[sym] = current_price
+            signals.append(
+                TradeSignal(
+                    symbol=sym,
+                    action=Action.BUY,
+                    conviction=Conviction.HIGH,
+                    target_weight=self.config.target_position_weight,
+                    stop_loss=stop_level,
+                    reasoning=(
+                        f"BTC bull regime (SMA{regime_fast}/SMA{regime_slow}) + "
+                        f"top-{n_top} alt momentum ({alt_returns[0][1]:.2%} over {momentum_lb}d)"
+                    ),
+                )
+            )
+
+        return signals
+
+
+# ---------------------------------------------------------------------------
 # Strategy factory
 # ---------------------------------------------------------------------------
 
@@ -3163,6 +3607,9 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "gld_breakout_confirmed": GldBreakoutConfirmedStrategy,
     "cef_discount": CEFDiscountRegistryStrategy,
     "nlp_signal": NlpSignalStrategy,
+    "btc_regime_alt_momentum": BtcRegimeAltMomentumStrategy,
+    "btc_regime_alt_momentum_v2": BtcRegimeAltMomentumV2Strategy,
+    "btc_regime_alt_momentum_v3": BtcRegimeAltMomentumV2Strategy,
 }
 
 

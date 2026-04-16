@@ -38,6 +38,7 @@ class StrategyConfig:
     max_positions: int = 10
     target_position_weight: float = 0.05
     stop_loss_pct: float = 0.05
+    fractional_shares: bool = False
     parameters: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -47,6 +48,7 @@ class StrategyConfig:
             "max_positions": self.max_positions,
             "target_position_weight": self.target_position_weight,
             "stop_loss_pct": self.stop_loss_pct,
+            "fractional_shares": self.fractional_shares,
             "parameters": self.parameters,
         }
 

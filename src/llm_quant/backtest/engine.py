@@ -7,6 +7,7 @@ using causal operations, then sliced per-day for the strategy.
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import uuid
@@ -30,7 +31,7 @@ from llm_quant.backtest.metrics import (
 )
 from llm_quant.backtest.strategy import Strategy
 from llm_quant.brain.models import Action, Conviction, TradeSignal
-from llm_quant.config import ExecutionConfig, RiskLimits, load_config
+from llm_quant.config import load_config
 from llm_quant.trading.exits import (
     ExitPolicy,
     ExitRuntime,
@@ -286,10 +287,27 @@ def build_backtest_exit_components(
     *,
     config_dir: str | Path | None = None,
     broker: str = "paper",
+    exit_policy_overrides: dict[str, object] | None = None,
 ) -> tuple[ExitPolicy, ExitRuntime, str, SyntheticExitParityTier, str]:
-    """Build governed backtest exit components from canonical config."""
+    """Build governed backtest exit components from canonical config.
+
+    Args:
+        exit_policy_overrides: Optional dict of ExitPolicy field overrides loaded from
+            research spec (e.g. ``{"partial_take_profit_enabled": False}``).
+            Allows per-strategy tuning of exit-policy parameters without modifying
+            the shared config files.  Only valid ExitPolicy fields are applied.
+    """
+    import dataclasses
+
     app_config = load_config(Path(config_dir) if config_dir is not None else None)
     exit_policy = build_exit_policy(app_config.risk, app_config.execution)
+    if exit_policy_overrides:
+        valid_fields = {f.name for f in dataclasses.fields(exit_policy)}
+        safe_overrides = {
+            k: v for k, v in exit_policy_overrides.items() if k in valid_fields
+        }
+        if safe_overrides:
+            exit_policy = dataclasses.replace(exit_policy, **safe_overrides)
     exit_runtime = build_exit_runtime(broker, app_config.execution)
     parity_tier: SyntheticExitParityTier = "tier1_close_only"
     execution_assumption = synthetic_exit_execution_assumption(parity_tier)
@@ -330,6 +348,7 @@ class BacktestEngine:
         volatility_target: float | None = None,
         vol_target_window: int = 20,
         vol_target_max_scale: float = 2.0,
+        exit_policy_overrides: dict[str, object] | None = None,
     ) -> None:
         self.strategy = strategy
         self.data_dir = data_dir or "data"
@@ -350,7 +369,7 @@ class BacktestEngine:
             self.backtest_exit_parity_mode,
             self.backtest_exit_parity_tier,
             self.backtest_exit_execution_assumption,
-        ) = build_backtest_exit_components()
+        ) = build_backtest_exit_components(exit_policy_overrides=exit_policy_overrides)
 
     def run(
         self,
@@ -668,6 +687,10 @@ class BacktestEngine:
         for mult in cost_multipliers:
             if mult == 1.0:
                 continue
+            # Deep-copy strategy to reset any stateful attributes (e.g., NAV peak,
+            # cooloff counters) that would otherwise bleed from the 1x run into
+            # subsequent cost-multiplier runs and corrupt their results.
+            self.strategy = copy.deepcopy(self.strategy)
             result = self.run(
                 prices_df=prices_df,
                 indicators_df=indicators_df,
@@ -781,7 +804,9 @@ class BacktestEngine:
             self.backtest_exit_parity_tier == "tier2_ohlc_conservative"
             and prices_df is not None
         ):
-            bar_highs, bar_lows = self._get_bar_extremes_for_date(prices_df, current_date)
+            bar_highs, bar_lows = self._get_bar_extremes_for_date(
+                prices_df, current_date
+            )
 
         for symbol, pos in portfolio.positions.items():
             price = prices.get(symbol, pos.current_price)
@@ -855,6 +880,7 @@ class BacktestEngine:
     ) -> list[TradeRecord]:
         records: list[TradeRecord] = []
         nav = portfolio.nav
+        fractional = getattr(self.strategy.config, "fractional_shares", False)
 
         def record_noop(reason: str) -> None:
             if signal_noop_reasons is None:
@@ -881,7 +907,9 @@ class BacktestEngine:
                 if additional <= 0:
                     record_noop("buy_target_at_or_below_current")
                     continue
-                shares = math.floor(additional / price)
+                shares = (
+                    additional / price if fractional else math.floor(additional / price)
+                )
                 if shares <= 0:
                     record_noop("buy_target_below_share_floor")
                     continue
@@ -895,7 +923,11 @@ class BacktestEngine:
                 )
                 total_cost = shares * price + cost_estimate
                 if total_cost > portfolio.cash:
-                    shares = math.floor((portfolio.cash - cost_estimate) / price)
+                    shares = (
+                        (portfolio.cash - cost_estimate) / price
+                        if fractional
+                        else math.floor((portfolio.cash - cost_estimate) / price)
+                    )
                     if shares <= 0:
                         record_noop("insufficient_cash_after_costs")
                         continue
@@ -958,7 +990,10 @@ class BacktestEngine:
                     if reduce <= 0:
                         record_noop("sell_target_at_or_above_current")
                         continue
-                    shares = min(math.floor(reduce / price), existing.shares)
+                    shares = min(
+                        reduce / price if fractional else math.floor(reduce / price),
+                        existing.shares,
+                    )
                     if shares <= 0:
                         residual_notional = abs(current_notional - target_notional)
                         if residual_notional < price:
@@ -1007,7 +1042,9 @@ class BacktestEngine:
                         ),
                         exit_reason=signal.exit_reason,
                         exit_parity_tier=(
-                            self.backtest_exit_parity_tier if is_synthetic_exit else "tier1_close_only"
+                            self.backtest_exit_parity_tier
+                            if is_synthetic_exit
+                            else "tier1_close_only"
                         ),
                     )
                 )
@@ -1086,7 +1123,7 @@ class BacktestEngine:
         if len(nav_series) < window + 1:
             return 1.0
 
-        recent_nav = nav_series[-(window + 1):]
+        recent_nav = nav_series[-(window + 1) :]
         daily_returns = [
             recent_nav[i] / recent_nav[i - 1] - 1.0
             for i in range(1, len(recent_nav))
@@ -1184,7 +1221,9 @@ class BacktestEngine:
                 if len(vix_rows2) > 0:
                     vix_level = float(vix_rows2["vix_level"][0])
 
-            if vix_level is not None and not regime_filter(vix_level, cfg.vix_threshold):
+            if vix_level is not None and not regime_filter(
+                vix_level, cfg.vix_threshold
+            ):
                 n_buys = sum(1 for s in signals if s.action == Action.BUY)
                 if n_buys:
                     logger.debug(
