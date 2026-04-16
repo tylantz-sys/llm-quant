@@ -165,9 +165,11 @@ def enforce_governor_constraints(
                 scaled += 1
 
         # Stop-loss / take-profit cannot drift from candidate strategy values.
-        if round(float(overlay_signal.stop_loss), 4) != round(candidate_stop, 4):
+        # The parser normalises stop/tp to 2dp (round(..., 2)), so compare at
+        # 2dp to avoid spurious violations from sub-cent floating-point noise.
+        if round(float(overlay_signal.stop_loss), 2) != round(candidate_stop, 2):
             violations.append(f"stop_drift:{symbol}")
-        if round(float(overlay_signal.take_profit), 4) != round(candidate_tp, 4):
+        if round(float(overlay_signal.take_profit), 2) != round(candidate_tp, 2):
             violations.append(f"tp_drift:{symbol}")
 
         accepted += 1

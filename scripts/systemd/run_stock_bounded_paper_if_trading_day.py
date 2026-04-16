@@ -10,11 +10,12 @@ import sys
 import requests
 
 
-ALPACA_PAPER_URL = os.environ["ALPACA_PAPER_URL"].rstrip("/")
+_raw_url = os.environ["ALPACA_PAPER_URL"].rstrip("/")
+ALPACA_PAPER_BASE_URL = _raw_url[:-3] if _raw_url.endswith("/v2") else _raw_url
 ALPACA_API_KEY = os.environ["ALPACA_API_KEY"]
 ALPACA_SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
 
-CLOCK_URL = f"{ALPACA_PAPER_URL}/v2/clock"
+CLOCK_URL = f"{ALPACA_PAPER_BASE_URL}/v2/clock"
 RUN_CMD = [
     "/home/ty/Documents/llm-quant/llm-quant/.venv/bin/pq",
     "run",
