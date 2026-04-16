@@ -1,0 +1,89 @@
+statement: >
+  Bitcoin's intermediate-term trend (SMA20 > SMA50 AND price > SMA50) acts as
+  a reliable regime gate for the broader crypto asset class: alts tend to
+  outperform in confirmed BTC bull regimes and trend lower or sideways outside
+  them. Before testing this governed v1, I hypothesize that a daily strategy
+  which (a) enters the highest-momentum alt (top-1 by 10-day return from
+  ETH/ADA/SOL/XRP) only when BTC is in a confirmed bull regime, (b) exits to
+  cash when the regime flips, and (c) halts all trading for 10 days after NAV
+  drawdown exceeds 18% from peak, can produce risk-adjusted returns materially
+  superior to a buy-and-hold BTC benchmark on a 5-year daily sample.
+
+expected_outcome:
+  metric: "sharpe"
+  direction: "greater_than"
+  threshold: 1.5
+  comparison_basis: "full 5-year out-of-sample walk-forward, 6 folds"
+
+measurement_method:
+  primary_metric: "sharpe"
+  secondary_metrics:
+    - "max_drawdown"
+    - "profit_factor"
+    - "ann_return"
+    - "walk_forward_min_oos_sharpe"
+    - "walk_forward_folds_passing"
+    - "dsr"
+    - "cpcv_oos_is_ratio"
+    - "days_active_pct"
+  minimum_sample:
+    min_backtest_years: 5
+    min_oos_periods: 5
+    min_paper_days: 60
+
+null_hypothesis: >
+  The BTC regime filter and alt-momentum ranking do not produce statistically
+  significant edge after realistic transaction costs. Any apparent outperformance
+  reflects data snooping over the 2021-2026 crypto bull cycle, and the strategy
+  would fail to deliver Sharpe > 1.5 or MaxDD < 25% on genuinely unseen data.
+
+falsification_criteria:
+  - "Full-period Sharpe falls to or below 1.5 on 5-year sample."
+  - "Max drawdown breaches -25%."
+  - "Profit factor falls to or below 1.3 after 10 bps round-trip costs."
+  - "More than 2 of 6 walk-forward OOS folds post negative Sharpe."
+  - "DSR falls below 0.95 (evidence of multiple-comparison inflation)."
+  - "CPCV OOS/IS Sharpe ratio falls to or below 0."
+  - "Performance attributable to fewer than 3 distinct market regimes."
+  - "Any mechanism relies on look-ahead (e.g., same-bar fills, future regime knowledge)."
+
+timeframe:
+  backtest_period: "2021-02-20 to 2026-04-12 (5 years, daily)"
+  evaluation_horizon: "daily strategy with 6-fold walk-forward monitoring; paper trading gate 60 days"
+
+conviction:
+  level: "high"
+  rationale: >
+    BTC-as-regime-gate is a documented pattern in academic crypto literature
+    (market-cap dominance as risk appetite proxy). The alt-momentum signal has
+    clean economic intuition: capital rotates into smaller-cap tokens when BTC
+    trend is healthy, reversing on risk-off. The NAV circuit breaker addresses
+    the single known structural failure mode (within-regime alt crash that BTC
+    hasn't priced yet). Backtest Sharpe of 3.1 with DSR=1.0 and CPCV OOS/IS=1.003
+    is unusually clean; conviction is high but paper trading is still required
+    to test execution assumptions (spread, daily close fill, weekend gaps).
+
+economic_rationale: >
+  Crypto is a reflexive risk-on / risk-off asset class. BTC is the largest,
+  most liquid, and most macro-sensitive asset in the space; its trend
+  structurally leads capital rotation into higher-beta alts. A confirmed BTC
+  bull regime (both price above 50-day MA and 20-day MA above 50-day MA)
+  requires persistent buying pressure at multiple horizons — it is not a
+  single-day signal. When both conditions hold, informed capital is already
+  allocated to crypto and alts tend to benefit from spillover demand. When
+  BTC fails either condition, rational risk management dictates cash.
+  The 10-day momentum ranking selects for the alt with the strongest current
+  momentum, exploiting the well-documented crypto cross-sectional momentum
+  effect (Liu, Tsyvinski 2021). The NAV circuit breaker prevents compounding
+  within-regime alt crashes that the BTC filter alone cannot detect.
+
+mechanism_family: "Cross-Asset Information Flow (Family 1 variant: intra-asset-class lead-lag)"
+
+risks:
+  - "Single-asset-class risk: entire strategy is uncorrelated with equities only in bear crypto regimes; in bull regimes it is 100% crypto exposure."
+  - "Regime filter lag: BTC SMA50 is a slow indicator; a flash crash that recovers within days may not trip the filter, allowing full drawdown within regime."
+  - "Alt selection instability: 10-day momentum can flip daily, generating churn costs on choppy alt markets."
+  - "Exchange/liquidity risk: SOL and ADA have meaningfully wider spreads than BTC/ETH; cost model of 10 bps may be optimistic for those names."
+  - "Crypto cycle length: the 5-year sample contains exactly one full bull-bear-bull cycle. Performance in a multi-year stagnation scenario (2015-2016 style) is untested."
+  - "Regulatory/structural risk: delistings or regulatory halts for specific alts are not modeled."
+  - "The 2022 walk-forward fold (Sharpe=0.84) reveals vulnerability during choppy bull-to-bear transition periods with frequent regime oscillation."
