@@ -1,0 +1,47 @@
+# Pod: btc-regime-alt-momentum-eod
+# Daily EOD entry run for btc-regime-alt-momentum-v3.
+#
+# Problem: the 5-min intraday pod (btc-regime-alt-momentum-paper) skips the
+# daily Yahoo fetch on every tick to avoid hammering the data source. But the
+# underlying strategy is daily and needs a fresh EOD bar to compute regime
+# (SMA10/SMA30) and 14d momentum rankings. This EOD pod fires once per day
+# after the US market close to generate entry signals. The intraday pod
+# continues to handle exit monitoring (trailing stop, partial TP).
+#
+# Capital, broker, and risk settings MUST match the intraday pod exactly so
+# both pods read from the same Alpaca portfolio balance and apply the same
+# exit-policy overrides.
+#
+# Promotion gate: 60 days, >=50 trades, Sharpe >= 0.60, MaxDD < 30%
+# See: data/strategies/btc-regime-alt-momentum-v3/paper-trading.yaml
+
+[execution]
+signal_source = "strategy_overlay"
+strategy_set = "candidate_crypto_btcregime"
+overlay_governor_strict = true
+overlay_max_upscale = 1.25
+overlay_max_downscale = 0.0
+# intraday_enabled = false → daily run fetches EOD bars from Yahoo Finance
+intraday_enabled = false
+intraday_rth_guard = false
+asset_class_filter = ["crypto"]
+claude_overlay_only = true
+crypto_order_sizing = "qty"
+crypto_time_in_force = "gtc"
+initial_capital_source = "alpaca_equity"
+
+# Exit policy overrides — must match btc-regime-alt-momentum-paper.toml exactly.
+# Default 2% partial TP + 1.5% trailing stop destroys momentum alpha in crypto.
+profit_take_partial_pct = 0.12
+trailing_stop_pct = 0.12
+scale_in_tranches = 1
+
+[strategy]
+sleeve = "crypto"
+
+[strategy_rotation]
+enabled = false
+
+[risk]
+# Track B position limits
+crypto_max_position_weight = 0.30

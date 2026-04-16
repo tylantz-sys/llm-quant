@@ -1,6 +1,6 @@
 [execution]
 signal_source = "strategy_overlay"
-strategy_set = "promoted_crypto"
+strategy_set = "candidate_crypto"
 overlay_governor_strict = true
 overlay_max_upscale = 1.25
 overlay_max_downscale = 0.0
