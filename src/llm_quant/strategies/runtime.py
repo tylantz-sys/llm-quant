@@ -231,7 +231,7 @@ def merge_strategy_signals(
             target_weight = 0.0
 
         stop_losses = [g.stop_loss for g in group if g.stop_loss > 0]
-        stop_loss = min(stop_losses) if stop_losses else 0.0
+        stop_loss = round(min(stop_losses), 2) if stop_losses else 0.0
 
         conviction = _max_conviction([g.conviction for g in group])
         strategy_ids = ",".join(sorted({g.strategy_id for g in group if g.strategy_id}))

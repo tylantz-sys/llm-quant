@@ -41,6 +41,14 @@ class TradeSignal:
     exit_reason: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Normalise price-level fields at construction so every code path
+        # (strategy-generated or LLM-parsed) uses consistent 2dp precision.
+        # target_weight is intentionally excluded — it is rounded per-path
+        # (parser rounds to 4dp; strategies use explicit round() at callsite).
+        self.stop_loss = round(float(self.stop_loss), 2)
+        self.take_profit = round(float(self.take_profit), 2)
+
 
 @dataclass
 class TradingDecision:

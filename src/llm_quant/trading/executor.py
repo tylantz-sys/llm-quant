@@ -235,7 +235,7 @@ def _execute_buy(
         ) / total_shares
         existing.shares = total_shares
         existing.current_price = price
-        existing.stop_loss = signal.stop_loss
+        existing.stop_loss = round(signal.stop_loss, 2)
     else:
         portfolio.positions[signal.symbol] = _make_position(
             signal.symbol, shares_to_buy, price, signal.stop_loss
@@ -300,7 +300,7 @@ def _execute_sell(
         del portfolio.positions[signal.symbol]
     # Update stop-loss if signal provides one
     elif signal.stop_loss > 0.0:
-        existing.stop_loss = signal.stop_loss
+        existing.stop_loss = round(signal.stop_loss, 2)
 
     return ExecutedTrade(
         symbol=signal.symbol,
