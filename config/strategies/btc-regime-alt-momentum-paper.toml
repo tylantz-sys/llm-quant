@@ -3,6 +3,11 @@
 # Runs via Alpaca paper account every 5 min during crypto market hours.
 # Capital sourced from Alpaca equity — uses real portfolio balance, not synthetic.
 #
+# CAPITAL NOTE: initial_capital_source = "alpaca_equity" reads the FULL Alpaca account
+# equity. Both pods (btc-regime + crypto-ethbtc) share the same paper account and each
+# sees 100% of equity. There is no cross-pod capital isolation at the broker level.
+# Combined exposure is managed implicitly via per-position weight limits.
+#
 # Promotion gate: 60 days, >=50 trades, Sharpe >= 0.60, MaxDD < 30%
 # See: data/strategies/btc-regime-alt-momentum-v3/paper-trading.yaml
 
@@ -30,7 +35,13 @@ symbol_exclude = ["ETH-USD", "ADA-USD"]
 # Exit policy overrides — CRITICAL for this strategy.
 # Default 2% partial TP + 1.5% trailing stop destroys momentum alpha in crypto.
 # These must match the values in the backtest spec exactly.
+# Backtest spec (research-spec.yaml line 179): partial_take_profit_enabled = false,
+# trailing_stop_pct = 0.12. The 12% partial_pct here is a live-trading addition
+# for partial profit harvest; partial_size = 0.50 and remainder_tp_mult = 9999 ensure
+# the "remainder" leg never triggers (effectively trailing-stop-only after first partial).
 profit_take_partial_pct = 0.12
+profit_take_partial_size = 0.50
+profit_take_remainder_tp_mult = 9999.0
 trailing_stop_pct = 0.12
 scale_in_tranches = 1
 

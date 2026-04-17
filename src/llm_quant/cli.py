@@ -805,6 +805,15 @@ def _run_single_pod(
 
         strategy_symbols = required_symbols(specs)
 
+        # Pre-filter strategy_symbols by symbol_exclude so excluded symbols are never
+        # fetched as market data or passed to intraday freshness checks.
+        if config.execution.symbol_exclude:
+            _excluded_norm = {_normalize_symbol(s) for s in config.execution.symbol_exclude}
+            strategy_symbols = [
+                s for s in strategy_symbols
+                if _normalize_symbol(s) not in _excluded_norm
+            ]
+
         missing_symbols = sorted(set(strategy_symbols) - set(symbols))
         stale_symbols: list[str] = []
         if config.execution.intraday_enabled and not log_only and strategy_symbols:

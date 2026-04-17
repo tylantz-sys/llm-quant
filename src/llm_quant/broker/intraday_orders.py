@@ -328,7 +328,7 @@ def _submit_oco_protection(
         if not oco_tp_order_id:
             raise AlpacaError(f"Crypto TP submission missing order id for {symbol}")
 
-        sl_limit_price = round(stop_price * 0.995, 2)
+        sl_limit_price = round(stop_price * 0.98, 2)  # 2% buffer for crypto gap risk
         stop_resp = client.submit_stop_limit_order(
             symbol=symbol,
             qty=qty_remainder,
@@ -372,7 +372,7 @@ def _submit_stop_protection(
     allow_frac = _is_crypto(asset_class)
     tif = "gtc" if allow_frac else time_in_force
     if allow_frac:
-        sl_limit_price = round(stop_price * 0.995, 2)
+        sl_limit_price = round(stop_price * 0.98, 2)  # 2% buffer for crypto gap risk
         stop_order = client.submit_stop_limit_order(
             symbol=symbol,
             qty=qty,

@@ -1,4 +1,8 @@
 [execution]
+# CAPITAL NOTE: initial_capital_source = "alpaca_equity" reads the FULL Alpaca account
+# equity. Both pods (btc-regime + crypto-ethbtc) share the same paper account and each
+# sees 100% of equity. There is no cross-pod capital isolation at the broker level.
+# Combined exposure is managed implicitly via per-position weight limits.
 signal_source = "strategy_overlay"
 strategy_set = "candidate_crypto"
 overlay_governor_strict = true
