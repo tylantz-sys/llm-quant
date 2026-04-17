@@ -259,6 +259,7 @@ def log_broker_fills(
     sleeve: str | None,
     source_decision_id: int | None,
     snapshot: object | None = None,
+    exit_policy_state: dict | None = None,
 ) -> list[int]:
     """Persist broker-authoritative fills into the existing ``trades`` table.
 

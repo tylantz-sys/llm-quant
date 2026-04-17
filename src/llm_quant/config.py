@@ -87,6 +87,8 @@ class ExecutionConfig(BaseModel):
     crypto_order_sizing: str = "qty"
     crypto_time_in_force: str = "gtc"
     crypto_symbol_map: dict[str, str] = Field(default_factory=dict)
+    # Symbols explicitly excluded from trade execution (e.g. to avoid cross-pod conflicts)
+    symbol_exclude: list[str] = Field(default_factory=list)
 
 
 class StrategyRotationConfig(BaseModel):

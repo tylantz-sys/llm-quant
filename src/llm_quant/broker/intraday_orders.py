@@ -415,101 +415,138 @@ def place_oco_exits_for_buys(
             continue
 
         symbol = trade.symbol
-        asset_class = (asset_class_map or {}).get(symbol, "equity")
-        qty = _normalize_order_qty(float(trade.shares))
-        if qty <= 0:
-            continue
+        try:
+            _place_oco_exits_for_single_buy(
+                client=client,
+                states=states,
+                trade=trade,
+                stop_losses=stop_losses,
+                partial_tp_pct=partial_tp_pct,
+                partial_tp_size=partial_tp_size,
+                remainder_tp_mult=remainder_tp_mult,
+                default_stop_loss_pct=default_stop_loss_pct,
+                fail_on_unprotected=fail_on_unprotected,
+                fill_prices=fill_prices,
+                asset_class_map=asset_class_map,
+            )
+        except AlpacaError as exc:
+            logger.warning(
+                "OCO/stop placement failed for %s (non-fatal, continuing other symbols): %s",
+                symbol,
+                exc,
+            )
 
-        # Use actual broker fill price when available (H7: signal price may differ from fill)
-        effective_price = (fill_prices or {}).get(symbol, trade.price)
-        if effective_price <= 0:
-            effective_price = trade.price
 
-        stop_price = stop_losses.get(symbol, 0.0)
-        if stop_price <= 0:
-            stop_price = effective_price * (1.0 - default_stop_loss_pct)
-        if stop_price <= 0:
-            raise AlpacaError(f"Missing stop price for {symbol} after entry fill")
+def _place_oco_exits_for_single_buy(
+    client: AlpacaClient,
+    states: dict[str, IntradayOrderState],
+    trade: Any,
+    stop_losses: dict[str, float],
+    partial_tp_pct: float,
+    partial_tp_size: float,
+    remainder_tp_mult: float,
+    default_stop_loss_pct: float,
+    fail_on_unprotected: bool = False,
+    fill_prices: dict[str, float] | None = None,
+    asset_class_map: dict[str, str] | None = None,
+) -> None:
+    """Place OCO/stop exits for a single buy trade. Raises AlpacaError on failure."""
+    symbol = trade.symbol
+    asset_class = (asset_class_map or {}).get(symbol, "equity")
+    qty = _normalize_order_qty(float(trade.shares))
+    if qty <= 0:
+        return
 
-        partial_tp_price = effective_price * (1.0 + partial_tp_pct)
-        remainder_tp_pct = partial_tp_pct * max(remainder_tp_mult, 0.0)
-        remainder_tp_price = effective_price * (1.0 + remainder_tp_pct)
-        min_remainder_tp = partial_tp_price + 0.01
-        if remainder_tp_price < min_remainder_tp:
-            remainder_tp_price = min_remainder_tp
+    # Use actual broker fill price when available (H7: signal price may differ from fill)
+    effective_price = (fill_prices or {}).get(symbol, trade.price)
+    if effective_price <= 0:
+        effective_price = trade.price
 
-        qty_tp, qty_remainder = _required_tp_qty(qty, partial_tp_size)
-        if qty_tp <= 0:
-            raise AlpacaError(f"TP1 quantity resolved to zero for {symbol}")
+    stop_price = stop_losses.get(symbol, 0.0)
+    if stop_price <= 0:
+        stop_price = effective_price * (1.0 - default_stop_loss_pct)
+    if stop_price <= 0:
+        raise AlpacaError(f"Missing stop price for {symbol} after entry fill")
 
-        partial_tp_order_id = _submit_partial_tp(
+    partial_tp_price = effective_price * (1.0 + partial_tp_pct)
+    remainder_tp_pct = partial_tp_pct * max(remainder_tp_mult, 0.0)
+    remainder_tp_price = effective_price * (1.0 + remainder_tp_pct)
+    min_remainder_tp = partial_tp_price + 0.01
+    if remainder_tp_price < min_remainder_tp:
+        remainder_tp_price = min_remainder_tp
+
+    qty_tp, qty_remainder = _required_tp_qty(qty, partial_tp_size)
+    if qty_tp <= 0:
+        raise AlpacaError(f"TP1 quantity resolved to zero for {symbol}")
+
+    partial_tp_order_id = _submit_partial_tp(
+        client,
+        symbol=symbol,
+        qty_tp=qty_tp,
+        partial_tp_price=partial_tp_price,
+        asset_class=asset_class,
+    )
+
+    if _is_crypto(asset_class):
+        # Crypto: Alpaca does not support OCO. Place a full-size stop covering 100% of
+        # the position. When TP1 fills, reconcile_orders will cancel this stop and
+        # replace it with a remainder-sized stop + TP2 limit. This ensures the entire
+        # position is always protected on the downside.
+        oco_stop_order_id = _submit_stop_protection(
             client,
             symbol=symbol,
-            qty_tp=qty_tp,
-            partial_tp_price=partial_tp_price,
+            qty=qty,
+            stop_price=stop_price,
             asset_class=asset_class,
         )
-
-        if _is_crypto(asset_class):
-            # Crypto: Alpaca does not support OCO. Place a full-size stop covering 100% of
-            # the position. When TP1 fills, reconcile_orders will cancel this stop and
-            # replace it with a remainder-sized stop + TP2 limit. This ensures the entire
-            # position is always protected on the downside.
-            oco_stop_order_id = _submit_stop_protection(
-                client,
-                symbol=symbol,
-                qty=qty,
-                stop_price=stop_price,
-                asset_class=asset_class,
-            )
-            if fail_on_unprotected and not oco_stop_order_id:
-                raise AlpacaError(f"Protective stop missing for {symbol} after crypto entry")
-            states[symbol] = IntradayOrderState(
-                symbol=symbol,
-                partial_tp_order_id=partial_tp_order_id,
-                oco_order_id=None,
-                oco_tp_order_id=None,   # TP2 deferred until TP1 fills
-                oco_stop_order_id=oco_stop_order_id,
-                hwm=effective_price,
-                remaining_qty=float(qty),  # stop covers full position
-                initial_stop_price=float(stop_price),
-                protection_qty=float(qty),
-            )
-            continue
-
-        oco_order_id = None
-        oco_tp_order_id = None
-        oco_stop_order_id = None
-        if qty_remainder > 0:
-            oco_order_id, oco_tp_order_id, oco_stop_order_id = _submit_oco_protection(
-                client,
-                symbol=symbol,
-                qty_remainder=qty_remainder,
-                remainder_tp_price=remainder_tp_price,
-                stop_price=stop_price,
-                asset_class=asset_class,
-            )
-            if fail_on_unprotected and not oco_stop_order_id:
-                raise AlpacaError(f"Protective stop missing for {symbol} after OCO placement")
-        else:
-            oco_stop_order_id = _submit_stop_protection(
-                client,
-                symbol=symbol,
-                qty=qty,
-                stop_price=stop_price,
-                asset_class=asset_class,
-            )
-
+        if fail_on_unprotected and not oco_stop_order_id:
+            raise AlpacaError(f"Protective stop missing for {symbol} after crypto entry")
         states[symbol] = IntradayOrderState(
             symbol=symbol,
             partial_tp_order_id=partial_tp_order_id,
-            oco_order_id=oco_order_id,
-            oco_tp_order_id=oco_tp_order_id,
+            oco_order_id=None,
+            oco_tp_order_id=None,   # TP2 deferred until TP1 fills
             oco_stop_order_id=oco_stop_order_id,
             hwm=effective_price,
-            remaining_qty=float(qty_remainder if qty_remainder > 0 else qty),
+            remaining_qty=float(qty),  # stop covers full position
             initial_stop_price=float(stop_price),
+            protection_qty=float(qty),
         )
+        return
+
+    oco_order_id = None
+    oco_tp_order_id = None
+    oco_stop_order_id = None
+    if qty_remainder > 0:
+        oco_order_id, oco_tp_order_id, oco_stop_order_id = _submit_oco_protection(
+            client,
+            symbol=symbol,
+            qty_remainder=qty_remainder,
+            remainder_tp_price=remainder_tp_price,
+            stop_price=stop_price,
+            asset_class=asset_class,
+        )
+        if fail_on_unprotected and not oco_stop_order_id:
+            raise AlpacaError(f"Protective stop missing for {symbol} after OCO placement")
+    else:
+        oco_stop_order_id = _submit_stop_protection(
+            client,
+            symbol=symbol,
+            qty=qty,
+            stop_price=stop_price,
+            asset_class=asset_class,
+        )
+
+    states[symbol] = IntradayOrderState(
+        symbol=symbol,
+        partial_tp_order_id=partial_tp_order_id,
+        oco_order_id=oco_order_id,
+        oco_tp_order_id=oco_tp_order_id,
+        oco_stop_order_id=oco_stop_order_id,
+        hwm=effective_price,
+        remaining_qty=float(qty_remainder if qty_remainder > 0 else qty),
+        initial_stop_price=float(stop_price),
+    )
 
 
 def update_trailing_stops(

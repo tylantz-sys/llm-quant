@@ -684,6 +684,13 @@ def _rebuild_portfolio_from_reconciliation(
     if row_count is None or row_count[0] == 0:
         return 0
 
+    # Snapshot current stop_loss values before clearing — broker_fill_events
+    # does not store stop_loss, so replaying fills alone would zero them out.
+    prior_stop_losses: dict[str, float] = {
+        sym: float(getattr(pos, "stop_loss", 0.0) or 0.0)
+        for sym, pos in portfolio.positions.items()
+    }
+
     initial_capital = float(getattr(portfolio, "initial_capital", float(getattr(portfolio, "cash", 0.0))))
     portfolio.positions.clear()
     portfolio.cash = initial_capital
@@ -716,6 +723,19 @@ def _rebuild_portfolio_from_reconciliation(
             str(intent_type) if intent_type is not None else None,
         )
         applied += 1
+
+    # Restore stop_loss values that were set by prior broker fill callbacks.
+    # These are not in broker_fill_events but were set on the portfolio when
+    # the original fills were processed (e.g., from intraday_order_state HWM).
+    def _norm(s: str) -> str:
+        return s.replace("/", "").replace("-", "").upper()
+
+    norm_prior = {_norm(sym): sl for sym, sl in prior_stop_losses.items() if sl > 0.0}
+    for sym, pos in portfolio.positions.items():
+        if float(getattr(pos, "stop_loss", 0.0) or 0.0) <= 0.0:
+            restored = norm_prior.get(_norm(sym), 0.0)
+            if restored > 0.0:
+                pos.stop_loss = restored
 
     rebuild_position_state_from_events(conn, pod_id=pod_id)
     return applied

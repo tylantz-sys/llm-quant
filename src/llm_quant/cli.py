@@ -168,7 +168,7 @@ def _sync_live_alpaca_positions(portfolio: Any) -> int:
         return 0
 
     broker_symbols = {
-        _normalize_symbol(str(getattr(p, "symbol", p) if not isinstance(p, str) else p))
+        _normalize_symbol(str(p.get("symbol", "") if isinstance(p, dict) else getattr(p, "symbol", "")))
         for p in broker_positions
     }
 
@@ -999,6 +999,20 @@ def _run_single_pod(
             f"{filtered_count} signal(s) outside asset_class_filter."
         )
 
+    # Filter out any symbols explicitly excluded from this pod's execution universe
+    if config.execution.symbol_exclude:
+        excluded_set = {s.upper().replace("-", "").replace("/", "") for s in config.execution.symbol_exclude}
+        before = len(decision.signals)
+        decision.signals = [
+            sig for sig in decision.signals
+            if sig.symbol.upper().replace("-", "").replace("/", "") not in excluded_set
+        ]
+        dropped = before - len(decision.signals)
+        if dropped:
+            console.print(
+                f"[yellow]WARN[/yellow] Filtered out {dropped} signal(s) in symbol_exclude list."
+            )
+
     # Display decision
     _display_decision(decision)
 
@@ -1038,6 +1052,7 @@ def _run_single_pod(
     signals = signals
     context_payload = None
     now_ts = None
+    order_states: dict = {}  # populated early below if intraday_use_oco; reused in OCO section
     if config.execution.intraday_enabled:
         now_row = conn.execute(
             "SELECT MAX(timestamp) FROM market_data_intraday"
@@ -1046,6 +1061,15 @@ def _run_single_pod(
 
         states = load_position_states(conn, pod_id)
         update_peak_prices(portfolio, prices, states)
+
+        # Pre-load order_states early so the wash-trade guard below can use it.
+        # Do NOT gate on alpaca_client here — it isn't created until line ~1335.
+        # DB-only read; safe to do even before broker client is instantiated.
+        order_states = (
+            load_order_states(conn, pod_id)
+            if config.execution.intraday_use_oco
+            else {}
+        )
 
         entry_signals = [s for s in signals if s.action == Action.BUY]
         other_signals = [s for s in signals if s.action != Action.BUY]
@@ -1063,6 +1087,28 @@ def _run_single_pod(
             config.execution.intraday_timeframe_minutes,
             config.execution.reentry_cooldown_bars,
         )
+
+        # Block new BUY signals for symbols that already have a live protective stop at
+        # the broker. Prevents wash-trade conflicts when a prior stop-limit sell covers
+        # the full position qty. Normalize symbols (strip /- separators) before comparing
+        # since DB may store "XRP/USD" while signals use "XRP-USD".
+        if order_states:
+            def _norm_sym(s: str) -> str:
+                return s.replace("/", "").replace("-", "").upper()
+
+            _protected_normalized = {
+                _norm_sym(sym)
+                for sym, st in order_states.items()
+                if st.oco_stop_order_id and st.stop_status not in ("filled", "cancelled", "expired", "rejected")
+            }
+            if _protected_normalized:
+                before_prot = len(entry_signals)
+                entry_signals = [s for s in entry_signals if _norm_sym(s.symbol) not in _protected_normalized]
+                if len(entry_signals) < before_prot:
+                    console.print(
+                        f"[yellow]WARN[/yellow] Blocked {before_prot - len(entry_signals)} BUY signal(s): "
+                        "active stop order already covers full position."
+                    )
 
         profit_signals, exit_telemetry = evaluate_position_exits(
             portfolio,
@@ -1451,7 +1497,9 @@ def _run_single_pod(
         and not log_only
         and config.execution.intraday_use_oco
     ):
-        order_states = load_order_states(conn, pod_id)
+        # order_states already loaded above (or an empty dict for non-intraday paths)
+        if not order_states:
+            order_states = load_order_states(conn, pod_id)
         try:
             raw_positions = alpaca_client.list_positions()
             positions = {

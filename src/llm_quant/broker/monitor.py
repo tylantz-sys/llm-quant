@@ -99,7 +99,12 @@ def monitor_open_positions(
     tracked_symbols: list[str] | None = None,
 ) -> list[BrokerFillEvent]:
     """Poll broker positions and emit broker-side position snapshots as fill-like events."""
+    def _norm(s: str) -> str:
+        return s.replace("/", "").replace("-", "").upper()
+
+    # Build a normalized lookup so that "ETH-USD" (yfinance) matches "ETH/USD" (Alpaca).
     tracked = {symbol for symbol in (tracked_symbols or []) if symbol}
+    tracked_normalized = {_norm(s) for s in tracked}
     events: list[BrokerFillEvent] = []
 
     try:
@@ -110,7 +115,7 @@ def monitor_open_positions(
 
     for position in positions:
         symbol = str(position.get("symbol") or "")
-        if tracked and symbol not in tracked:
+        if tracked_normalized and _norm(symbol) not in tracked_normalized:
             continue
 
         qty = _normalize_qty(abs(_parse_float(position.get("qty"))))
