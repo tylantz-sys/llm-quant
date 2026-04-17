@@ -14,7 +14,7 @@ class FakeClient:
         self.limit_orders = []
         self.oco_orders = []
 
-    def submit_limit_order(self, symbol, qty, side, limit_price):
+    def submit_limit_order(self, symbol, qty, side, limit_price, **kwargs):
         self.limit_orders.append(
             {
                 "symbol": symbol,
@@ -25,7 +25,7 @@ class FakeClient:
         )
         return {"id": "tp1"}
 
-    def submit_oco_order(self, symbol, qty, side, take_profit, stop_loss):
+    def submit_oco_order(self, symbol, qty, side, take_profit, stop_loss, **kwargs):
         self.oco_orders.append(
             {
                 "symbol": symbol,
@@ -66,7 +66,7 @@ class MissingLegClient:
     def list_orders(self, status="open", nested=False):
         return []
 
-    def submit_stop_order(self, symbol, qty, side, stop_price):
+    def submit_stop_order(self, symbol, qty, side, stop_price, **kwargs):
         self.stop_orders.append(
             {"symbol": symbol, "qty": qty, "side": side, "stop_price": stop_price}
         )
@@ -143,11 +143,11 @@ def test_reconcile_orders_fallbacks_when_oco_legs_missing():
 
 
 class FractionalClient(FakeClient):
-    def submit_limit_order(self, symbol, qty, side, limit_price):
+    def submit_limit_order(self, symbol, qty, side, limit_price, **kwargs):
         order = super().submit_limit_order(symbol, qty, side, limit_price)
         return order
 
-    def submit_oco_order(self, symbol, qty, side, take_profit, stop_loss):
+    def submit_oco_order(self, symbol, qty, side, take_profit, stop_loss, **kwargs):
         order = super().submit_oco_order(symbol, qty, side, take_profit, stop_loss)
         return order
 
@@ -162,7 +162,7 @@ class BrokenProtectionClient:
     def cancel_order(self, order_id):
         return None
 
-    def submit_stop_order(self, symbol, qty, side, stop_price):
+    def submit_stop_order(self, symbol, qty, side, stop_price, **kwargs):
         raise AlpacaError("stop submit failed")
 
 

@@ -262,18 +262,28 @@ def _required_tp_qty(total_qty: float, partial_tp_size: float) -> tuple[float, f
     return qty_tp, qty_remainder
 
 
+def _is_crypto(asset_class: str) -> bool:
+    return asset_class.lower() == "crypto"
+
+
 def _submit_partial_tp(
     client: AlpacaClient,
     *,
     symbol: str,
     qty_tp: float,
     partial_tp_price: float,
+    asset_class: str = "equity",
+    time_in_force: str = "day",
 ) -> str:
+    allow_frac = _is_crypto(asset_class)
+    tif = "gtc" if allow_frac else time_in_force
     order = client.submit_limit_order(
         symbol=symbol,
         qty=qty_tp,
         side="sell",
         limit_price=partial_tp_price,
+        time_in_force=tif,
+        allow_fractional=allow_frac,
     )
     order_id = _extract_order_id(order)
     if not order_id:
@@ -288,13 +298,60 @@ def _submit_oco_protection(
     qty_remainder: float,
     remainder_tp_price: float,
     stop_price: float,
-) -> tuple[str, str | None, str | None]:
+    asset_class: str = "equity",
+    time_in_force: str = "day",
+) -> tuple[str | None, str | None, str | None]:
+    """Submit remainder TP + stop protection.
+
+    For crypto, Alpaca does not support OCO orders. Instead we submit two
+    independent orders: a GTC limit for the TP leg and a GTC stop-limit for
+    the stop leg. Both legs share the same qty — the caller must manage the
+    fact that only one can ultimately fill.
+
+    Returns (oco_order_id, oco_tp_order_id, oco_stop_order_id).
+    For crypto, oco_order_id is None (no parent bracket order).
+    """
+    allow_frac = _is_crypto(asset_class)
+    tif = "gtc" if allow_frac else time_in_force
+
+    if allow_frac:
+        # Crypto: two independent limit/stop-limit orders
+        tp_resp = client.submit_limit_order(
+            symbol=symbol,
+            qty=qty_remainder,
+            side="sell",
+            limit_price=remainder_tp_price,
+            time_in_force=tif,
+            allow_fractional=True,
+        )
+        oco_tp_order_id = _extract_order_id(tp_resp)
+        if not oco_tp_order_id:
+            raise AlpacaError(f"Crypto TP submission missing order id for {symbol}")
+
+        sl_limit_price = round(stop_price * 0.995, 2)
+        stop_resp = client.submit_stop_limit_order(
+            symbol=symbol,
+            qty=qty_remainder,
+            side="sell",
+            stop_price=stop_price,
+            limit_price=sl_limit_price,
+            time_in_force=tif,
+            allow_fractional=True,
+        )
+        oco_stop_order_id = _extract_order_id(stop_resp)
+        if not oco_stop_order_id:
+            raise AlpacaError(f"Crypto stop-limit submission missing order id for {symbol}")
+
+        return None, oco_tp_order_id, oco_stop_order_id
+
+    # Equity: native OCO
     order = client.submit_oco_order(
         symbol=symbol,
         qty=qty_remainder,
         side="sell",
         take_profit=remainder_tp_price,
         stop_loss=stop_price,
+        time_in_force=tif,
     )
     oco_order_id = _extract_order_id(order)
     if not oco_order_id:
@@ -309,13 +366,30 @@ def _submit_stop_protection(
     symbol: str,
     qty: float,
     stop_price: float,
+    asset_class: str = "equity",
+    time_in_force: str = "day",
 ) -> str:
-    stop_order = client.submit_stop_order(
-        symbol=symbol,
-        qty=qty,
-        side="sell",
-        stop_price=stop_price,
-    )
+    allow_frac = _is_crypto(asset_class)
+    tif = "gtc" if allow_frac else time_in_force
+    if allow_frac:
+        sl_limit_price = round(stop_price * 0.995, 2)
+        stop_order = client.submit_stop_limit_order(
+            symbol=symbol,
+            qty=qty,
+            side="sell",
+            stop_price=stop_price,
+            limit_price=sl_limit_price,
+            time_in_force=tif,
+            allow_fractional=True,
+        )
+    else:
+        stop_order = client.submit_stop_order(
+            symbol=symbol,
+            qty=qty,
+            side="sell",
+            stop_price=stop_price,
+            time_in_force=tif,
+        )
     order_id = _extract_order_id(stop_order)
     if not order_id:
         raise AlpacaError(f"Stop submission missing order id for {symbol}")
@@ -333,6 +407,7 @@ def place_oco_exits_for_buys(
     default_stop_loss_pct: float,
     fail_on_unprotected: bool = False,
     fill_prices: dict[str, float] | None = None,
+    asset_class_map: dict[str, str] | None = None,
 ) -> None:
     """Submit partial TP + OCO remainder orders for newly bought positions."""
     for trade in trades:
@@ -340,6 +415,7 @@ def place_oco_exits_for_buys(
             continue
 
         symbol = trade.symbol
+        asset_class = (asset_class_map or {}).get(symbol, "equity")
         qty = _normalize_order_qty(float(trade.shares))
         if qty <= 0:
             continue
@@ -371,6 +447,7 @@ def place_oco_exits_for_buys(
             symbol=symbol,
             qty_tp=qty_tp,
             partial_tp_price=partial_tp_price,
+            asset_class=asset_class,
         )
 
         oco_order_id = None
@@ -383,6 +460,7 @@ def place_oco_exits_for_buys(
                 qty_remainder=qty_remainder,
                 remainder_tp_price=remainder_tp_price,
                 stop_price=stop_price,
+                asset_class=asset_class,
             )
             if fail_on_unprotected and not oco_stop_order_id:
                 raise AlpacaError(f"Protective stop missing for {symbol} after OCO placement")
@@ -392,6 +470,7 @@ def place_oco_exits_for_buys(
                 symbol=symbol,
                 qty=qty,
                 stop_price=stop_price,
+                asset_class=asset_class,
             )
 
         states[symbol] = IntradayOrderState(
@@ -538,6 +617,7 @@ def reconcile_orders(
     partial_tp_size: float = 0.50,
     remainder_tp_mult: float = 2.0,
     partial_tp_pct: float | None = None,
+    asset_class_map: dict[str, str] | None = None,
 ) -> None:
     """Repair OCO lifecycle drift using broker-authoritative state."""
     if partial_tp_pct is None:
@@ -547,6 +627,7 @@ def reconcile_orders(
     now = datetime.now(tz=UTC)
 
     for symbol, state in states.items():
+        asset_class = (asset_class_map or {}).get(symbol, "equity")
         remaining_qty = _normalize_order_qty(float(positions.get(symbol, 0.0) or 0.0))
         state.remaining_qty = float(remaining_qty or 0.0)
         partial_order = None
@@ -659,13 +740,14 @@ def reconcile_orders(
             and remaining_qty > 0
             and not stop_is_filled
             and not state.oco_stop_order_id
-            and hasattr(client, "submit_stop_order")
+            and (hasattr(client, "submit_stop_order") or hasattr(client, "submit_stop_limit_order"))
         ):
             state.oco_stop_order_id = _submit_stop_protection(
                 client,
                 symbol=symbol,
                 qty=remaining_qty,
                 stop_price=replacement_stop_price,
+                asset_class=asset_class,
             )
             state.protection_qty = float(remaining_qty)
             state.stop_status = None
@@ -692,6 +774,7 @@ def reconcile_orders(
                     symbol=symbol,
                     qty_tp=outstanding_tp_qty,
                     partial_tp_price=tp_price,
+                    asset_class=asset_class,
                 )
                 state.tp_status = None
                 logger.warning("Re-submitted missing TP1 leg for %s.", symbol)
@@ -745,6 +828,7 @@ def reconcile_orders(
                             qty_remainder=expected_remainder_qty,
                             remainder_tp_price=remainder_tp_price,
                             stop_price=replacement_stop_price,
+                            asset_class=asset_class,
                         )
                     )
                     state.protection_qty = float(expected_remainder_qty)
@@ -759,6 +843,7 @@ def reconcile_orders(
                         symbol=symbol,
                         qty=expected_remainder_qty,
                         stop_price=replacement_stop_price,
+                        asset_class=asset_class,
                     )
                     state.protection_qty = float(expected_remainder_qty)
                     state.stop_status = None
@@ -771,6 +856,7 @@ def reconcile_orders(
                     symbol=symbol,
                     qty=expected_remainder_qty,
                     stop_price=replacement_stop_price,
+                    asset_class=asset_class,
                 )
                 state.protection_qty = float(expected_remainder_qty)
                 state.stop_status = None

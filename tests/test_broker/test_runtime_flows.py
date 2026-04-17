@@ -26,7 +26,7 @@ class FlowOCOClient:
         self.cancelled: list[str] = []
         self.orders: dict[str, dict[str, object]] = {}
 
-    def submit_limit_order(self, symbol, qty, side, limit_price):
+    def submit_limit_order(self, symbol, qty, side, limit_price, **kwargs):
         order = {
             "id": "tp1-order",
             "symbol": symbol,
@@ -40,7 +40,7 @@ class FlowOCOClient:
         self.orders["tp1-order"] = order
         return {"id": "tp1-order"}
 
-    def submit_oco_order(self, symbol, qty, side, take_profit, stop_loss):
+    def submit_oco_order(self, symbol, qty, side, take_profit, stop_loss, **kwargs):
         parent = {
             "id": "oco-parent",
             "symbol": symbol,
@@ -69,7 +69,7 @@ class FlowOCOClient:
     def list_orders(self, status="open", nested=False):
         return [self.orders["oco-parent"]]
 
-    def submit_stop_order(self, symbol, qty, side, stop_price):
+    def submit_stop_order(self, symbol, qty, side, stop_price, **kwargs):
         order = {
             "id": "fallback-stop",
             "symbol": symbol,

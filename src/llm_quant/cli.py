@@ -1453,13 +1453,19 @@ def _run_single_pod(
     ):
         order_states = load_order_states(conn, pod_id)
         try:
+            raw_positions = alpaca_client.list_positions()
             positions = {
                 p.get("symbol", ""): float(p.get("qty", 0.0))
-                for p in alpaca_client.list_positions()
+                for p in raw_positions
+            }
+            asset_class_map = {
+                p.get("symbol", ""): p.get("asset_class", "us_equity")
+                for p in raw_positions
             }
         except AlpacaError as exc:
             console.print(f"[yellow]WARN[/yellow] Alpaca positions failed: {exc}")
             positions = {}
+            asset_class_map = {}
 
         reconcile_orders(
             alpaca_client,
@@ -1467,6 +1473,7 @@ def _run_single_pod(
             positions,
             trailing_pct=config.execution.trailing_stop_pct,
             fail_on_unprotected=exit_policy.fail_on_unprotected_exits,
+            asset_class_map=asset_class_map,
         )
         update_trailing_stops(
             alpaca_client,
@@ -1488,6 +1495,7 @@ def _run_single_pod(
                 default_stop_loss_pct=config.risk.default_stop_loss_pct,
                 fail_on_unprotected=exit_policy.fail_on_unprotected_exits,
                 fill_prices=fill_prices,
+                asset_class_map=asset_class_map,
             )
 
         elif (
