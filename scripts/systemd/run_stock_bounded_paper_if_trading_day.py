@@ -22,7 +22,7 @@ RUN_CMD = [
     "--pod",
     "stock-bounded-paper",
     "--broker",
-    "paper",
+    "alpaca",
 ]
 
 

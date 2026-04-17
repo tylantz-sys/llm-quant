@@ -113,7 +113,13 @@ def load_specs_for_set(
         if not strategy_name:
             logger.warning("Spec %s missing strategy_name/type; skipping", slug)
             continue
-        params = raw.get("parameters", {}) or {}
+        params = dict(raw.get("parameters", {}) or {})
+        # Promote universe-level symbol declarations into params so that
+        # required_symbols() can discover them without knowing the spec layout.
+        universe = raw.get("universe") or {}
+        for key in ("regime_asset", "tradeable_alts"):
+            if key in universe and key not in params:
+                params[key] = universe[key]
         group = raw.get("group") or "ungrouped"
         specs.append(
             StrategySpec(
@@ -194,6 +200,10 @@ def required_symbols(specs: list[StrategySpec]) -> list[str]:
                 symbols.update(sym.strip() for sym in raw.split(","))
             elif isinstance(raw, list):
                 symbols.update(str(sym) for sym in raw)
+        if "regime_asset" in params:
+            symbols.add(str(params["regime_asset"]))
+        if "tradeable_alts" in params and isinstance(params["tradeable_alts"], list):
+            symbols.update(str(sym) for sym in params["tradeable_alts"])
         # Additional symbol parameter names used by specific strategy classes
         for key in ("trade_symbol", "vix_symbol", "regime_symbol", "signal_symbol"):
             if params.get(key):

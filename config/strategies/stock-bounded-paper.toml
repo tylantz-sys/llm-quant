@@ -26,10 +26,10 @@ enabled = false
 
 [risk]
 max_position_weight = 0.10
-max_trade_size = 0.05
+max_trade_size = 0.10
 max_positions = 2
 max_trades_per_session = 2
-min_cash_reserve = 0.75
+min_cash_reserve = 0.05
 require_stop_loss = true
 default_stop_loss_pct = 0.03
 partial_take_profit_enabled = true
