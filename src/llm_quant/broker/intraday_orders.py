@@ -450,6 +450,33 @@ def place_oco_exits_for_buys(
             asset_class=asset_class,
         )
 
+        if _is_crypto(asset_class):
+            # Crypto: Alpaca does not support OCO. Place a full-size stop covering 100% of
+            # the position. When TP1 fills, reconcile_orders will cancel this stop and
+            # replace it with a remainder-sized stop + TP2 limit. This ensures the entire
+            # position is always protected on the downside.
+            oco_stop_order_id = _submit_stop_protection(
+                client,
+                symbol=symbol,
+                qty=qty,
+                stop_price=stop_price,
+                asset_class=asset_class,
+            )
+            if fail_on_unprotected and not oco_stop_order_id:
+                raise AlpacaError(f"Protective stop missing for {symbol} after crypto entry")
+            states[symbol] = IntradayOrderState(
+                symbol=symbol,
+                partial_tp_order_id=partial_tp_order_id,
+                oco_order_id=None,
+                oco_tp_order_id=None,   # TP2 deferred until TP1 fills
+                oco_stop_order_id=oco_stop_order_id,
+                hwm=effective_price,
+                remaining_qty=float(qty),  # stop covers full position
+                initial_stop_price=float(stop_price),
+                protection_qty=float(qty),
+            )
+            continue
+
         oco_order_id = None
         oco_tp_order_id = None
         oco_stop_order_id = None
@@ -734,6 +761,60 @@ def reconcile_orders(
 
         stop_is_terminal = _is_terminal_status(state.stop_status)
         stop_is_filled = (state.stop_status or "").lower() == "filled"
+
+        # Crypto TP1-fill: transition from full-size stop → remainder stop + TP2.
+        # Detected by: TP1 filled, crypto asset, oco_tp_order_id still None (TP2 not placed
+        # yet), and a full-size stop still outstanding. Cancel the full stop, submit a
+        # remainder-sized stop + TP2 limit.
+        if (
+            state.tp_status == "filled"
+            and _is_crypto(asset_class)
+            and state.oco_tp_order_id is None
+            and state.oco_stop_order_id is not None
+            and not stop_is_filled
+            and remaining_qty > 0
+            and partial_tp_pct is not None
+        ):
+            _cancel_order_safe(
+                client,
+                state.oco_stop_order_id,
+                order=stop_order,
+                status=state.stop_status,
+            )
+            state.stop_status = "canceled"
+            state.oco_stop_order_id = None
+            stop_is_terminal = True
+            stop_is_filled = False
+
+            remainder_tp_pct = partial_tp_pct * max(remainder_tp_mult, 0.0)
+            remainder_tp_price = state.hwm * (1.0 + remainder_tp_pct)
+
+            state.oco_stop_order_id = _submit_stop_protection(
+                client,
+                symbol=symbol,
+                qty=remaining_qty,
+                stop_price=replacement_stop_price,
+                asset_class=asset_class,
+            )
+            state.stop_status = None
+            stop_is_terminal = False
+            state.protection_qty = float(remaining_qty)
+
+            state.oco_tp_order_id = _submit_partial_tp(
+                client,
+                symbol=symbol,
+                qty_tp=remaining_qty,
+                partial_tp_price=remainder_tp_price,
+                asset_class=asset_class,
+            )
+            state.oco_tp_status = None
+            logger.info(
+                "Crypto TP1 filled for %s: resized stop to %.6f @ %.2f, added TP2 @ %.2f",
+                symbol,
+                remaining_qty,
+                replacement_stop_price,
+                remainder_tp_price,
+            )
 
         if (
             state.tp_status == "filled"

@@ -143,6 +143,11 @@ def test_reconcile_orders_fallbacks_when_oco_legs_missing():
 
 
 class FractionalClient(FakeClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stop_limit_orders: list[dict[str, object]] = []
+        self.cancelled: list[str] = []
+
     def submit_limit_order(self, symbol, qty, side, limit_price, **kwargs):
         order = super().submit_limit_order(symbol, qty, side, limit_price)
         return order
@@ -151,7 +156,17 @@ class FractionalClient(FakeClient):
         order = super().submit_oco_order(symbol, qty, side, take_profit, stop_loss)
         return order
 
+    def submit_stop_limit_order(self, symbol, qty, side, stop_price, limit_price, **kwargs):
+        self.stop_limit_orders.append(
+            {"symbol": symbol, "qty": qty, "side": side, "stop_price": stop_price, "limit_price": limit_price}
+        )
+        return {"id": f"sl-{len(self.stop_limit_orders)}"}
+
+    def get_order(self, order_id, nested=False):
+        return {"id": order_id, "status": "new", "filled_qty": 0}
+
     def cancel_order(self, order_id):
+        self.cancelled.append(order_id)
         return None
 
 
@@ -163,6 +178,9 @@ class BrokenProtectionClient:
         return None
 
     def submit_stop_order(self, symbol, qty, side, stop_price, **kwargs):
+        raise AlpacaError("stop submit failed")
+
+    def submit_stop_limit_order(self, symbol, qty, side, stop_price, limit_price, **kwargs):
         raise AlpacaError("stop submit failed")
 
 
@@ -182,6 +200,7 @@ class OCOCancelClient:
 
 
 def test_place_oco_exits_for_buys_preserves_fractional_crypto_qty():
+    """Crypto: TP1 for 50%, full-size stop for 100%. TP2 deferred until TP1 fills."""
     client = FractionalClient()
     states = {}
     trades = [
@@ -206,11 +225,69 @@ def test_place_oco_exits_for_buys_preserves_fractional_crypto_qty():
         remainder_tp_mult=2.0,
         default_stop_loss_pct=0.05,
         fail_on_unprotected=True,
+        asset_class_map={"BTC-USD": "crypto"},
     )
 
-    assert client.limit_orders[0]["qty"] == 0.375
-    assert client.oco_orders[0]["qty"] == 0.375
-    assert states["BTC-USD"].remaining_qty == 0.375
+    # TP1 limit for 50% of position
+    assert len(client.limit_orders) == 1
+    assert client.limit_orders[0]["qty"] == pytest.approx(0.375)
+    # Full-size stop for 100% of position (NOT 50%)
+    assert len(client.stop_limit_orders) == 1
+    assert client.stop_limit_orders[0]["qty"] == pytest.approx(0.75)
+    # No OCO bracket orders
+    assert client.oco_orders == []
+    # State: remaining_qty tracks full position (stop covers all)
+    assert states["BTC-USD"].remaining_qty == pytest.approx(0.75)
+    assert states["BTC-USD"].oco_tp_order_id is None   # TP2 not placed yet
+    assert states["BTC-USD"].oco_stop_order_id is not None
+
+
+def test_reconcile_crypto_tp1_fill_splits_stop_and_adds_tp2():
+    """After crypto TP1 fills: cancel full-size stop, submit remainder stop + TP2."""
+
+    class CryptoReconcileClient(FractionalClient):
+        def get_order(self, order_id, nested=False):
+            if order_id == "tp1":
+                return {"id": "tp1", "status": "filled", "filled_qty": 1.188688}
+            return {"id": order_id, "status": "new", "filled_qty": 0}
+
+    client = CryptoReconcileClient()
+    states = {
+        "ETH-USD": IntradayOrderState(
+            symbol="ETH-USD",
+            partial_tp_order_id="tp1",
+            oco_tp_order_id=None,       # TP2 not placed yet
+            oco_stop_order_id="full-stop",
+            hwm=2500.0,
+            remaining_qty=1.188688,     # position remaining after TP1 filled
+            initial_stop_price=2125.0,
+            stop_status="new",
+            protection_qty=2.377376,    # full-size stop was for 100%
+        )
+    }
+
+    reconcile_orders(
+        client,
+        states,
+        positions={"ETH-USD": 1.188688},
+        trailing_pct=0.0,
+        partial_tp_pct=0.015,
+        remainder_tp_mult=2.0,
+        asset_class_map={"ETH-USD": "crypto"},
+    )
+
+    # Full-size stop should have been cancelled
+    assert "full-stop" in client.cancelled
+    # New remainder-sized stop submitted
+    assert len(client.stop_limit_orders) == 1
+    assert client.stop_limit_orders[0]["qty"] == pytest.approx(1.188688)
+    # TP2 limit submitted for remainder
+    assert len(client.limit_orders) == 1
+    assert client.limit_orders[0]["qty"] == pytest.approx(1.188688)
+    # State updated
+    assert states["ETH-USD"].oco_tp_order_id is not None
+    assert states["ETH-USD"].oco_stop_order_id is not None
+    assert states["ETH-USD"].protection_qty == pytest.approx(1.188688)
 
 
 def test_reconcile_orders_fail_closed_when_fractional_crypto_stop_cannot_be_restored():
