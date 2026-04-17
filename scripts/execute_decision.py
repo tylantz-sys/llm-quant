@@ -5,15 +5,20 @@ saves portfolio snapshot, and prints execution summary.
 
 Usage:
     cd E:/llm-quant && PYTHONPATH=src \\
-        python scripts/execute_decision.py \\
+        python scripts/execute_decision.py --broker alpaca \\
         <<< '{"market_regime": "risk_on", ...}'
     cd E:/llm-quant && PYTHONPATH=src \\
-        python scripts/execute_decision.py --pod momo \\
+        python scripts/execute_decision.py --pod momo --broker alpaca \\
         <<< '{"market_regime": "risk_on", ...}'
 
-    # Submit trades to Alpaca paper account (requires ALPACA_API_KEY / ALPACA_SECRET_KEY):
+    # Dry-run: validate full pipeline without DB writes or Alpaca orders:
     cd E:/llm-quant && PYTHONPATH=src \\
-        python scripts/execute_decision.py --broker alpaca \\
+        python scripts/execute_decision.py --broker alpaca --dry-run \\
+        <<< '{"market_regime": "risk_on", ...}'
+
+    # Paper-only (local simulation, no Alpaca):
+    cd E:/llm-quant && PYTHONPATH=src \\
+        python scripts/execute_decision.py \\
         <<< '{"market_regime": "risk_on", ...}'
 """
 
@@ -201,9 +206,18 @@ def main() -> None:  # noqa: PLR0915 — orchestration entry point; decomposing 
         choices=["paper", "alpaca"],
         help="Execution broker: 'paper' (default) or 'alpaca' to submit live orders",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Validate pipeline (parse, price-check, risk filter) without writing to DB "
+            "or submitting orders to Alpaca. Use to smoke-test signals before trading."
+        ),
+    )
     args = parser.parse_args()
     pod_id = args.pod
     broker = args.broker.lower()
+    dry_run: bool = args.dry_run
 
     # Read JSON from stdin
     raw_input = sys.stdin.read().strip()
@@ -296,13 +310,46 @@ def main() -> None:  # noqa: PLR0915 — orchestration entry point; decomposing 
             conn,
             pod_id=pod_id,
             runtime_result=runtime_result,
-        )
+        ) if not dry_run else None
 
         # Risk filter
         risk_mgr = RiskManager(config)
         approved, rejected = risk_mgr.filter_signals(
             governed_signals, portfolio, prices
         )
+
+        # Dry-run: output preview and stop — no DB writes, no Alpaca calls
+        if dry_run:
+            preview = {
+                "dry_run": True,
+                "broker": broker,
+                "date": str(today),
+                "signals_received": len(decision.signals),
+                "signals_after_governance": len(governed_signals),
+                "signals_approved": len(approved),
+                "signals_rejected": len(rejected),
+                "approved_signals": [
+                    {
+                        "symbol": s.symbol,
+                        "action": str(s.action),
+                        "conviction": s.conviction,
+                        "stop_loss": s.stop_loss,
+                        "target_weight": s.target_weight,
+                        "price": prices.get(s.symbol),
+                        "asset_class": asset_class_map.get(s.symbol, "equity"),
+                    }
+                    for s in approved
+                ],
+                "rejected_signals": [
+                    {"symbol": s.symbol, "action": str(s.action), "reason": r}
+                    for s, r in rejected
+                ],
+                "alpaca_reachable": alpaca_client is not None,
+                "portfolio_nav": portfolio.nav,
+                "portfolio_cash": portfolio.cash,
+            }
+            print(json.dumps(preview, indent=2))
+            return
 
         # Execute approved signals (paper simulation — updates local portfolio state)
         executed = execute_signals(portfolio, approved, prices, nav_before)
