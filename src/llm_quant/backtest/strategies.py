@@ -3582,6 +3582,494 @@ class BtcRegimeAltMomentumV2Strategy(Strategy):
 
 
 # ---------------------------------------------------------------------------
+# Multi-Asset Time-Series Momentum with Crash-Aware Overlay
+# ---------------------------------------------------------------------------
+
+
+class MultiAssetTsmomStrategy(Strategy):
+    """Multi-asset TSMOM with crash detection and regime filtering.
+
+    Implements the research spec ``multi-asset-tsmom-crash-aware``:
+    - Cross-sectional ranking by composite TSMOM across 4 lookbacks
+    - Crash index from VIX backwardation, volume spike, and dispersion widening
+    - Three-state regime filter (risk_on / transition / risk_off)
+    - ATR-based initial stop + 8% trailing stop
+    - Rebalances every ``rebalance_frequency_days`` trading days
+    """
+
+    def __init__(self, config: StrategyConfig) -> None:
+        super().__init__(config)
+        self._state: dict[str, object] = {
+            "last_rebalance_date": None,
+            "entry_prices": {},      # symbol -> fill price
+            "atr_at_entry": {},      # symbol -> ATR_14 at entry
+            "initial_stops": {},     # symbol -> initial ATR stop price
+            "trailing_stops": {},    # symbol -> current trailing stop price
+            "highest_since_entry": {},  # symbol -> highest close since entry
+        }
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _get_price_col(self, sym_df: pl.DataFrame) -> str:
+        """Return 'adj_close' if present and non-null, else 'close'."""
+        if "adj_close" in sym_df.columns:
+            last = sym_df.tail(1).row(0, named=True)
+            if last.get("adj_close") is not None:
+                return "adj_close"
+        return "close"
+
+    def _compute_tsmom_composite(
+        self,
+        sym_df: pl.DataFrame,
+        params: dict,
+        price_col: str,
+    ) -> float | None:
+        """Compute equal-weight composite TSMOM score for one symbol."""
+        lb1 = params.get("lookback_1m", 21)
+        lb3 = params.get("lookback_3m", 63)
+        lb6 = params.get("lookback_6m", 126)
+        lb12 = params.get("lookback_12m", 252)
+        skip = params.get("lookback_skip", 21)
+
+        needed = lb12 + skip + 5
+        if len(sym_df) < needed:
+            return None
+
+        prices_arr = sym_df[price_col].to_list()
+        atrs_arr = sym_df["atr_14"].to_list()
+
+        last_price = prices_arr[-1]
+        last_atr = atrs_arr[-1]
+
+        if last_price is None or last_price <= 0 or last_atr is None or last_atr <= 0:
+            return None
+
+        vol_ann = last_atr * math.sqrt(252) / last_price
+        if vol_ann <= 0:
+            return None
+
+        scores: list[float] = []
+        for lb in (lb1, lb3, lb6):
+            if len(prices_arr) < lb + 1:
+                break
+            start_price = prices_arr[-(lb + 1)]
+            if start_price is None or start_price <= 0:
+                break
+            ret = (last_price - start_price) / start_price
+            scores.append(ret / vol_ann)
+        else:
+            # 12M with 1M skip: price at -(lb12+skip) relative to -(skip)
+            if len(prices_arr) >= lb12 + skip + 1:
+                end_idx = -(skip + 1)          # price at T-skip
+                start_idx = -(lb12 + skip + 1)  # price at T-lb12-skip
+                end_price = prices_arr[end_idx]
+                start_price = prices_arr[start_idx]
+                if (
+                    end_price is not None
+                    and start_price is not None
+                    and start_price > 0
+                    and end_price > 0
+                ):
+                    ret12 = (end_price - start_price) / start_price
+                    scores.append(ret12 / vol_ann)
+
+        if len(scores) < 4:
+            return None
+        return sum(scores) / len(scores)
+
+    def _compute_crash_index(
+        self,
+        as_of_date: date,
+        indicators_df: pl.DataFrame,
+        held_symbols: list[str],
+        params: dict,
+        disable_crash: bool = False,
+    ) -> float:
+        """Return crash index in {0.0, 0.33, 0.67, 1.0}."""
+        if disable_crash:
+            return 0.0
+
+        vix_ratio_thresh = params.get("crash_vix_ratio_threshold", 0.90)
+        vol_z_thresh = params.get("crash_vol_zscore_threshold", 2.0)
+        disp_window = params.get("crash_dispersion_window", 20)
+        disp_baseline = params.get("crash_dispersion_baseline", 90)
+        disp_mult = params.get("crash_dispersion_multiplier", 1.50)
+
+        components: list[float] = []
+
+        # Component 1: VIX/VIX3M < threshold
+        vix_df = indicators_df.filter(pl.col("symbol") == "VIX").sort("date")
+        vix3m_df = indicators_df.filter(pl.col("symbol") == "VIX3M").sort("date")
+        if len(vix_df) > 0 and len(vix3m_df) > 0:
+            vix_close = vix_df.tail(1).row(0, named=True).get("close")
+            vix3m_close = vix3m_df.tail(1).row(0, named=True).get("close")
+            if (
+                vix_close is not None
+                and vix3m_close is not None
+                and vix3m_close > 0
+            ):
+                ratio = vix_close / vix3m_close
+                components.append(1.0 if ratio < vix_ratio_thresh else 0.0)
+            else:
+                components.append(0.0)
+        else:
+            components.append(0.0)
+
+        # Component 2: max volume z-score across held assets > threshold
+        if held_symbols:
+            max_z = 0.0
+            for sym in held_symbols:
+                sym_df = indicators_df.filter(pl.col("symbol") == sym).sort("date")
+                if len(sym_df) < 22:
+                    continue
+                vols = sym_df["volume"].tail(21).to_list()
+                vols_clean = [v for v in vols if v is not None and v > 0]
+                if len(vols_clean) < 5:
+                    continue
+                recent_vol = vols_clean[-1]
+                window_vols = vols_clean[:-1]
+                if len(window_vols) < 2:
+                    continue
+                mean_v = sum(window_vols) / len(window_vols)
+                std_v = math.sqrt(
+                    sum((x - mean_v) ** 2 for x in window_vols) / (len(window_vols) - 1)
+                )
+                if std_v > 0:
+                    z = (recent_vol - mean_v) / std_v
+                    max_z = max(max_z, z)
+            components.append(1.0 if max_z > vol_z_thresh else 0.0)
+        else:
+            components.append(0.0)
+
+        # Component 3: cross-asset dispersion > multiplier × baseline
+        tradeable = params.get("tradeable_symbols", [])
+        all_daily_rets: list[list[float]] = []
+        needed_bars = disp_baseline + disp_window + 5
+        for sym in tradeable:
+            sym_df = indicators_df.filter(pl.col("symbol") == sym).sort("date")
+            if len(sym_df) < needed_bars:
+                continue
+            price_col = "adj_close" if "adj_close" in sym_df.columns else "close"
+            prices = sym_df[price_col].tail(needed_bars).to_list()
+            rets = [
+                (prices[i] - prices[i - 1]) / prices[i - 1]
+                for i in range(1, len(prices))
+                if prices[i] is not None
+                and prices[i - 1] is not None
+                and prices[i - 1] > 0
+            ]
+            all_daily_rets.append(rets)
+
+        if len(all_daily_rets) >= 5:
+            # Current 20d cross-asset std of returns
+            n_bars_recent = min(disp_window, min(len(r) for r in all_daily_rets))
+            cross_std_recent: list[float] = []
+            for t in range(n_bars_recent):
+                day_rets = [r[-(n_bars_recent - t)] for r in all_daily_rets]
+                mn = sum(day_rets) / len(day_rets)
+                std_ = math.sqrt(
+                    sum((x - mn) ** 2 for x in day_rets) / len(day_rets)
+                )
+                cross_std_recent.append(std_)
+            current_disp = sum(cross_std_recent) / len(cross_std_recent) if cross_std_recent else 0.0
+
+            # Baseline 90d mean
+            n_bars_base = min(disp_baseline, min(len(r) for r in all_daily_rets))
+            cross_std_base: list[float] = []
+            for t in range(n_bars_base):
+                day_rets = [r[-(n_bars_base - t)] for r in all_daily_rets]
+                mn = sum(day_rets) / len(day_rets)
+                std_ = math.sqrt(
+                    sum((x - mn) ** 2 for x in day_rets) / len(day_rets)
+                )
+                cross_std_base.append(std_)
+            baseline_disp = sum(cross_std_base) / len(cross_std_base) if cross_std_base else 0.0
+
+            if baseline_disp > 0:
+                components.append(1.0 if current_disp > disp_mult * baseline_disp else 0.0)
+            else:
+                components.append(0.0)
+        else:
+            components.append(0.0)
+
+        return sum(components) / 3.0 if components else 0.0
+
+    def _compute_regime(
+        self,
+        indicators_df: pl.DataFrame,
+        params: dict,
+        disable_regime: bool = False,
+    ) -> str:
+        """Return 'risk_on', 'transition', or 'risk_off'."""
+        if disable_regime:
+            return "risk_on"
+
+        vix_on = params.get("regime_vix_risk_on", 20.0)
+        vix_off = params.get("regime_vix_risk_off", 30.0)
+        slope_days = params.get("regime_slope_days", 10)
+        slope_risk_off = params.get("regime_slope_risk_off", -0.02)
+
+        vix_df = indicators_df.filter(pl.col("symbol") == "VIX").sort("date")
+        vix_level = None
+        if len(vix_df) > 0:
+            vix_level = vix_df.tail(1).row(0, named=True).get("close")
+
+        hyg_df = indicators_df.filter(pl.col("symbol") == "HYG").sort("date")
+        tlt_df = indicators_df.filter(pl.col("symbol") == "TLT").sort("date")
+
+        hyg_tlt_slope = None
+        if len(hyg_df) >= slope_days + 1 and len(tlt_df) >= slope_days + 1:
+            hyg_prices = hyg_df["adj_close"].tail(slope_days + 1).to_list()
+            tlt_prices = tlt_df["adj_close"].tail(slope_days + 1).to_list()
+            if (
+                all(x is not None and x > 0 for x in hyg_prices)
+                and all(x is not None and x > 0 for x in tlt_prices)
+            ):
+                ratio_now = hyg_prices[-1] / tlt_prices[-1]
+                ratio_then = hyg_prices[0] / tlt_prices[0]
+                if ratio_then > 0:
+                    hyg_tlt_slope = (ratio_now - ratio_then) / ratio_then
+
+        if vix_level is None:
+            return "transition"
+
+        risk_off = vix_level > vix_off or (
+            hyg_tlt_slope is not None and hyg_tlt_slope < slope_risk_off
+        )
+        risk_on = vix_level < vix_on and (
+            hyg_tlt_slope is None or hyg_tlt_slope >= 0
+        )
+
+        if risk_off:
+            return "risk_off"
+        if risk_on:
+            return "risk_on"
+        return "transition"
+
+    # ------------------------------------------------------------------
+    # Main signal generator
+    # ------------------------------------------------------------------
+
+    def generate_signals(
+        self,
+        as_of_date: date,
+        indicators_df: pl.DataFrame,
+        portfolio: Portfolio,
+        prices: dict[str, float],
+    ) -> list[TradeSignal]:
+        params = self.config.parameters
+        top_n = params.get("top_n", 6)
+        rebal_freq = params.get("rebalance_frequency_days", 5)
+        target_risk_pct = params.get("target_risk_pct", 0.01)
+        max_weight = params.get("max_position_weight", 0.08)
+        atr_stop_mult = params.get("atr_stop_multiple", 2.5)
+        trailing_stop_pct = params.get("trailing_stop_pct", 0.08)
+        disable_crash = params.get("disable_crash", False)
+        disable_regime = params.get("disable_regime", False)
+        tradeable_symbols: list[str] = params.get(
+            "tradeable_symbols",
+            [
+                "SPY","QQQ","IWM","DIA","XLK","XLF","XLE","XLV","XLI","XLY",
+                "XLP","XLU","XLRE","XLB","XLC","EEM","EFA","VGK","EWJ",
+                "GLD","SLV","USO","DBA",
+            ],
+        )
+
+        # Retrieve persistent state
+        last_rebal: date | None = cast(
+            "date | None", self._state.get("last_rebalance_date")
+        )
+        entry_prices: dict[str, float] = cast(
+            "dict[str, float]", self._state["entry_prices"]
+        )
+        atr_at_entry: dict[str, float] = cast(
+            "dict[str, float]", self._state["atr_at_entry"]
+        )
+        initial_stops: dict[str, float] = cast(
+            "dict[str, float]", self._state["initial_stops"]
+        )
+        trailing_stops: dict[str, float] = cast(
+            "dict[str, float]", self._state["trailing_stops"]
+        )
+        highest_since_entry: dict[str, float] = cast(
+            "dict[str, float]", self._state["highest_since_entry"]
+        )
+
+        signals: list[TradeSignal] = []
+
+        # --- Update trailing stops for all held positions ---
+        for sym in list(portfolio.positions):
+            curr_price = prices.get(sym)
+            if curr_price is None or curr_price <= 0:
+                continue
+            prev_high = highest_since_entry.get(sym, curr_price)
+            new_high = max(prev_high, curr_price)
+            highest_since_entry[sym] = new_high
+            new_trail = new_high * (1.0 - trailing_stop_pct)
+            trailing_stops[sym] = max(trailing_stops.get(sym, 0.0), new_trail)
+            # Check stop triggers
+            stop = max(initial_stops.get(sym, 0.0), trailing_stops.get(sym, 0.0))
+            if stop > 0 and curr_price <= stop:
+                signals.append(
+                    TradeSignal(
+                        symbol=sym,
+                        action=Action.CLOSE,
+                        conviction=Conviction.HIGH,
+                        target_weight=0.0,
+                        stop_loss=0.0,
+                        reasoning=f"Stop triggered: {curr_price:.2f} <= {stop:.2f}",
+                    )
+                )
+                for d in (entry_prices, atr_at_entry, initial_stops, trailing_stops, highest_since_entry):
+                    d.pop(sym, None)
+
+        # Decide if this is a rebalance day
+        days_since = 999 if last_rebal is None else (as_of_date - last_rebal).days
+        is_rebalance = days_since >= rebal_freq
+
+        if not is_rebalance:
+            return signals
+
+        self._state["last_rebalance_date"] = as_of_date
+
+        # --- Compute TSMOM composite for all tradeable symbols ---
+        params_with_tradeable = dict(params)
+        params_with_tradeable["tradeable_symbols"] = tradeable_symbols
+
+        tsmom_scores: dict[str, float] = {}
+        sym_atr: dict[str, float] = {}
+        for sym in tradeable_symbols:
+            sym_df = indicators_df.filter(pl.col("symbol") == sym).sort("date")
+            if len(sym_df) == 0:
+                continue
+            price_col = self._get_price_col(sym_df)
+            score = self._compute_tsmom_composite(sym_df, params, price_col)
+            if score is None:
+                continue
+            tsmom_scores[sym] = score
+            last_row = sym_df.tail(1).row(0, named=True)
+            atr_val = last_row.get("atr_14")
+            if atr_val is not None and atr_val > 0:
+                sym_atr[sym] = float(atr_val)
+
+        if not tsmom_scores:
+            return signals
+
+        # --- Cross-sectional rank ---
+        ranked = sorted(tsmom_scores.items(), key=lambda x: x[1], reverse=True)
+        rank_map = {sym: i + 1 for i, (sym, _) in enumerate(ranked)}
+
+        # --- Crash index and regime ---
+        held = list(portfolio.positions.keys())
+        crash_idx = self._compute_crash_index(
+            as_of_date, indicators_df, held, params_with_tradeable, disable_crash
+        )
+        regime = self._compute_regime(indicators_df, params, disable_regime)
+
+        regime_scale = {"risk_on": 1.0, "transition": 0.75, "risk_off": 0.50}.get(
+            regime, 0.75
+        )
+        crash_scale = max(0.0, 1.0 - crash_idx * 0.50)
+
+        # --- Full flatten if crash_index == 1.0 ---
+        if crash_idx >= 1.0:
+            for sym in list(portfolio.positions):
+                already_signaled = any(s.symbol == sym for s in signals)
+                if not already_signaled:
+                    signals.append(
+                        TradeSignal(
+                            symbol=sym,
+                            action=Action.CLOSE,
+                            conviction=Conviction.HIGH,
+                            target_weight=0.0,
+                            stop_loss=0.0,
+                            reasoning="Crash index == 1.0 — full flatten",
+                        )
+                    )
+            return signals
+
+        # --- Exit: rank fell to bottom quartile ---
+        n_total = len(tsmom_scores)
+        exit_rank_thresh = max(int(n_total * 0.75) + 1, top_n + 1)
+        for sym in list(portfolio.positions):
+            r = rank_map.get(sym, n_total + 1)
+            if r >= exit_rank_thresh:
+                already = any(s.symbol == sym for s in signals)
+                if not already:
+                    signals.append(
+                        TradeSignal(
+                            symbol=sym,
+                            action=Action.CLOSE,
+                            conviction=Conviction.MEDIUM,
+                            target_weight=0.0,
+                            stop_loss=0.0,
+                            reasoning=f"Rank {r} >= {exit_rank_thresh} (bottom quartile)",
+                        )
+                    )
+                    for d in (entry_prices, atr_at_entry, initial_stops, trailing_stops, highest_since_entry):
+                        d.pop(sym, None)
+
+        # --- Entry: top_n ranked, not already held ---
+        exiting = {s.symbol for s in signals if s.action == Action.CLOSE}
+        current_held = set(portfolio.positions.keys()) - exiting
+        n_slots = top_n - len(current_held)
+
+        nav = portfolio.nav if hasattr(portfolio, "nav") else 100_000.0  # noqa: F841
+
+        added = 0
+        for sym, _ in ranked:
+            if added >= n_slots:
+                break
+            if sym in current_held:
+                continue
+            if sym in exiting:
+                continue
+
+            curr_price = prices.get(sym)
+            if curr_price is None or curr_price <= 0:
+                continue
+
+            atr_val = sym_atr.get(sym, 0.0)
+            vol_ann = atr_val * math.sqrt(252) / curr_price if atr_val > 0 else 0.02
+            base_weight = min(target_risk_pct / max(vol_ann, 1e-6), max_weight)
+            final_weight = base_weight * regime_scale * crash_scale
+            final_weight = min(final_weight, max_weight)
+
+            stop_price = (
+                round(curr_price - atr_stop_mult * atr_val, 4)
+                if atr_val > 0
+                else round(curr_price * 0.95, 4)
+            )
+
+            entry_prices[sym] = curr_price
+            atr_at_entry[sym] = atr_val
+            initial_stops[sym] = stop_price
+            trailing_stops[sym] = curr_price * (1.0 - trailing_stop_pct)
+            highest_since_entry[sym] = curr_price
+
+            signals.append(
+                TradeSignal(
+                    symbol=sym,
+                    action=Action.BUY,
+                    conviction=Conviction.HIGH,
+                    target_weight=final_weight,
+                    stop_loss=stop_price,
+                    reasoning=(
+                            f"Rank {rank_map[sym]}/{n_total} | "
+                            f"TSMOM={tsmom_scores[sym]:.3f} | "
+                            f"regime={regime} | crash={crash_idx:.2f} | "
+                            f"w={final_weight:.3f}"
+                        ),
+                )
+            )
+            added += 1
+
+        return signals
+
+
+# ---------------------------------------------------------------------------
 # Strategy factory
 # ---------------------------------------------------------------------------
 
@@ -3610,6 +4098,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "btc_regime_alt_momentum": BtcRegimeAltMomentumStrategy,
     "btc_regime_alt_momentum_v2": BtcRegimeAltMomentumV2Strategy,
     "btc_regime_alt_momentum_v3": BtcRegimeAltMomentumV2Strategy,
+    "multi_asset_tsmom": MultiAssetTsmomStrategy,
 }
 
 
