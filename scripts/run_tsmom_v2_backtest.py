@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Standalone backtest for multi-asset-tsmom-crash-aware strategy.
+"""Standalone backtest for multi-asset-tsmom-crash-aware-v2 strategy.
+
+v2 change: cap-based sizing (flat 8% per position) instead of risk-parity
+vol-scaling. All other logic identical to v1.
 
 Runs a vectorised simulation loop directly against DuckDB data.
 Two runs:
@@ -10,7 +13,7 @@ Outputs a markdown summary and appends to the experiment registry.
 
 Usage:
     cd /home/ty/Documents/llm-quant/llm-quant
-    .venv/bin/python3 scripts/run_tsmom_backtest.py
+    .venv/bin/python3 scripts/run_tsmom_v2_backtest.py
 """
 
 from __future__ import annotations
@@ -32,9 +35,9 @@ import yaml
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC_PATH = ROOT / "data" / "strategies" / "multi-asset-tsmom-crash-aware" / "research-spec.yaml"
+SPEC_PATH = ROOT / "data" / "strategies" / "multi-asset-tsmom-crash-aware-v2" / "research-spec.yaml"
 DB_PATH = ROOT / "data" / "llm_quant.duckdb"
-STRAT_DIR = ROOT / "data" / "strategies" / "multi-asset-tsmom-crash-aware"
+STRAT_DIR = ROOT / "data" / "strategies" / "multi-asset-tsmom-crash-aware-v2"
 REGISTRY_PATH = STRAT_DIR / "experiment-registry.jsonl"
 
 # ---------------------------------------------------------------------------
@@ -54,7 +57,7 @@ ALL_SYMBOLS = TRADEABLE + REFERENCE
 START_DATE = date.fromisoformat(BS["start_date"])
 END_DATE = date.fromisoformat(BS["end_date"])
 INITIAL_CAPITAL = float(BS["initial_capital"])
-WARMUP_DAYS = int(SPEC["execution"]["warmup_days"])
+WARMUP_DAYS = int(PARAMS.get("warmup_days", 275))
 
 # Cost model
 CM = SPEC["cost_model"]
@@ -370,6 +373,9 @@ def run_simulation(
     for sym in ALL_SYMBOLS:
         df = raw[raw["symbol"] == sym].copy()
         df = df.sort_values("date").reset_index(drop=True)
+        # Normalize date column to datetime.date objects
+        if len(df) > 0 and hasattr(df["date"].iloc[0], "date"):
+            df["date"] = df["date"].apply(lambda x: x.date() if hasattr(x, "date") else x)
         sym_df[sym] = df
         all_dates_set.update(df["date"].tolist())
 
@@ -400,7 +406,7 @@ def run_simulation(
 
     rebal_freq = PARAMS["rebalance_frequency_days"]
     top_n      = PARAMS["top_n"]
-    target_risk_pct = PARAMS["target_risk_pct"]
+    base_position_weight = PARAMS["base_position_weight"]  # v2: flat 8% cap
     max_weight = PARAMS["max_position_weight"]
     atr_stop_mult = PARAMS["atr_stop_multiple"]
     trail_pct = PARAMS["trailing_stop_pct"]
@@ -580,8 +586,8 @@ def run_simulation(
                 continue
 
             atr_val = sym_atr_map.get(sym, 0.0)
-            vol_ann = atr_val * math.sqrt(252) / fill if atr_val > 0 else 0.02
-            base_w = min(target_risk_pct / max(vol_ann, 1e-6), max_weight)
+            # v2: cap-based sizing — flat base_position_weight (no vol-scaling)
+            base_w = base_position_weight
             final_w = min(base_w * regime_scale * crash_scale, max_weight)
 
             # Cash check
@@ -758,7 +764,7 @@ def main() -> None:
     exp_id = str(uuid.uuid4())[:8]
     entry = {
         "experiment_id": exp_id,
-        "strategy_slug": "multi-asset-tsmom-crash-aware",
+        "strategy_slug": "multi-asset-tsmom-crash-aware-v2",
         "frozen_hash": SPEC.get("frozen_hash", ""),
         "run_type": "backtest",
         "start_date": str(START_DATE),
@@ -791,7 +797,7 @@ def main() -> None:
     with REGISTRY_PATH.open("a", encoding="utf-8") as f:
         record = {
             **entry,
-            "trial_number": 1,
+            "trial_number": 2,
             "recorded_at": datetime.now(tz=timezone.utc).isoformat(),
         }
         f.write(json.dumps(record, default=str) + "\n")
