@@ -177,6 +177,28 @@ class AlpacaClient:
         }
         return self._request("POST", "/v2/orders", json=payload)
 
+    def submit_stop_limit_order(
+        self,
+        symbol: str,
+        qty: float,
+        side: str,
+        stop_price: float,
+        limit_price: float,
+        time_in_force: str = "day",
+        allow_fractional: bool = False,
+    ) -> dict[str, Any]:
+        """Submit a stop-limit order. Required for crypto (plain stop not supported)."""
+        payload = {
+            "symbol": symbol,
+            "qty": str(qty) if allow_fractional else str(int(qty)),
+            "side": side,
+            "type": "stop_limit",
+            "time_in_force": time_in_force,
+            "stop_price": f"{stop_price:.2f}",
+            "limit_price": f"{limit_price:.2f}",
+        }
+        return self._request("POST", "/v2/orders", json=payload)
+
     def submit_oco_order(
         self,
         symbol: str,
