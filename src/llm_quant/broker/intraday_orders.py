@@ -332,6 +332,7 @@ def place_oco_exits_for_buys(
     remainder_tp_mult: float,
     default_stop_loss_pct: float,
     fail_on_unprotected: bool = False,
+    fill_prices: dict[str, float] | None = None,
 ) -> None:
     """Submit partial TP + OCO remainder orders for newly bought positions."""
     for trade in trades:
@@ -343,15 +344,20 @@ def place_oco_exits_for_buys(
         if qty <= 0:
             continue
 
+        # Use actual broker fill price when available (H7: signal price may differ from fill)
+        effective_price = (fill_prices or {}).get(symbol, trade.price)
+        if effective_price <= 0:
+            effective_price = trade.price
+
         stop_price = stop_losses.get(symbol, 0.0)
         if stop_price <= 0:
-            stop_price = trade.price * (1.0 - default_stop_loss_pct)
+            stop_price = effective_price * (1.0 - default_stop_loss_pct)
         if stop_price <= 0:
             raise AlpacaError(f"Missing stop price for {symbol} after entry fill")
 
-        partial_tp_price = trade.price * (1.0 + partial_tp_pct)
+        partial_tp_price = effective_price * (1.0 + partial_tp_pct)
         remainder_tp_pct = partial_tp_pct * max(remainder_tp_mult, 0.0)
-        remainder_tp_price = trade.price * (1.0 + remainder_tp_pct)
+        remainder_tp_price = effective_price * (1.0 + remainder_tp_pct)
         min_remainder_tp = partial_tp_price + 0.01
         if remainder_tp_price < min_remainder_tp:
             remainder_tp_price = min_remainder_tp
@@ -394,7 +400,7 @@ def place_oco_exits_for_buys(
             oco_order_id=oco_order_id,
             oco_tp_order_id=oco_tp_order_id,
             oco_stop_order_id=oco_stop_order_id,
-            hwm=trade.price,
+            hwm=effective_price,
             remaining_qty=float(qty_remainder if qty_remainder > 0 else qty),
             initial_stop_price=float(stop_price),
         )
@@ -422,7 +428,7 @@ def update_trailing_stops(
         state.trailing_active = True
         new_hwm = max(float(state.hwm or 0.0), float(price))
         state.hwm = new_hwm
-        new_stop_price = max(new_hwm * 0.985, state.initial_stop_price)
+        new_stop_price = max(new_hwm * (1.0 - trailing_pct), state.initial_stop_price)
 
         try:
             replacement = client.replace_order(

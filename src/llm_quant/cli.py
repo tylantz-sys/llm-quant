@@ -1339,6 +1339,8 @@ def _run_single_pod(
                     state.cooldown_until_ts = state.last_exit_ts + cooldown_delta
             upsert_position_states(conn, pod_id, states)
 
+        submitted_orders: list = []
+        fill_prices: dict[str, float] = {}
         if alpaca_client and executed:
             stop_losses = {sig.symbol: sig.stop_loss for sig in approved}
             try:
@@ -1370,6 +1372,31 @@ def _run_single_pod(
                         "exit_policy_state": exit_policy_state,
                     },
                 )
+                # H5: roll back portfolio state for rejected/cancelled entry orders
+                _rejected = {"rejected", "cancelled", "expired"}
+                for order in submitted_orders:
+                    if order.intent_type != "entry" or order.side != "buy":
+                        continue
+                    if (order.status or "").lower() not in _rejected:
+                        continue
+                    pos = portfolio.positions.get(order.symbol)
+                    if pos is not None:
+                        refund = pos.shares * pos.avg_cost
+                        if refund <= 0 and order.notional:
+                            refund = float(order.notional)
+                        portfolio.cash += refund
+                        del portfolio.positions[order.symbol]
+                        logger.warning(
+                            "Rolled back ghost position for %s after %s order (order_id=%s)",
+                            order.symbol,
+                            order.status,
+                            order.order_id,
+                        )
+                # H7: collect actual fill prices for OCO exit placement
+                for order in submitted_orders:
+                    if order.intent_type == "entry" and order.side == "buy":
+                        if order.filled_avg_price and order.filled_avg_price > 0:
+                            fill_prices[order.symbol] = order.filled_avg_price
             except AlpacaError as exc:
                 console.print(f"[red]FAIL[/red] Alpaca execution failed: {exc}")
                 conn.close()
@@ -1460,7 +1487,52 @@ def _run_single_pod(
                 remainder_tp_mult=exit_policy.remainder_take_profit_mult,
                 default_stop_loss_pct=config.risk.default_stop_loss_pct,
                 fail_on_unprotected=exit_policy.fail_on_unprotected_exits,
+                fill_prices=fill_prices,
             )
+
+        elif (
+            config.execution.intraday_enabled
+            and alpaca_client
+            and not log_only
+            and not config.execution.intraday_use_oco
+            and approved
+            and executed
+        ):
+            # Non-OCO intraday path: attach protection after entry fill confirmation
+            from llm_quant.broker.execution.exit_adapter import (
+                submit_post_fill_protection_orders,
+            )
+
+            execution_cfg = config.execution
+            for order in submitted_orders:
+                if order.intent_type != "entry" or order.side != "buy":
+                    continue
+                if order.filled_qty <= 0:
+                    logger.warning(
+                        "Skipping post-fill protection for %s: entry not yet filled (qty=%.6f)",
+                        order.symbol,
+                        order.filled_qty,
+                    )
+                    continue
+                try:
+                    protection_orders = submit_post_fill_protection_orders(
+                        alpaca_client,
+                        order,
+                        execution_cfg,
+                    )
+                    if protection_orders:
+                        persist_submitted_orders(conn, protection_orders, pod_id=pod_id)
+                        logger.info(
+                            "Submitted %d post-fill protection orders for %s",
+                            len(protection_orders),
+                            order.symbol,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Post-fill protection failed for %s (non-fatal): %s",
+                        order.symbol,
+                        exc,
+                    )
 
         upsert_order_states(conn, pod_id, order_states)
         try:
