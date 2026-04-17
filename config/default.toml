@@ -10,7 +10,7 @@ max_tokens = 4096
 max_trades_per_session = 5
 
 [data]
-lookback_days = 504  # 2 years of trading days
+lookback_days = 2700  # ~7.4 years calendar days — covers 5+ years of trading data for TSMOM 12M lookback + walk-forward room
 fetch_timeout = 30
 db_lock_timeout_seconds = 30.0
 db_lock_retry_seconds = 0.5

@@ -321,10 +321,12 @@ def fetch():
         upsert_market_data,
     )
     from llm_quant.data.alpaca_intraday import fetch_intraday_ohlcv
-    from llm_quant.data.universe import get_tradeable_symbols
+    from llm_quant.data.universe import get_all_fetch_symbols
     from llm_quant.db.schema import get_connection
 
-    symbols = get_tradeable_symbols(config)
+    # Use get_all_fetch_symbols to include non-tradeable reference data
+    # (VIX, VIX3M) which are required for regime and crash-detection signals.
+    symbols = get_all_fetch_symbols(config)
     console.print(f"Fetching data for {len(symbols)} symbols...")
 
     with console.status("[bold blue]Downloading from Yahoo Finance..."):
