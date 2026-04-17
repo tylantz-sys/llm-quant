@@ -196,9 +196,11 @@ redesign with absolute momentum gate.
 **Why uncorrelated:** Trend signals fire on different timescales (months) vs. credit signals (days).
 
 ### Family 4: Volatility Regime Harvesting
-**Status: UNTESTED — high priority**
-VIX term structure (contango = sell vol, backwardation = buy vol). Use VIX ETPs or SPY
-position sizing based on vol regime. One of the most well-documented persistent anomalies.
+**Status: KILLED — Phase 1 failed (2026-04)**
+VIX term structure (VIX/VIX3M ratio): contango → underweight, backwardation → overweight.
+Tested 2014–2024. Sharpe=0.623, fails ALL 3 stress periods (worse than SPY in 2018/2020/2022).
+Inversion Sharpe=+0.505 (not negative → red flag, mechanism not directional). KILL.
+Remaining idea: vol regime as a position-sizing *filter* on other strategies — not as standalone.
 **Why uncorrelated:** Driven by options market dynamics, not credit or equity direction.
 
 ### Family 5: Calendar / Structural Flow Effects
@@ -214,10 +216,18 @@ cap, real rate surprises. Monthly rebalancing, genuinely different mechanism.
 **Why uncorrelated:** Driven by economic fundamentals, not market microstructure.
 
 ### Family 7: Sentiment Contrarian
-**Status: UNTESTED — high theoretical appeal**
-Crypto Fear & Greed extremes, put/call ratio extremes, VIX spikes as buy signals, Google
-Trends attention decay. Fire rarely (5-10 times/year) — noisy individual Sharpe but
-valuable in portfolio combination.
+**Status: KILLED — Phase 1 + Phase 2 failed (2026-04)**
+VIX spike (>25 or >30) buy signal tested exhaustively. Best config: Sharpe=0.582 at VIX>25/lb=5d/hold=20d.
+Phase 2 shuffled returns test: **FAIL** — p=0.51, strategy doesn't beat random signal timing.
+Crisis performance: LOSSES in 2020 (-17.4%), 2022 (-11.8%), 2011 (-9.8%) — exactly wrong.
+Root cause: VIX first crossing >25 enters during start of sustained bear markets.
+Mechanism refinement (VIX>threshold AND declining from peak) tested 11 configs — all fail shuffled test.
+Option SKEW (^SKEW >150) also tested: Sharpe=0.785 but p=0.036 (borderline), fires 22 days/12yr,
+not useful as overlay on Family 1 (only captures 4% of trades with no Sharpe lift).
+VVIX >100 event: Sharpe=0.853 but p=0.166 — fails fraud detection.
+**KILL. Do not retry.** The mechanism (fear extreme = mean reversion) is real directionally
+but VIX threshold crossing is not a reliable timing signal. Event frequency is too low for
+systematic deployment. Consider as DISCRETIONARY overlay only.
 **Why uncorrelated:** Driven by behavioral extremes, orthogonal to trend and credit.
 
 ### Family 8: Non-Credit Cross-Market Lead-Lag
@@ -232,13 +242,14 @@ but different leader instruments create different entry timing.
 
 | Priority | Family | Candidate | Expected Effort | Why Now |
 |----------|--------|-----------|----------------|---------|
-| 1 | 2 (Mean Reversion) | GLD-SLV full lifecycle | 1 session | Near-pass in prior scan, genuinely orthogonal |
-| 2 | 4 (Vol Regime) | VIX term structure contango strategy | 1 session | Well-documented anomaly, zero data cost |
-| 3 | 5 (Calendar) | F1 OPEX, F5 pre-earnings, F2 turn-of-quarter | 1 session | Quick to screen, calendar-driven = uncorrelated |
-| 4 | 7 (Sentiment) | D8 Fear & Greed, VIX>30 buy signal | 1 session | Alt data, orthogonal mechanism |
-| 5 | 3 (Momentum) | Dual-momentum SPY/TLT/GLD/BIL redesign | 1 session | Absol. momentum filter removes lookback sensitivity |
-| 6 | 6 (Macro Regime) | N4 yield curve un-inversion on FRED 20yr data | 1-2 sessions | Needs FRED integration, strong macro signal |
-| 7 | Portfolio | Combine all passing strategies from Families 2-8 | 1 session | After 3+ new families pass |
+| 1 | 2 (Mean Reversion) | GLD-SLV full lifecycle | 1 session | Near-pass in prior scan (Sharpe ~1.28), genuinely orthogonal |
+| 2 | 5 (Calendar) | F1 OPEX, F5 pre-earnings, F2 turn-of-quarter | 1 session | Quick to screen, calendar-driven = uncorrelated |
+| 3 | 3 (Momentum) | Dual-momentum SPY/TLT/GLD/BIL redesign | 1 session | Absol. momentum filter removes lookback sensitivity |
+| 4 | 6 (Macro Regime) | N4 yield curve un-inversion on FRED 20yr data | 1-2 sessions | Needs FRED integration, strong macro signal |
+| 5 | 8 (Non-Credit Lead-Lag) | Nikkei→SPY, copper→industrial stocks | 1 session | Expand on passing SOXX-QQQ |
+| 6 | Portfolio | Combine all passing strategies from Families 2-8 | 1 session | After 3+ new families pass |
+| ~~2~~ | ~~4 (Vol Regime)~~ | ~~VIX term structure~~ | ~~KILLED~~ | ~~Fails stress periods, inversion test~~ |
+| ~~4~~ | ~~7 (Sentiment)~~ | ~~VIX spike contrarian~~ | ~~KILLED~~ | ~~Fails shuffled returns, losses in 3 of 5 crises~~ |
 
 ---
 
