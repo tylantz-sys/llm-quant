@@ -674,6 +674,16 @@ def _rebuild_portfolio_from_reconciliation(
     if not hasattr(portfolio, "positions") or not hasattr(portfolio, "cash"):
         return 0
 
+    # Only wipe and rebuild if there are fill events to replay.
+    # An empty event log means we have no basis to reconstruct from — preserve
+    # the snapshot-loaded state rather than zeroing it out.
+    row_count = conn.execute(
+        "SELECT COUNT(*) FROM broker_fill_events WHERE pod_id = ?",
+        [pod_id],
+    ).fetchone()
+    if row_count is None or row_count[0] == 0:
+        return 0
+
     initial_capital = float(getattr(portfolio, "initial_capital", float(getattr(portfolio, "cash", 0.0))))
     portfolio.positions.clear()
     portfolio.cash = initial_capital

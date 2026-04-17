@@ -293,6 +293,8 @@ def submit_order_intents(
                     qty=intent.qty,
                     side=intent.side,
                     limit_price=float(intent.limit_price),
+                    time_in_force=intent.time_in_force,
+                    allow_fractional=intent.allow_fractional,
                 )
             elif intent.order_type == "stop":
                 if intent.stop_price is None or intent.stop_price <= 0:
@@ -302,6 +304,8 @@ def submit_order_intents(
                     qty=intent.qty,
                     side=intent.side,
                     stop_price=float(intent.stop_price),
+                    time_in_force=intent.time_in_force,
+                    allow_fractional=intent.allow_fractional,
                 )
             else:
                 if not intent.parent_order_id:
@@ -449,12 +453,15 @@ def submit_alpaca_orders(
                         plan.take_profit,
                         plan.stop_loss,
                     )
+                    _tif = execution.crypto_time_in_force if asset_class == "crypto" else "day"
                     response = client.submit_bracket_order(
                         symbol=symbol,
                         qty=trade.shares,
                         side="buy",
                         take_profit=plan.take_profit,
                         stop_loss=plan.stop_loss,
+                        time_in_force=_tif,
+                        allow_fractional=asset_class == "crypto",
                     )
                     submitted.append(
                         SubmittedBrokerOrder.from_alpaca_response(

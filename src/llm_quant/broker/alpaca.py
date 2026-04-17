@@ -145,13 +145,15 @@ class AlpacaClient:
         qty: float,
         side: str,
         limit_price: float,
+        time_in_force: str = "day",
+        allow_fractional: bool = False,
     ) -> dict[str, Any]:
         payload = {
             "symbol": symbol,
-            "qty": str(int(qty)),
+            "qty": str(qty) if allow_fractional else str(int(qty)),
             "side": side,
             "type": "limit",
-            "time_in_force": "day",
+            "time_in_force": time_in_force,
             "limit_price": f"{limit_price:.2f}",
         }
         return self._request("POST", "/v2/orders", json=payload)
@@ -162,13 +164,15 @@ class AlpacaClient:
         qty: float,
         side: str,
         stop_price: float,
+        time_in_force: str = "day",
+        allow_fractional: bool = False,
     ) -> dict[str, Any]:
         payload = {
             "symbol": symbol,
-            "qty": str(int(qty)),
+            "qty": str(qty) if allow_fractional else str(int(qty)),
             "side": side,
             "type": "stop",
-            "time_in_force": "day",
+            "time_in_force": time_in_force,
             "stop_price": f"{stop_price:.2f}",
         }
         return self._request("POST", "/v2/orders", json=payload)
@@ -180,16 +184,18 @@ class AlpacaClient:
         side: str,
         take_profit: float,
         stop_loss: float,
+        time_in_force: str = "day",
+        allow_fractional: bool = False,
     ) -> dict[str, Any]:
         payload = {
             "symbol": symbol,
-            "qty": str(int(qty)),
+            "qty": str(qty) if allow_fractional else str(int(qty)),
             "side": side,
             "type": "limit",
-            "time_in_force": "day",
-            "limit_price": f"{take_profit:.2f}",
-            "stop_price": f"{stop_loss:.2f}",
+            "time_in_force": time_in_force,
             "order_class": "oco",
+            "take_profit": {"limit_price": f"{take_profit:.2f}"},
+            "stop_loss": {"stop_price": f"{stop_loss:.2f}"},
         }
         return self._request("POST", "/v2/orders", json=payload)
 
@@ -200,13 +206,15 @@ class AlpacaClient:
         side: str,
         take_profit: float,
         stop_loss: float,
+        time_in_force: str = "day",
+        allow_fractional: bool = False,
     ) -> dict[str, Any]:
         payload = {
             "symbol": symbol,
-            "qty": str(int(qty)),
+            "qty": str(qty) if allow_fractional else str(int(qty)),
             "side": side,
             "type": "market",
-            "time_in_force": "day",
+            "time_in_force": time_in_force,
             "order_class": "bracket",
             "take_profit": {"limit_price": f"{take_profit:.2f}"},
             "stop_loss": {"stop_price": f"{stop_loss:.2f}"},

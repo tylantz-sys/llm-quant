@@ -150,6 +150,54 @@ def _resolve_overlay_auth_required(
     )
 
 
+def _sync_live_alpaca_positions(portfolio: Any) -> int:
+    """Close positions in portfolio that Alpaca no longer holds (filled stop/TP between runs).
+
+    Only CLOSES positions — never opens new ones based on broker state.
+    Returns the number of positions closed.
+    """
+    from llm_quant.broker.alpaca import AlpacaClient
+
+    try:
+        client = AlpacaClient.from_env()
+        broker_positions = client.list_positions()
+    except Exception as exc:  # noqa: BLE001
+        console.print(
+            f"[yellow]WARN[/yellow] Could not fetch Alpaca positions for sync: {exc}"
+        )
+        return 0
+
+    broker_symbols = {
+        _normalize_symbol(str(getattr(p, "symbol", p) if not isinstance(p, str) else p))
+        for p in broker_positions
+    }
+
+    closed = 0
+    for symbol in list(portfolio.positions.keys()):
+        position = portfolio.positions.get(symbol)
+        if position is None:
+            continue
+        shares = float(getattr(position, "shares", 0.0) or 0.0)
+        if shares <= 0.0:
+            continue
+        if _normalize_symbol(str(symbol)) not in broker_symbols:
+            # Position was closed at Alpaca (stop-loss / take-profit / manual) between runs.
+            # Recover cash using last known price so NAV stays consistent.
+            price = float(getattr(position, "current_price", None) or getattr(position, "avg_cost", 0.0))
+            proceeds = shares * price
+            portfolio.cash += proceeds
+            del portfolio.positions[symbol]
+            console.print(
+                f"  [yellow]SYNC[/yellow] Position {symbol} closed at Alpaca between runs "
+                f"(qty={shares:.4f} price={price:.4f}); recovered ${proceeds:,.2f} to cash"
+            )
+            closed += 1
+
+    if closed:
+        console.print(f"  [green]OK[/green] Synced {closed} position(s) closed at Alpaca between runs")
+    return closed
+
+
 def _sync_live_alpaca_cash(portfolio: Any) -> dict[str, float] | None:
     try:
         account = _get_alpaca_account()
@@ -181,6 +229,10 @@ def _release_runtime_locks(global_lock: Any, run_lock: Any) -> None:
         run_lock.release()
 
 
+def _normalize_symbol(sym: str) -> str:
+    return sym.replace("/", "").replace("-", "").upper()
+
+
 def _monitor_and_reconcile_broker_drift(
     *,
     conn: Any,
@@ -198,13 +250,15 @@ def _monitor_and_reconcile_broker_drift(
     from llm_quant.trading.ledger import log_broker_fills
 
     monitored = monitor_open_positions(client, tracked_symbols=tracked_symbols)
-    monitored_symbols = {event.symbol for event in monitored if getattr(event, "symbol", "")}
-    portfolio_symbols = {
-        str(symbol)
+    monitored_normalized = {
+        _normalize_symbol(e.symbol) for e in monitored if getattr(e, "symbol", "")
+    }
+    portfolio_normalized = {
+        _normalize_symbol(str(symbol))
         for symbol, position in getattr(portfolio, "positions", {}).items()
         if float(getattr(position, "shares", 0.0) or 0.0) > 0.0
     }
-    drift_detected = monitored_symbols != portfolio_symbols
+    drift_detected = monitored_normalized != portfolio_normalized
     if not drift_detected:
         return False, None
 
@@ -686,6 +740,7 @@ def _run_single_pod(
     live_account_context = None
     if broker.lower() == "alpaca":
         live_account_context = _sync_live_alpaca_cash(portfolio)
+        _sync_live_alpaca_positions(portfolio)
 
     peak_nav = compute_peak_nav(conn, pod_id, initial_capital)
     current_drawdown_pct = (
@@ -1240,17 +1295,20 @@ def _run_single_pod(
                 global_lock.release()
             raise typer.Exit(1) from exc
 
-        _monitor_and_reconcile_broker_drift(
-            conn=conn,
-            client=alpaca_client,
-            portfolio=portfolio,
-            pod_id=pod_id,
-            tracked_symbols=list(asset_class_map),
-            decision_id=decision_id,
-            resolved_signal_source=resolved_signal_source,
-            strategy_set=strategy_set if use_strategy_overlay else None,
-            exit_policy_state=exit_policy_state,
-        )
+        try:
+            _monitor_and_reconcile_broker_drift(
+                conn=conn,
+                client=alpaca_client,
+                portfolio=portfolio,
+                pod_id=pod_id,
+                tracked_symbols=list(asset_class_map),
+                decision_id=decision_id,
+                resolved_signal_source=resolved_signal_source,
+                strategy_set=strategy_set if use_strategy_overlay else None,
+                exit_policy_state=exit_policy_state,
+            )
+        except Exception as exc:
+            logger.warning("Broker drift reconciliation failed (non-fatal): %s", exc)
     executed = []
     if log_only:
         console.print(
@@ -1405,17 +1463,20 @@ def _run_single_pod(
             )
 
         upsert_order_states(conn, pod_id, order_states)
-        _monitor_and_reconcile_broker_drift(
-            conn=conn,
-            client=alpaca_client,
-            portfolio=portfolio,
-            pod_id=pod_id,
-            tracked_symbols=list(order_states),
-            decision_id=decision_id,
-            resolved_signal_source=resolved_signal_source,
-            strategy_set=strategy_set if use_strategy_overlay else None,
-            exit_policy_state=exit_policy_state,
-        )
+        try:
+            _monitor_and_reconcile_broker_drift(
+                conn=conn,
+                client=alpaca_client,
+                portfolio=portfolio,
+                pod_id=pod_id,
+                tracked_symbols=list(order_states),
+                decision_id=decision_id,
+                resolved_signal_source=resolved_signal_source,
+                strategy_set=strategy_set if use_strategy_overlay else None,
+                exit_policy_state=exit_policy_state,
+            )
+        except Exception as exc:
+            logger.warning("Broker drift reconciliation failed (non-fatal): %s", exc)
 
     # Step 5: Save snapshot
     console.print("[bold]Step 5/5:[/bold] Saving portfolio snapshot...")
@@ -1629,17 +1690,20 @@ def eod_flat(
         raise RuntimeError("EOD FLATTEN FAILED")
 
     portfolio = Portfolio.from_db(conn, config.general.initial_capital, pod_id=pod)
-    _monitor_and_reconcile_broker_drift(
-        conn=conn,
-        client=client,
-        portfolio=portfolio,
-        pod_id=pod,
-        tracked_symbols=None,
-        decision_id=None,
-        resolved_signal_source="system",
-        strategy_set=None,
-        exit_policy_state=dataclasses.asdict(exit_policy),
-    )
+    try:
+        _monitor_and_reconcile_broker_drift(
+            conn=conn,
+            client=client,
+            portfolio=portfolio,
+            pod_id=pod,
+            tracked_symbols=None,
+            decision_id=None,
+            resolved_signal_source="system",
+            strategy_set=None,
+            exit_policy_state=dataclasses.asdict(exit_policy),
+        )
+    except Exception as exc:
+        logger.warning("Broker drift reconciliation failed (non-fatal): %s", exc)
 
     prices = {
         symbol: float((position or {}).get("current_price", 0.0))
