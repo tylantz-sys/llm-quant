@@ -25,7 +25,7 @@ crypto_time_in_force = "gtc"
 initial_capital_source = "alpaca_equity"
 # ETH-USD is managed exclusively by crypto-ethbtc-paper pod; exclude here to prevent
 # cross-pod wash trade conflicts when both pods hold ETH in the same Alpaca account.
-symbol_exclude = ["ETH-USD"]
+symbol_exclude = ["ETH-USD", "ADA-USD"]
 
 # Exit policy overrides — CRITICAL for this strategy.
 # Default 2% partial TP + 1.5% trailing stop destroys momentum alpha in crypto.
@@ -45,6 +45,6 @@ enabled = false
 crypto_max_position_weight = 0.30
 
 [parameters]
-# Exclude ETH-USD from this pod's alt universe to prevent wash-trade conflicts
-# with crypto-ethbtc-paper pod which independently manages ETH positions.
+# NOTE: tradeable_alts is only used by generate_signals() which is bypassed when
+# claude_overlay_only = true. Symbol restriction is enforced by symbol_exclude above.
 tradeable_alts = ["SOL-USD", "XRP-USD"]
