@@ -58,6 +58,12 @@ eod_flatten_time = "15:55"         # US/Eastern
 crypto_max_position_weight = 0.05   # 5%  (vs 12% default)
 crypto_default_stop_loss_pct = 0.15 # 15% (vs 5% default — wider to avoid noise-triggered exits)
 
+# Crypto basket equal-weight sizing: forces flat allocation across all crypto BUY signals.
+# Each position is clamped to crypto_basket_target_weight regardless of LLM conviction,
+# preventing the LLM from over-allocating to one coin and under-allocating to others.
+crypto_basket_equal_weight = true
+crypto_basket_target_weight = 0.03   # 3% per position (supports up to ~1-2 simultaneous crypto)
+
 # Forex: Lower volatility → moderate position weight, tight stop-loss
 forex_max_position_weight = 0.08    # 8%  (vs 12% default)
 forex_default_stop_loss_pct = 0.03  # 3%  (vs 5% default — tighter given low vol)
@@ -92,6 +98,10 @@ max_drawdown_pct = 0.30              # 30% (vs 15% Track A — the key relaxatio
 crypto_max_position_weight = 0.08    # 8%  (vs 5% Track A)
 crypto_default_stop_loss_pct = 0.20  # 20% (wider — crypto overnight gaps are large)
 leveraged_etf_max_position_weight = 0.10  # 10% — leveraged ETFs capped below general limit
+
+# Crypto basket equal-weight sizing (Track B allows bigger slots)
+crypto_basket_equal_weight = true
+crypto_basket_target_weight = 0.04   # 4% per position (supports up to ~2 simultaneous crypto)
 
 # Track B take-profit + end-of-day flatten controls
 take_profit_mode = "pct"

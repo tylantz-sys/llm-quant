@@ -38,6 +38,7 @@ from llm_quant.broker.alpaca import AlpacaClient, AlpacaError
 from llm_quant.broker.executor import submit_alpaca_orders
 from llm_quant.config import load_config_for_pod
 from llm_quant.db.schema import get_connection
+from llm_quant.risk.basket import normalize_crypto_basket_weights
 from llm_quant.risk.manager import RiskManager
 from llm_quant.trading.executor import execute_signals
 from llm_quant.trading.exits import (
@@ -197,7 +198,7 @@ def _build_summary(
     }
 
 
-def main() -> None:  # noqa: PLR0915 — orchestration entry point; decomposing further adds no clarity
+def main() -> None:  # noqa: PLR0912, PLR0915 — orchestration entry point; decomposing further adds no clarity
     parser = argparse.ArgumentParser(description="Execute trading decision")
     parser.add_argument("--pod", default="default", help="Pod ID to execute for")
     parser.add_argument(
@@ -317,6 +318,10 @@ def main() -> None:  # noqa: PLR0915 — orchestration entry point; decomposing 
         approved, rejected = risk_mgr.filter_signals(
             governed_signals, portfolio, prices
         )
+
+        # Enforce crypto basket equal-weight sizing — clamp BUY crypto target_weights
+        # to crypto_basket_target_weight so all basket constituents get flat allocation.
+        approved = normalize_crypto_basket_weights(approved, config.risk, asset_class_map)
 
         # Dry-run: output preview and stop — no DB writes, no Alpaca calls
         if dry_run:

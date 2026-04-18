@@ -144,6 +144,11 @@ class RiskLimits(BaseModel):
     crypto_default_stop_loss_pct: float = 0.15
     forex_max_position_weight: float = 0.08
     forex_default_stop_loss_pct: float = 0.03
+    # Crypto basket equal-weight sizing: when enabled, all BUY crypto signals are
+    # clamped to crypto_basket_target_weight before execution, enforcing a flat
+    # allocation across basket constituents regardless of LLM conviction.
+    crypto_basket_equal_weight: bool = True
+    crypto_basket_target_weight: float = 0.03  # 3% per position (1-2 crypto slots)
 
 
 class TrackBLimits(BaseModel):
@@ -168,6 +173,9 @@ class TrackBLimits(BaseModel):
     crypto_max_position_weight: float = 0.08
     crypto_default_stop_loss_pct: float = 0.20
     leveraged_etf_max_position_weight: float = 0.10
+    # Crypto basket equal-weight sizing (Track B allows slightly larger basket slots)
+    crypto_basket_equal_weight: bool = True
+    crypto_basket_target_weight: float = 0.04  # 4% per position (fits ~2 crypto slots)
     # Take-profit defaults (configurable, overrides LLM when mode = pct)
     take_profit_mode: str = "pct"
     take_profit_pct: float = 0.03
