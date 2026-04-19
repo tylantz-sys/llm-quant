@@ -219,7 +219,40 @@ def _sync_live_alpaca_cash(portfolio: Any) -> dict[str, float] | None:
 
 def _broker_side_for_signal(action: object) -> str:
     value = getattr(action, "value", str(action)).lower()
-    return "buy" if value == "buy" else "sell"
+    if value in {"buy", "cover"}:
+        return "buy"
+    if value in {"sell", "short", "close"}:
+        return "sell"
+    return "sell"
+
+
+def _rollback_rejected_entry_order(portfolio: Any, order: Any) -> bool:
+    """Rollback simulated portfolio state for rejected broker entry submissions."""
+    intent_type = str(getattr(order, "intent_type", "") or "").lower()
+    if intent_type not in {"entry", "entry_short"}:
+        return False
+
+    symbol = str(getattr(order, "symbol", "") or "")
+    position = getattr(portfolio, "positions", {}).get(symbol)
+    if position is None:
+        return False
+
+    rollback_notional = abs(
+        float(getattr(position, "shares", 0.0))
+        * float(getattr(position, "avg_cost", 0.0))
+    )
+    if rollback_notional <= 0.0:
+        order_notional = getattr(order, "notional", None)
+        rollback_notional = float(order_notional) if order_notional else 0.0
+
+    # Long ghost entry consumed cash; short ghost entry credited proceeds.
+    if float(getattr(position, "shares", 0.0)) < 0.0:
+        portfolio.cash -= rollback_notional
+    else:
+        portfolio.cash += rollback_notional
+
+    del portfolio.positions[symbol]
+    return True
 
 
 def _release_runtime_locks(global_lock: Any, run_lock: Any) -> None:
@@ -1432,22 +1465,15 @@ def _run_single_pod(
                 # H5: roll back portfolio state for rejected/cancelled entry orders
                 _rejected = {"rejected", "cancelled", "expired"}
                 for order in submitted_orders:
-                    if order.intent_type != "entry" or order.side != "buy":
-                        continue
                     if (order.status or "").lower() not in _rejected:
                         continue
-                    pos = portfolio.positions.get(order.symbol)
-                    if pos is not None:
-                        refund = pos.shares * pos.avg_cost
-                        if refund <= 0 and order.notional:
-                            refund = float(order.notional)
-                        portfolio.cash += refund
-                        del portfolio.positions[order.symbol]
+                    if _rollback_rejected_entry_order(portfolio, order):
                         logger.warning(
-                            "Rolled back ghost position for %s after %s order (order_id=%s)",
+                            "Rolled back ghost position for %s after %s order (order_id=%s, intent=%s)",
                             order.symbol,
                             order.status,
                             order.order_id,
+                            order.intent_type,
                         )
                 # H7: collect actual fill prices for OCO exit placement
                 for order in submitted_orders:

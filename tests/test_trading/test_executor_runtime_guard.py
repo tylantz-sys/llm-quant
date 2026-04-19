@@ -108,3 +108,35 @@ def test_execute_signals_supports_short_and_cover() -> None:
     assert cover_executed[0].action == "cover"
     assert portfolio.cash == 1_005.0
     assert "SPY" not in portfolio.positions
+
+
+def test_execute_signals_close_short_sets_short_close_marker() -> None:
+    portfolio = Portfolio(initial_capital=1_000.0)
+
+    execute_signals(
+        portfolio,
+        [_short_signal()],
+        {"SPY": 100.0},
+        portfolio.nav,
+        mode=ExecutionMode.PAPER,
+    )
+
+    close_signal = TradeSignal(
+        symbol="SPY",
+        action=Action.CLOSE,
+        conviction=Conviction.MEDIUM,
+        target_weight=0.0,
+        stop_loss=0.0,
+        reasoning="flatten",
+    )
+    closed = execute_signals(
+        portfolio,
+        [close_signal],
+        {"SPY": 102.0},
+        portfolio.nav,
+        mode=ExecutionMode.PAPER,
+    )
+
+    assert len(closed) == 1
+    assert closed[0].action == "close"
+    assert closed[0].is_short_close is True

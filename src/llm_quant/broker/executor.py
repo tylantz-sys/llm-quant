@@ -159,6 +159,23 @@ def bracket_prices_valid(entry_price: float, stop_loss: float, take_profit: floa
     return True
 
 
+def _route_trade_to_broker_action(trade: ExecutedTrade) -> tuple[str, str]:
+    """Map an executed trade to broker side + intent type."""
+    if trade.action == "buy":
+        return "buy", "entry"
+    if trade.action == "sell":
+        return "sell", "exit"
+    if trade.action == "short":
+        return "sell", "entry_short"
+    if trade.action == "cover":
+        return "buy", "cover"
+    if trade.action == "close":
+        if trade.is_short_close:
+            return "buy", "cover"
+        return "sell", "exit"
+    raise AlpacaError(f"Unsupported trade action '{trade.action}' for broker submission")
+
+
 def build_entry_order_intents(
     portfolio: Any,
     approved_signals: list[Any],
@@ -179,8 +196,9 @@ def build_entry_order_intents(
     )
 
     for signal in approved_signals:
-        action = getattr(signal, "action", None)
-        if getattr(action, "value", str(action)).lower() != "buy":
+        signal_action = getattr(signal, "action", None)
+        action = getattr(signal_action, "value", str(signal_action)).lower()
+        if action not in {"buy", "short"}:
             continue
 
         symbol = str(getattr(signal, "symbol"))
@@ -194,7 +212,13 @@ def build_entry_order_intents(
         asset_class = str(asset_class_map.get(symbol, "equity")).lower()
         allow_fractional = asset_class == "crypto"
         available_cash = max(float(getattr(portfolio, "cash", 0.0)), 0.0)
-        effective_notional = max(min(target_notional, available_cash), 0.0)
+        effective_notional = (
+            max(min(target_notional, available_cash), 0.0)
+            if action == "buy"
+            else max(target_notional, 0.0)
+        )
+        side = "buy" if action == "buy" else "sell"
+        intent_type = "entry" if action == "buy" else "entry_short"
 
         if allow_fractional and execution.crypto_order_sizing == "notional":
             if effective_notional <= 0:
@@ -203,16 +227,17 @@ def build_entry_order_intents(
             intents.append(
                 BrokerOrderIntent(
                     symbol=_map_crypto_symbol(symbol, execution.crypto_symbol_map),
-                    side="buy",
+                    side=side,
                     qty=qty,
                     order_type="market",
-                    intent_type="entry",
+                    intent_type=intent_type,
                     notional=round(effective_notional, 2),
                     time_in_force=execution.crypto_time_in_force,
                     allow_fractional=True,
                     asset_class=asset_class,
                     metadata={
                         "source_symbol": symbol,
+                        "signal_action": action,
                         "signal_target_weight": getattr(signal, "target_weight", None),
                         "risk_budget": risk_budget,
                     },
@@ -236,15 +261,16 @@ def build_entry_order_intents(
                 symbol=_map_crypto_symbol(symbol, execution.crypto_symbol_map)
                 if allow_fractional
                 else symbol,
-                side="buy",
+                side=side,
                 qty=qty,
                 order_type="market",
-                intent_type="entry",
+                intent_type=intent_type,
                 time_in_force=execution.crypto_time_in_force if allow_fractional else "day",
                 allow_fractional=allow_fractional,
                 asset_class=asset_class,
                 metadata={
                     "source_symbol": symbol,
+                    "signal_action": action,
                     "signal_target_weight": getattr(signal, "target_weight", None),
                     "risk_budget": risk_budget,
                 },
@@ -386,10 +412,11 @@ def submit_alpaca_orders(
         asset_class = str(asset_class_map.get(symbol, "equity")).lower()
         if asset_class == "crypto":
             mapped_symbol = _map_crypto_symbol(symbol, execution.crypto_symbol_map)
-            if trade.action in ("buy", "sell", "close"):
+            if trade.action in ("buy", "sell", "close", "short", "cover"):
+                side, intent_type = _route_trade_to_broker_action(trade)
                 notional = None
                 qty = float(trade.shares)
-                if execution.crypto_order_sizing == "notional" and trade.action == "buy":
+                if execution.crypto_order_sizing == "notional" and trade.action in {"buy", "short"}:
                     notional = trade.notional
                 if qty <= 0 and notional is None:
                     logger.warning(
@@ -400,7 +427,7 @@ def submit_alpaca_orders(
                 kwargs: dict[str, Any] = {
                     "symbol": mapped_symbol,
                     "qty": qty,
-                    "side": "buy" if trade.action == "buy" else "sell",
+                    "side": side,
                     "time_in_force": execution.crypto_time_in_force,
                     "notional": notional,
                     "allow_fractional": True,
@@ -418,9 +445,9 @@ def submit_alpaca_orders(
                 submitted.append(
                     SubmittedBrokerOrder.from_alpaca_response(
                         response,
-                        intent_type="entry" if trade.action == "buy" else "exit",
+                        intent_type=intent_type,
                         symbol=mapped_symbol,
-                        side="buy" if trade.action == "buy" else "sell",
+                        side=side,
                         requested_qty=qty,
                         order_type="market",
                         limit_price=None,
@@ -543,23 +570,25 @@ def submit_alpaca_orders(
                         asset_class=asset_class,
                     )
                 )
-        elif trade.action in ("sell", "close"):
+        elif trade.action in ("sell", "close", "short", "cover"):
+            side, intent_type = _route_trade_to_broker_action(trade)
             logger.info(
-                "Submitting market sell for %s: qty=%.0f",
+                "Submitting market %s for %s: qty=%.0f",
+                side,
                 symbol,
                 trade.shares,
             )
             response = client.submit_market_order(
                 symbol=symbol,
                 qty=trade.shares,
-                side="sell",
+                side=side,
             )
             submitted.append(
                 SubmittedBrokerOrder.from_alpaca_response(
                     response,
-                    intent_type="exit",
+                    intent_type=intent_type,
                     symbol=symbol,
-                    side="sell",
+                    side=side,
                     requested_qty=trade.shares,
                     order_type="market",
                     limit_price=None,
@@ -571,6 +600,10 @@ def submit_alpaca_orders(
                     exit_reason=trade.exit_reason or None,
                     asset_class=asset_class,
                 )
+            )
+        else:
+            raise AlpacaError(
+                f"Unsupported trade action '{trade.action}' for symbol {symbol}"
             )
 
     return submitted

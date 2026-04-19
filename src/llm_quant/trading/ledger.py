@@ -499,72 +499,91 @@ def save_portfolio_snapshot(
     snapshot_id: int = row[0]
 
     nav = portfolio.nav
+    long_exposure = sum(
+        pos.market_value for pos in portfolio.positions.values() if pos.market_value > 0
+    )
+    short_exposure = sum(
+        abs(pos.market_value) for pos in portfolio.positions.values() if pos.market_value < 0
+    )
 
     snap_cols = [c[0] for c in conn.execute("DESCRIBE portfolio_snapshots").fetchall()]
+    snap_insert_cols = [
+        "snapshot_id",
+        "date",
+        "nav",
+        "cash",
+        "gross_exposure",
+        "net_exposure",
+        "total_pnl",
+        "daily_pnl",
+    ]
+    snap_insert_vals: list[Any] = [
+        snapshot_id,
+        trade_date,
+        nav,
+        portfolio.cash,
+        portfolio.gross_exposure,
+        portfolio.net_exposure,
+        portfolio.total_pnl,
+        daily_pnl,
+    ]
     if "pod_id" in snap_cols:
-        conn.execute(
-            """
-            INSERT INTO portfolio_snapshots (
-                snapshot_id, date, pod_id, nav, cash,
-                gross_exposure, net_exposure,
-                total_pnl, daily_pnl
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                snapshot_id,
-                trade_date,
-                pod_id,
-                nav,
-                portfolio.cash,
-                portfolio.gross_exposure,
-                portfolio.net_exposure,
-                portfolio.total_pnl,
-                daily_pnl,
-            ],
-        )
-    else:
-        conn.execute(
-            """
-            INSERT INTO portfolio_snapshots (
-                snapshot_id, date, nav, cash,
-                gross_exposure, net_exposure,
-                total_pnl, daily_pnl
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                snapshot_id,
-                trade_date,
-                nav,
-                portfolio.cash,
-                portfolio.gross_exposure,
-                portfolio.net_exposure,
-                portfolio.total_pnl,
-                daily_pnl,
-            ],
-        )
+        snap_insert_cols.insert(2, "pod_id")
+        snap_insert_vals.insert(2, pod_id)
+    if "long_exposure" in snap_cols:
+        snap_insert_cols.append("long_exposure")
+        snap_insert_vals.append(long_exposure)
+    if "short_exposure" in snap_cols:
+        snap_insert_cols.append("short_exposure")
+        snap_insert_vals.append(short_exposure)
+
+    snap_cols_sql = ", ".join(snap_insert_cols)
+    snap_placeholders = ", ".join(["?"] * len(snap_insert_cols))
+    conn.execute(
+        f"INSERT INTO portfolio_snapshots ({snap_cols_sql}) "
+        f"VALUES ({snap_placeholders})",
+        snap_insert_vals,
+    )
 
     # Persist individual positions
+    position_cols = [c[0] for c in conn.execute("DESCRIBE positions").fetchall()]
     for pos in portfolio.positions.values():
         weight = (pos.market_value / nav) if nav else 0.0
+        position_insert_cols = [
+            "snapshot_id",
+            "symbol",
+            "shares",
+            "avg_cost",
+            "current_price",
+            "market_value",
+            "unrealized_pnl",
+            "weight",
+            "stop_loss",
+        ]
+        position_insert_vals: list[Any] = [
+            snapshot_id,
+            pos.symbol,
+            pos.shares,
+            pos.avg_cost,
+            pos.current_price,
+            pos.market_value,
+            pos.unrealized_pnl,
+            weight,
+            pos.stop_loss,
+        ]
+        if "is_short" in position_cols:
+            position_insert_cols.append("is_short")
+            position_insert_vals.append(pos.is_short)
+        if "short_proceeds" in position_cols:
+            position_insert_cols.append("short_proceeds")
+            position_insert_vals.append(pos.short_proceeds)
+
+        position_cols_sql = ", ".join(position_insert_cols)
+        position_placeholders = ", ".join(["?"] * len(position_insert_cols))
         conn.execute(
-            """
-            INSERT INTO positions (
-                snapshot_id, symbol, shares, avg_cost,
-                current_price, market_value, unrealized_pnl,
-                weight, stop_loss
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                snapshot_id,
-                pos.symbol,
-                pos.shares,
-                pos.avg_cost,
-                pos.current_price,
-                pos.market_value,
-                pos.unrealized_pnl,
-                weight,
-                pos.stop_loss,
-            ],
+            f"INSERT INTO positions ({position_cols_sql}) "
+            f"VALUES ({position_placeholders})",
+            position_insert_vals,
         )
 
     conn.commit()
@@ -748,21 +767,35 @@ def get_portfolio_history(
     """
     snap_cols = [c[0] for c in conn.execute("DESCRIBE portfolio_snapshots").fetchall()]
     has_pod_id = "pod_id" in snap_cols
+    has_long_exposure = "long_exposure" in snap_cols
+    has_short_exposure = "short_exposure" in snap_cols
+
+    select_cols = [
+        "snapshot_id",
+        "date",
+        "nav",
+        "cash",
+        "gross_exposure",
+        "net_exposure",
+        "total_pnl",
+        "daily_pnl",
+    ]
+    if has_long_exposure:
+        select_cols.append("long_exposure")
+    if has_short_exposure:
+        select_cols.append("short_exposure")
+    select_cols.append("created_at")
+
+    prefixed_select_cols = list(select_cols)
+    if has_pod_id:
+        prefixed_select_cols.insert(2, "pod_id")
+    select_clause = ",\n                ".join(prefixed_select_cols)
 
     if has_pod_id and pod_id is not None:
         result = conn.execute(
             f"""
             SELECT
-                snapshot_id,
-                date,
-                pod_id,
-                nav,
-                cash,
-                gross_exposure,
-                net_exposure,
-                total_pnl,
-                daily_pnl,
-                created_at
+                {select_clause}
             FROM portfolio_snapshots
             WHERE date >= CURRENT_DATE - INTERVAL {int(days)} DAY
               AND pod_id = ?
@@ -770,78 +803,29 @@ def get_portfolio_history(
             """,
             [pod_id],
         ).fetchall()
-        columns = [
-            "snapshot_id",
-            "date",
-            "pod_id",
-            "nav",
-            "cash",
-            "gross_exposure",
-            "net_exposure",
-            "total_pnl",
-            "daily_pnl",
-            "created_at",
-        ]
+        columns = prefixed_select_cols
     elif has_pod_id:
         result = conn.execute(
             f"""
             SELECT
-                snapshot_id,
-                date,
-                pod_id,
-                nav,
-                cash,
-                gross_exposure,
-                net_exposure,
-                total_pnl,
-                daily_pnl,
-                created_at
+                {select_clause}
             FROM portfolio_snapshots
             WHERE date >= CURRENT_DATE - INTERVAL {int(days)} DAY
             ORDER BY date ASC, snapshot_id ASC
             """,
         ).fetchall()
-        columns = [
-            "snapshot_id",
-            "date",
-            "pod_id",
-            "nav",
-            "cash",
-            "gross_exposure",
-            "net_exposure",
-            "total_pnl",
-            "daily_pnl",
-            "created_at",
-        ]
+        columns = prefixed_select_cols
     else:
         result = conn.execute(
             f"""
             SELECT
-                snapshot_id,
-                date,
-                nav,
-                cash,
-                gross_exposure,
-                net_exposure,
-                total_pnl,
-                daily_pnl,
-                created_at
+                {",\n                ".join(select_cols)}
             FROM portfolio_snapshots
             WHERE date >= CURRENT_DATE - INTERVAL {int(days)} DAY
             ORDER BY date ASC, snapshot_id ASC
             """,
         ).fetchall()
-        columns = [
-            "snapshot_id",
-            "date",
-            "nav",
-            "cash",
-            "gross_exposure",
-            "net_exposure",
-            "total_pnl",
-            "daily_pnl",
-            "created_at",
-        ]
+        columns = select_cols
 
     history = [dict(zip(columns, row, strict=True)) for row in result]
 

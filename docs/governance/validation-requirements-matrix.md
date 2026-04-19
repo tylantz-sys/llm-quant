@@ -170,6 +170,7 @@ These determine whether a deployment can be trusted operationally, independent o
 | Signal state observable | runtime | can distinguish no data / no decision / zero signal / vetoed signal | telemetry / dashboard / logs | runtime readiness | Prevents silent ambiguity |
 | Risk veto observability | runtime | risk-off / kill switch reasons visible | telemetry / logs | runtime readiness | Must explain suppression |
 | Execution path observability | runtime | can see routed, rejected, filled, canceled orders | telemetry / logs | runtime readiness | Required for operator trust |
+| Direct short rollout observability | runtime | `short_exposure_ratio` telemetry and `short_rollout` surveillance check active before enabling discretionary shorts | runtime-backed / surveillance logs | runtime readiness | Prevents silent short-cap drift during rollout |
 | Kill switches wired | runtime | confirmed active in runtime path | runtime-backed / code path review | deployment | Required before trust |
 | Incident logging | runtime | incidents recorded with timestamps and reasons | paper/deployment records | paper + deployment | Required for operations review |
 | Telemetry completeness | runtime | at least partial lifecycle-to-runtime coverage | docs + logs + DB | deployment | Should trend toward complete |
@@ -205,6 +206,7 @@ The following are not valid substitutes for passing validation:
 | “It has high CAGR” | High return alone does not address overfitting, fragility, or live viability |
 | “It ran in paper once” | Promotion requires minimum paper duration, trade count, and ops verification |
 | “The runtime is active” | Runtime enabled does not imply governance complete |
+| “Shorts are tiny, so we can skip dedicated monitoring” | Small short sleeves can still breach locate/margin/exposure controls if not explicitly observed |
 | “No trades means safety” | It could also mean stale data, suppression, or broken signal generation |
 | “Crypto is special, so we can skip general rigor” | Crypto docs actually require more operational proof, not less |
 | “We can loosen thresholds later if it stays quiet” | Quiet runtime should trigger diagnosis and validation, not blind de-risking of standards |
@@ -282,5 +284,6 @@ This matrix directly supports the broader program by making three critical impro
 | Version | Date | Change |
 |---------|------|--------|
 | 1.2 | 2026-04-01 | Added canonical exit parity review language to the recommended requirements and minimum promotion checklist so profit-taking validation is explicitly compared across runtime, paper, and backtest surfaces. |
+| 1.3 | 2026-04-19 | Added direct short rollout runtime requirement (`short_rollout` surveillance + `short_exposure_ratio` telemetry) and explicit anti-shortcut guidance for short capability activation. |
 | 1.1 | 2026-03-31 | Cross-linked the strategy artifact/status matrix as the canonical per-strategy and per-sleeve status ledger, clarifying that this document defines requirements while the status matrix records verified state. |
 | 1.0 | 2026-03-31 | Initial canonical validation matrix created to unify lifecycle, robustness, promotion, crypto, and runtime-readiness requirements. |

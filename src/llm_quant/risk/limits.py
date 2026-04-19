@@ -328,6 +328,83 @@ def check_cash_reserve(
     )
 
 
+def check_short_exposure(
+    current_short: float,
+    trade_notional: float,
+    nav: float,
+    max_short: float,
+) -> RiskCheckResult:
+    """Ensure projected gross short exposure stays within the configured cap."""
+    if nav <= 0.0:
+        return RiskCheckResult(
+            passed=False,
+            rule="short_exposure",
+            message="NAV is zero or negative.",
+            current_value=0.0,
+            limit_value=max_short,
+        )
+
+    projected_short = (current_short + trade_notional) / nav
+    passed = projected_short <= max_short
+    return RiskCheckResult(
+        passed=passed,
+        rule="short_exposure",
+        message=(
+            f"Projected gross short exposure {projected_short:.2%} "
+            f"{'<=' if passed else '>'} limit {max_short:.2%}."
+        ),
+        current_value=projected_short,
+        limit_value=max_short,
+    )
+
+
+def check_margin_buffer(
+    available_cash: float,
+    projected_short_notional: float,
+    margin_requirement: float,
+) -> RiskCheckResult:
+    """Ensure enough cash exists to support simulated short margin."""
+    required_margin = projected_short_notional * margin_requirement
+    passed = available_cash >= required_margin
+    return RiskCheckResult(
+        passed=passed,
+        rule="margin_buffer",
+        message=(
+            f"Available cash {available_cash:.2f} "
+            f"{'>=' if passed else '<'} required short margin {required_margin:.2f}."
+        ),
+        current_value=available_cash,
+        limit_value=required_margin,
+    )
+
+
+def check_locate_availability(
+    require_locate: bool,
+    locate_available: bool = True,
+) -> RiskCheckResult:
+    """Paper-trading locate stub; live integration can replace this later."""
+    if not require_locate:
+        return RiskCheckResult(
+            passed=True,
+            rule="locate_availability",
+            message="Locate not required by policy.",
+            current_value=1.0,
+            limit_value=0.0,
+        )
+
+    return RiskCheckResult(
+        passed=locate_available,
+        rule="locate_availability",
+        message=(
+            "Locate available for short entry."
+            if locate_available
+            else "Locate required but unavailable for short entry."
+        ),
+        current_value=1.0 if locate_available else 0.0,
+        limit_value=1.0,
+    )
+
+
 def check_stop_loss(
     has_stop_loss: bool,
     require: bool,

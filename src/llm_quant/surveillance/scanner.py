@@ -12,6 +12,7 @@ from llm_quant.config import AppConfig
 from llm_quant.surveillance.detectors import (
     check_alpha_decay,
     check_data_quality,
+    check_direct_short_rollout,
     check_harvest_governance,
     check_kill_switches,
     check_operational_health,
@@ -58,6 +59,7 @@ class SurveillanceScanner:
             ("regime_drift", check_regime_drift),
             ("alpha_decay", check_alpha_decay),
             ("risk_drift", check_risk_drift),
+            ("short_rollout", check_direct_short_rollout),
             ("data_quality", check_data_quality),
             ("process_drift", check_process_drift),
             ("operational_health", check_operational_health),

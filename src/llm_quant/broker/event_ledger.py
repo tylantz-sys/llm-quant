@@ -906,25 +906,43 @@ def rebuild_position_state_from_events(
             if side == "buy":
                 existing_qty = symbol_state["position_qty"]
                 new_qty = existing_qty + qty
-                if new_qty > 0:
+                if existing_qty >= 0.0 and new_qty > 0.0:
                     total_cost = (existing_qty * symbol_state["avg_cost"]) + (qty * price)
                     symbol_state["avg_cost"] = total_cost / new_qty
+                elif existing_qty < 0.0 and new_qty > 0.0:
+                    symbol_state["avg_cost"] = price
+                elif abs(new_qty) <= 1e-9:
+                    symbol_state["avg_cost"] = 0.0
                 symbol_state["position_qty"] = new_qty
-                symbol_state["is_open"] = new_qty > 0
-                symbol_state["is_closed"] = False
-                symbol_state["closed_at"] = None
-                if event.intent_type == "entry" and not symbol_state["entry_order_id"]:
+                symbol_state["is_open"] = abs(new_qty) > 1e-9
+                symbol_state["is_closed"] = not symbol_state["is_open"]
+                symbol_state["closed_at"] = (
+                    event.event_time if symbol_state["is_closed"] else None
+                )
+                if event.intent_type in {"entry", "entry_long", "entry_short"} and not symbol_state["entry_order_id"]:
                     symbol_state["entry_order_id"] = event.parent_order_id or event.order_id
             elif side == "sell":
-                remaining_qty = max(symbol_state["position_qty"] - qty, 0.0)
-                symbol_state["position_qty"] = remaining_qty
-                symbol_state["is_open"] = remaining_qty > 0
+                existing_qty = symbol_state["position_qty"]
+                new_qty = existing_qty - qty
+                if existing_qty <= 0.0 and new_qty < 0.0:
+                    prior_short_qty = abs(existing_qty)
+                    total_short_qty = prior_short_qty + qty
+                    if total_short_qty > 0.0:
+                        total_cost = (prior_short_qty * symbol_state["avg_cost"]) + (qty * price)
+                        symbol_state["avg_cost"] = total_cost / total_short_qty
+                elif existing_qty > 0.0 and new_qty < 0.0:
+                    symbol_state["avg_cost"] = price
+                elif abs(new_qty) <= 1e-9:
+                    symbol_state["avg_cost"] = 0.0
+                symbol_state["position_qty"] = new_qty
+                symbol_state["is_open"] = abs(new_qty) > 1e-9
                 symbol_state["exit_order_id"] = event.order_id
                 if not symbol_state["entry_order_id"] and event.parent_order_id:
                     symbol_state["entry_order_id"] = event.parent_order_id
-                if remaining_qty == 0.0:
-                    symbol_state["is_closed"] = True
-                    symbol_state["closed_at"] = event.event_time
+                symbol_state["is_closed"] = not symbol_state["is_open"]
+                symbol_state["closed_at"] = (
+                    event.event_time if symbol_state["is_closed"] else None
+                )
 
         if event.event_type == BrokerEventType.POSITION_CLOSED:
             symbol_state["position_qty"] = 0.0

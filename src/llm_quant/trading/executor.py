@@ -53,6 +53,7 @@ class ExecutedTrade:
     entry_batch: int = 1
     exit_reason: str = ""
     short_proceeds: float = 0.0
+    is_short_close: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +473,7 @@ def _execute_close(
         return None
 
     shares_to_close = abs(existing.shares)
+    is_short_close = existing.shares < 0
     if existing.shares > 0:
         proceeds = shares_to_close * price
         portfolio.cash += proceeds
@@ -493,6 +495,7 @@ def _execute_close(
         strategy_id=signal.strategy_id,
         entry_batch=signal.entry_batch,
         exit_reason=signal.exit_reason,
+        is_short_close=is_short_close,
     )
 
 

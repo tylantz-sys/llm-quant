@@ -72,6 +72,9 @@ _EXIT_INTENT_TYPES = {
     "forced_exit",
 }
 
+_ENTRY_INTENT_TYPES = {"entry", "entry_short"}
+_POSITION_REDUCTION_INTENT_TYPES = _EXIT_INTENT_TYPES | {"exit", "close", "cover"}
+
 _PROTECTION_INTENT_TYPES = {
     "take_profit_1",
     "take_profit_2",
@@ -649,7 +652,7 @@ def _position_was_closed_by_event(
     if rebuilt is not None:
         if rebuilt.is_closed:
             return True
-        return rebuilt.position_qty <= 0.0 and rebuilt.closed_at is not None
+        return abs(rebuilt.position_qty) <= 1e-9 and rebuilt.closed_at is not None
     row = conn.execute(
         """
         SELECT 1
@@ -661,6 +664,37 @@ def _position_was_closed_by_event(
         [pod_id, symbol],
     ).fetchone()
     return row is not None
+
+
+def _effective_portfolio_side(
+    *,
+    portfolio: Any,
+    symbol: str,
+    side: str,
+    intent_type: str | None,
+) -> str:
+    normalized_side = (side or "").strip().lower()
+    normalized_intent = (intent_type or "").strip().lower()
+
+    if normalized_side == "buy":
+        if normalized_intent == "cover":
+            return "buy_to_cover"
+        position = getattr(portfolio, "positions", {}).get(symbol)
+        if position is not None and float(getattr(position, "shares", 0.0)) < 0.0:
+            return "buy_to_cover"
+        return "buy"
+
+    if normalized_side == "sell":
+        if normalized_intent == "entry_short":
+            return "sell_short"
+        if normalized_intent in _POSITION_REDUCTION_INTENT_TYPES:
+            return "sell"
+        position = getattr(portfolio, "positions", {}).get(symbol)
+        if position is None or float(getattr(position, "shares", 0.0)) <= 0.0:
+            return "sell_short"
+        return "sell"
+
+    return normalized_side
 
 
 def _rebuild_portfolio_from_reconciliation(
@@ -714,7 +748,12 @@ def _rebuild_portfolio_from_reconciliation(
             effective_side = "buy" if effective_side.lower() == "sell" else "sell"
         portfolio.apply_broker_fill(
             str(symbol),
-            effective_side,
+            _effective_portfolio_side(
+                portfolio=portfolio,
+                symbol=str(symbol),
+                side=effective_side,
+                intent_type=str(intent_type) if intent_type is not None else None,
+            ),
             effective_qty,
             _parse_float(fill_price),
             0.0,
@@ -997,7 +1036,7 @@ def _classify_status(
     symbol_entry_orders = {
         status.symbol: status.order_id
         for status in statuses
-        if (status.intent_type or "") == "entry" and status.order_id
+        if (status.intent_type or "") in _ENTRY_INTENT_TYPES and status.order_id
     }
 
     for fill in fills:
@@ -1727,13 +1766,17 @@ def reconcile_broker_orders(
         for symbol in lifecycle_symbols:
             symbol_statuses = [status for status in statuses if status.symbol == symbol]
             entry_status = next(
-                (status for status in symbol_statuses if (status.intent_type or "") == "entry"),
+                (
+                    status
+                    for status in symbol_statuses
+                    if (status.intent_type or "") in _ENTRY_INTENT_TYPES
+                ),
                 None,
             )
             exit_statuses = [
                 status
                 for status in symbol_statuses
-                if (status.intent_type or "") != "entry"
+                if (status.intent_type or "") not in _ENTRY_INTENT_TYPES
             ]
             rebuilt_position = rebuilt_positions.get(symbol)
             rebuilt_position_qty = (
@@ -1754,7 +1797,7 @@ def reconcile_broker_orders(
                     broker_position_qty=broker_position_qty,
                     rebuilt_position_qty=rebuilt_position_qty,
                 )
-            closed_by_event = current_position_qty <= 0.0 and _position_was_closed_by_event(
+            closed_by_event = abs(current_position_qty) <= 1e-9 and _position_was_closed_by_event(
                 conn=conn,
                 pod_id=pod_id,
                 symbol=symbol,
@@ -1794,7 +1837,7 @@ def reconcile_broker_orders(
                     [
                         fill.fill_time
                         for fill in fills
-                        if fill.symbol == symbol and (fill.intent_type or "") != "entry"
+                        if fill.symbol == symbol and (fill.intent_type or "") not in _ENTRY_INTENT_TYPES
                     ]
                     or [datetime.now(tz=UTC)]
                 )

@@ -22,10 +22,13 @@ from llm_quant.risk.limits import (
     check_cash_reserve,
     check_drawdown_limit,
     check_gross_exposure,
+    check_locate_availability,
+    check_margin_buffer,
     check_net_exposure,
     check_position_size,
     check_position_weight,
     check_sector_concentration,
+    check_short_exposure,
     check_stop_loss,
     check_volatility_sizing,
 )
@@ -339,18 +342,24 @@ class RiskManager:
         nav = portfolio.nav
         price = prices.get(signal.symbol, 0.0)
 
-        # For HOLD / CLOSE / SELL we are *reducing* risk – most limit
-        # checks only apply to new buys.
         is_buy = signal.action == Action.BUY
+        is_short = signal.action == Action.SHORT
+        is_cover = signal.action == Action.COVER
+        is_open_risk = is_buy or is_short
 
         # ---- Trade notional estimation --------------------------------
-        # For buys: target_weight * nav is the desired position size;
+        # For buys and shorts: target_weight * nav is the desired position size;
         # the *incremental* notional is the difference from the current
         # position.
         current_weight = portfolio.get_position_weight(signal.symbol)
+        current_long_weight = max(current_weight, 0.0)
+        current_short_weight = abs(min(current_weight, 0.0))
 
         if is_buy:
-            additional_weight = max(signal.target_weight - current_weight, 0.0)
+            additional_weight = max(signal.target_weight - current_long_weight, 0.0)
+            trade_notional = additional_weight * nav
+        elif is_short:
+            additional_weight = max(signal.target_weight - current_short_weight, 0.0)
             trade_notional = additional_weight * nav
         else:
             # Sells / closes free up capital; compute notional for
@@ -359,8 +368,11 @@ class RiskManager:
             if existing is not None and price > 0:
                 if signal.action == Action.CLOSE:
                     trade_notional = abs(existing.market_value)
+                elif is_cover:
+                    reduce_weight = max(current_short_weight - signal.target_weight, 0.0)
+                    trade_notional = reduce_weight * nav
                 else:
-                    reduce_weight = max(current_weight - signal.target_weight, 0.0)
+                    reduce_weight = max(current_long_weight - signal.target_weight, 0.0)
                     trade_notional = reduce_weight * nav
             else:
                 trade_notional = 0.0
@@ -380,21 +392,35 @@ class RiskManager:
         else:
             max_weight = limits.max_position_weight
 
+        if is_short:
+            max_weight = getattr(limits, "short_max_position_weight", max_weight)
+
+        if is_buy or is_short:
+            target_position_weight = signal.target_weight
+            current_position_weight = current_long_weight if is_buy else current_short_weight
+        elif is_cover:
+            current_position_weight = current_short_weight
+            target_position_weight = max(
+                current_short_weight - (trade_notional / nav if nav else 0.0),
+                0.0,
+            )
+        else:
+            current_position_weight = current_long_weight
+            target_position_weight = max(
+                current_long_weight - (trade_notional / nav if nav else 0.0),
+                0.0,
+            )
+
         results.append(
             check_position_weight(
-                current_weight,
-                signal.target_weight
-                if is_buy
-                else max(
-                    current_weight - (trade_notional / nav if nav else 0),
-                    0.0,
-                ),
+                current_position_weight,
+                target_position_weight,
                 max_weight,
             )
         )
 
         # 3. Gross exposure
-        if is_buy:
+        if is_open_risk:
             results.append(
                 check_gross_exposure(
                     portfolio.gross_exposure,
@@ -409,15 +435,19 @@ class RiskManager:
                 RiskCheckResult(
                     passed=True,
                     rule="gross_exposure",
-                    message="Sell/close reduces gross exposure.",
+                    message="Sell/close/cover reduces gross exposure.",
                 )
             )
 
         # 4. Net exposure
         if is_buy:
             signed_notional = trade_notional
+        elif is_short:
+            signed_notional = -trade_notional
         elif signal.action in (Action.SELL, Action.CLOSE):
             signed_notional = -trade_notional
+        elif is_cover:
+            signed_notional = trade_notional
         else:
             signed_notional = 0.0
 
@@ -435,11 +465,11 @@ class RiskManager:
         sector_exposures = portfolio.get_sector_exposure(self.sector_map)
         sector_weight = sector_exposures.get(sector, 0.0)
 
-        if is_buy:
-            additional_sector_weight = additional_weight if is_buy else 0.0
+        if is_open_risk:
+            additional_sector_weight = additional_weight
             results.append(
                 check_sector_concentration(
-                    sector_weight,
+                    abs(sector_weight),
                     additional_sector_weight,
                     limits.max_sector_concentration,
                 )
@@ -449,7 +479,7 @@ class RiskManager:
                 RiskCheckResult(
                     passed=True,
                     rule="sector_concentration",
-                    message="Sell/close reduces sector concentration.",
+                    message="Sell/close/cover reduces sector concentration.",
                 )
             )
 
@@ -468,12 +498,50 @@ class RiskManager:
                 RiskCheckResult(
                     passed=True,
                     rule="cash_reserve",
-                    message="Sell/close does not consume cash.",
+                    message="Sell/close/cover does not consume deployable cash.",
                 )
             )
 
+        current_short_notional = sum(
+            abs(position.market_value)
+            for position in portfolio.positions.values()
+            if position.shares < 0.0
+        )
+
+        if is_short:
+            results.append(
+                check_short_exposure(
+                    current_short_notional,
+                    trade_notional,
+                    nav,
+                    getattr(limits, "max_short_exposure", 0.0),
+                )
+            )
+            results.append(
+                check_margin_buffer(
+                    portfolio.cash,
+                    current_short_notional + trade_notional,
+                    getattr(limits, "short_margin_rate", 0.50),
+                )
+            )
+            results.append(
+                check_locate_availability(
+                    getattr(limits, "require_locate", False),
+                    locate_available=True,
+                )
+            )
+        else:
+            for rule in ("short_exposure", "margin_buffer", "locate_availability"):
+                results.append(
+                    RiskCheckResult(
+                        passed=True,
+                        rule=rule,
+                        message=f"{rule} not applicable for action {signal.action.value}.",
+                    )
+                )
+
         # 7. Stop-loss (buys only — close/sell actions don't need a stop-loss)
-        if is_buy:
+        if is_open_risk:
             results.append(
                 check_stop_loss(
                     has_stop_loss=(signal.stop_loss > 0.0),
@@ -485,12 +553,36 @@ class RiskManager:
                 RiskCheckResult(
                     passed=True,
                     rule="stop_loss",
-                    message="Sell/close does not require stop-loss.",
+                    message="Sell/close/cover does not require stop-loss.",
+                )
+            )
+
+        if is_short:
+            short_stop_valid = signal.stop_loss > price if price > 0.0 else False
+            results.append(
+                RiskCheckResult(
+                    passed=short_stop_valid,
+                    rule="short_stop_direction",
+                    message=(
+                        "Short stop-loss is above entry price."
+                        if short_stop_valid
+                        else "Short stop-loss must be above the current price."
+                    ),
+                    current_value=signal.stop_loss,
+                    limit_value=price,
+                )
+            )
+        else:
+            results.append(
+                RiskCheckResult(
+                    passed=True,
+                    rule="short_stop_direction",
+                    message="short_stop_direction not applicable for non-short actions.",
                 )
             )
 
         # 8. Portfolio drawdown circuit breaker (buys only)
-        if is_buy:
+        if is_open_risk:
             peak_nav = getattr(portfolio, "peak_nav", None)
             if peak_nav is None:
                 peak_nav = max(nav, portfolio.initial_capital)
@@ -501,12 +593,12 @@ class RiskManager:
                 RiskCheckResult(
                     passed=True,
                     rule="drawdown_limit",
-                    message="Sell/close not blocked by drawdown limit.",
+                    message="Sell/close/cover not blocked by drawdown limit.",
                 )
             )
 
         # 9. ATR-based position sizing (buys only, when ATR data available)
-        if is_buy and atrs is not None:
+        if is_open_risk and atrs is not None:
             atr = atrs.get(signal.symbol)
             if atr is not None and atr > 0.0 and price > 0.0:
                 results.append(
@@ -533,12 +625,12 @@ class RiskManager:
                 RiskCheckResult(
                     passed=True,
                     rule="volatility_sizing",
-                    message="Volatility sizing check skipped (sell/close or no ATR data).",
+                    message="Volatility sizing check skipped (risk-reducing action or no ATR data).",
                 )
             )
 
         # 10. ATR-calibrated stop-loss validation (buys only, when ATR data available)
-        if is_buy and atrs is not None:
+        if is_open_risk and atrs is not None:
             atr = atrs.get(signal.symbol)
             if (
                 atr is not None
@@ -575,7 +667,7 @@ class RiskManager:
                 RiskCheckResult(
                     passed=True,
                     rule="atr_stop_loss",
-                    message="ATR stop-loss check skipped (sell/close or no ATR data).",
+                    message="ATR stop-loss check skipped (risk-reducing action or no ATR data).",
                 )
             )
 
@@ -682,6 +774,11 @@ class RiskManager:
         approved: list[TradeSignal] = []
         rejected: list[tuple[TradeSignal, list[RiskCheckResult]]] = []
 
+        n_short = sum(1 for signal in signals if signal.action == Action.SHORT)
+        n_cover = sum(1 for signal in signals if signal.action == Action.COVER)
+        if n_short or n_cover:
+            logger.info("Short signals: %d, Cover signals: %d", n_short, n_cover)
+
         for signal in signals:
             # HOLD signals pass through without checks – they don't
             # result in a trade.
@@ -721,24 +818,27 @@ class RiskManager:
                     signal.conviction.value,
                 )
 
-        # Enforce max_positions on BUY signals that open new positions.
+        # Enforce max_positions on entry signals that open new positions.
         max_positions = getattr(active_limits, "max_positions", 0)
         if max_positions and max_positions > 0:
             open_symbols = {
                 symbol
                 for symbol, pos in portfolio.positions.items()
-                if getattr(pos, "shares", 0) > 0
+                if getattr(pos, "shares", 0) != 0
             }
             closing_symbols = {
                 sig.symbol
                 for sig in approved
                 if sig.action == Action.CLOSE
                 or (sig.action == Action.SELL and sig.target_weight <= 0)
+                or (sig.action == Action.COVER and sig.target_weight <= 0)
             }
             projected_open = open_symbols - closing_symbols
 
-            buy_signals = [s for s in approved if s.action == Action.BUY]
-            new_buys = [s for s in buy_signals if s.symbol not in projected_open]
+            opening_signals = [
+                s for s in approved if s.action in {Action.BUY, Action.SHORT}
+            ]
+            new_buys = [s for s in opening_signals if s.symbol not in projected_open]
             available_slots = max_positions - len(projected_open)
 
             if available_slots < len(new_buys):

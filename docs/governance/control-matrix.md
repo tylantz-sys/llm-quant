@@ -116,6 +116,20 @@ Post-trade portfolio exposure or concentration exceeding the pre-trade risk limi
 
 **Why it matters:** Risk limits exist to bound losses. A limit that can be silently breached provides false confidence. Post-trade verification is the backstop that catches what pre-trade checks miss.
 
+### 7A. Direct Short Rollout Guard
+
+Direct short capability requires explicit post-trade monitoring separate from long/net/gross checks.
+
+| Layer | Specification |
+|-------|---------------|
+| **Detector** | Monitor latest `short_exposure / nav` from `portfolio_snapshots` and compare against `max_short_exposure`. Include `short_margin_rate` and `require_locate` in detector details for audit context. |
+| **Warning** | Short exposure reaches warn buffer zone (`max_short_exposure * (1 - exposure_warn_buffer)`). |
+| **Hard stop** | Short exposure exceeds `max_short_exposure`, or any non-zero short exposure appears while short cap is configured to 0%. |
+| **Immediate action** | Freeze new short entries. Allow only `cover`/risk-reduction orders until short exposure returns below warning threshold. Validate locate/margin policy settings before reopening short capacity. |
+| **Full reset** | Short exposure remains below warning threshold for 3 consecutive scans and governance state is `ok` or non-short-related warnings only. |
+
+**Why it matters:** Gross and net checks alone can hide directional concentration in shorts. A dedicated short rollout monitor makes direct-short activation observable and auditable.
+
 ---
 
 ### 8. Operational Fragility
@@ -170,6 +184,7 @@ When a kill switch fires:
 | 5 | Hidden Data Issues | Stale >1d, gaps >20% | Stale >3d, price < $0.01 | Yes |
 | 6 | Process Drift | Undocumented hash change | Multiple undocumented changes | Yes |
 | 7 | Risk Drift | Within 10% of any limit | Any limit exceeded | Yes |
+| 7A | Direct Short Rollout Guard | Within warn buffer of short cap | Short cap exceeded or non-zero shorts when cap is 0% | Yes |
 | 8 | Operational Fragility | No snapshot >3d, prices >48h | Hash chain failure | Yes |
 
 | # | Kill Switch | Trigger |

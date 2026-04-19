@@ -1,6 +1,7 @@
 [limits]
 # Maximum weight for a single position as fraction of NAV
 max_position_weight = 0.12  # 12%
+short_max_position_weight = 0.10  # 10%
 
 # Maximum number of open positions
 max_positions = 8
@@ -13,6 +14,7 @@ max_gross_exposure = 2.0  # 200%
 
 # Maximum net exposure as fraction of NAV (long - short)
 max_net_exposure = 1.0  # 100%
+max_short_exposure = 0.20  # 20%
 
 # Maximum concentration in a single sector
 max_sector_concentration = 0.30  # 30%
@@ -22,6 +24,8 @@ max_trades_per_session = 5
 
 # Minimum cash reserve as fraction of NAV
 min_cash_reserve = 0.05  # 5%
+short_margin_rate = 0.50  # 50%
+require_locate = false
 
 # Stop-loss required on every position
 require_stop_loss = true
@@ -78,13 +82,17 @@ forex_default_stop_loss_pct = 0.03  # 3%  (vs 5% default — tighter given low v
 
 [track_b]
 max_position_weight = 0.15           # 15% (vs 12% Track A)
+short_max_position_weight = 0.15     # 15%
 max_positions = 8
 max_trade_size = 0.03                # 3%  (vs 4% Track A — note: Track A file shows 4%)
 max_gross_exposure = 2.0             # 200% unchanged
 max_net_exposure = 1.0               # 100% unchanged
+max_short_exposure = 0.30            # 30%
 max_sector_concentration = 0.30      # 30% unchanged
 max_trades_per_session = 5           # unchanged
 min_cash_reserve = 0.03              # 3%  (vs 5% Track A)
+short_margin_rate = 0.50             # 50%
+require_locate = false
 require_stop_loss = true
 default_stop_loss_pct = 0.08         # 8%  (vs 5% Track A — wider for volatile strategies)
 atr_stop_multiplier = 2.0            # same 2x ATR baseline as Track A

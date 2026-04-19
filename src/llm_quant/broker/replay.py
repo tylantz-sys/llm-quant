@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol, cast
@@ -545,7 +545,7 @@ class DeterministicBrokerSimulator:
 
     def _position_limit_rejection_reason(self, order: SimulatedOrder) -> str | None:
         max_positions = self.position_limit_config.max_positions
-        if max_positions is None or order.side != "buy" or order.intent_type != "entry":
+        if max_positions is None or order.intent_type not in {"entry", "entry_short"}:
             return None
         projected_symbols = self._projected_open_symbols_with_order(order)
         if len(projected_symbols) > max_positions:
@@ -553,16 +553,14 @@ class DeterministicBrokerSimulator:
         return None
 
     def _projected_open_symbols_with_order(self, order: SimulatedOrder) -> set[str]:
-        symbols = self._active_or_filled_long_symbols()
+        symbols = self._active_or_filled_entry_symbols()
         symbols.add(order.symbol)
         return symbols
 
-    def _active_or_filled_long_symbols(self) -> set[str]:
+    def _active_or_filled_entry_symbols(self) -> set[str]:
         symbols: set[str] = set()
         for existing in self.orders.values():
-            if existing.side != "buy":
-                continue
-            if existing.intent_type != "entry":
+            if existing.intent_type not in {"entry", "entry_short"}:
                 continue
             if existing.status in {
                 SimulatedOrderState.ACCEPTED,
@@ -744,7 +742,20 @@ class DeterministicBrokerSimulator:
 
 
 def signal_to_order_intent(signal: ReplaySignal) -> ReplayBrokerOrderIntent:
-    side = "buy" if signal.action.lower() == "buy" else "sell"
+    action = signal.action.lower()
+    if action == "buy":
+        side = "buy"
+        intent_type = "entry"
+    elif action == "short":
+        side = "sell"
+        intent_type = "entry_short"
+    elif action == "cover":
+        side = "buy"
+        intent_type = "cover"
+    else:
+        side = "sell"
+        intent_type = "exit"
+
     return ReplayBrokerOrderIntent(
         symbol=signal.symbol,
         side=side,
@@ -756,6 +767,7 @@ def signal_to_order_intent(signal: ReplaySignal) -> ReplayBrokerOrderIntent:
         tif=signal.tif,
         limit_price=signal.limit_price,
         stop_price=signal.stop_price,
+        intent_type=intent_type,
         metadata=signal.metadata,
     )
 
@@ -1158,8 +1170,7 @@ class ReplayEngine:
                         order.order_id
                         for order in reversed(list(self.broker.orders.values()))
                         if order.symbol == symbol
-                        and order.side == "buy"
-                        and order.intent_type == "entry"
+                        and order.intent_type in {"entry", "entry_short"}
                         and order.filled_qty > 0
                     ),
                     None,
@@ -1300,6 +1311,25 @@ class ReplayEngine:
         intent: ReplayBrokerOrderIntent,
         events: list[ReplayEvent],
     ) -> None:
+        metadata = dict(intent.metadata or {})
+        if intent.intent_type in {"exit", "cover"} and not metadata.get("parent_order_id"):
+            parent_order_id = next(
+                (
+                    order.order_id
+                    for order in reversed(list(self.broker.orders.values()))
+                    if order.symbol == intent.symbol
+                    and order.intent_type in {"entry", "entry_short"}
+                    and order.filled_qty > 0
+                ),
+                None,
+            )
+            if parent_order_id is not None:
+                metadata.setdefault("parent_order_id", parent_order_id)
+                intent = replace(
+                    intent,
+                    metadata=metadata,
+                )
+
         order = self.broker.submit_intent(intent)
         persist_submitted_orders(conn, [_intent_record(order)], pod_id=self.pod_id)
         events.append(

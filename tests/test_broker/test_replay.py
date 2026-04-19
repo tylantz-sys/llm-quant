@@ -28,6 +28,7 @@ from llm_quant.broker.replay import (
     ReplaySignal,
     ReplayValidationSnapshot,
     SimulatedOrderState,
+    signal_to_order_intent,
     validate_replay,
 )
 
@@ -116,6 +117,35 @@ def test_simple_market_entry_exit() -> None:
     assert result.final_snapshot.cash == 1_010.0
     assert result.final_snapshot.positions == {}
     assert len(result.fills) == 2
+
+
+def test_signal_to_order_intent_maps_short_and_cover() -> None:
+    ts = datetime(2026, 4, 1, 9, 30, tzinfo=UTC)
+    short_intent = signal_to_order_intent(
+        ReplaySignal(
+            symbol="SPY",
+            action="short",
+            qty=1,
+            strategy_id="s1",
+            chain_id="short-1",
+            timestamp=ts,
+        )
+    )
+    cover_intent = signal_to_order_intent(
+        ReplaySignal(
+            symbol="SPY",
+            action="cover",
+            qty=1,
+            strategy_id="s1",
+            chain_id="cover-1",
+            timestamp=ts,
+        )
+    )
+
+    assert short_intent.side == "sell"
+    assert short_intent.intent_type == "entry_short"
+    assert cover_intent.side == "buy"
+    assert cover_intent.intent_type == "cover"
 
 
 def test_limit_order_never_fills() -> None:

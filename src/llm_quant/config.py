@@ -5,6 +5,7 @@ import os
 import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -106,13 +107,17 @@ class StrategyAllocationConfig(BaseModel):
 
 class RiskLimits(BaseModel):
     max_position_weight: float = 0.10
+    short_max_position_weight: float = 0.10
     max_positions: int = 8
     max_trade_size: float = 0.02
     max_gross_exposure: float = 2.0
     max_net_exposure: float = 1.0
+    max_short_exposure: float = 0.20
     max_sector_concentration: float = 0.30
     max_trades_per_session: int = 5
     min_cash_reserve: float = 0.05
+    short_margin_rate: float = 0.50
+    require_locate: bool = False
     require_stop_loss: bool = True
     default_stop_loss_pct: float = 0.05
     max_drawdown_pct: float = 0.15  # Portfolio drawdown circuit breaker
@@ -155,13 +160,17 @@ class TrackBLimits(BaseModel):
     """Risk limits for Track B — Aggressive Alpha strategies."""
 
     max_position_weight: float = 0.15
+    short_max_position_weight: float = 0.15
     max_positions: int = 8
     max_trade_size: float = 0.03
     max_gross_exposure: float = 2.0
     max_net_exposure: float = 1.0
+    max_short_exposure: float = 0.30
     max_sector_concentration: float = 0.30
     max_trades_per_session: int = 5
     min_cash_reserve: float = 0.03
+    short_margin_rate: float = 0.50
+    require_locate: bool = False
     require_stop_loss: bool = True
     default_stop_loss_pct: float = 0.08
     atr_stop_multiplier: float = 2.0
@@ -508,7 +517,7 @@ class AppConfig(BaseModel):
         )
 
 
-def _load_toml(path: Path) -> dict:
+def _load_toml(path: Path) -> dict[str, Any]:
     """Load a TOML file and return as dict."""
     with path.open("rb") as f:
         return tomllib.load(f)
@@ -518,17 +527,17 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     """Load all TOML configs and merge into AppConfig."""
     config_dir = config_dir or CONFIG_DIR
 
-    general_data: dict = {}
-    llm_data: dict = {}
-    data_data: dict = {}
-    execution_data: dict = {}
-    strategy_data: dict = {}
-    rotation_data: dict = {}
-    allocation_data: dict = {}
-    risk_data: dict = {}
-    track_b_data: dict = {}
-    track_c_data: dict = {}
-    universe_data: dict = {}
+    general_data: dict[str, Any] = {}
+    llm_data: dict[str, Any] = {}
+    data_data: dict[str, Any] = {}
+    execution_data: dict[str, Any] = {}
+    strategy_data: dict[str, Any] = {}
+    rotation_data: dict[str, Any] = {}
+    allocation_data: dict[str, Any] = {}
+    risk_data: dict[str, Any] = {}
+    track_b_data: dict[str, Any] = {}
+    track_c_data: dict[str, Any] = {}
+    universe_data: dict[str, Any] = {}
 
     # Load default.toml
     default_path = config_dir / "default.toml"
@@ -569,7 +578,7 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         llm_data["model"] = env_model
 
     # Load governance.toml
-    governance_data: dict = {}
+    governance_data: dict[str, Any] = {}
     governance_path = config_dir / "governance.toml"
     if governance_path.exists():
         governance_data = _load_toml(governance_path)

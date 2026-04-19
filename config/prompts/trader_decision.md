@@ -68,3 +68,5 @@ Analyze the data above and provide your trading decisions as JSON following the 
 8. Governance status — respect halt restrictions, note warnings in analysis
 9. **VIX percentile sizing rule**: when VIX percentile > 80, scale down target position sizes by 50% to reduce vol exposure
 10. **Silent stress alert**: when silent_stress=True, treat as risk_off even if VIX appears benign — credit markets are leading equity stress indicators
+11. Use explicit short lifecycle actions when relevant: `short` to open/increase short exposure, `cover` (or `close`) to reduce/exit shorts, `sell` for long reductions.
+12. For `short` actions, set a protective stop-loss above current price and keep `target_weight` as a positive absolute short weight.

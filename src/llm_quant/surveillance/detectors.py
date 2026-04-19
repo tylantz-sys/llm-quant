@@ -426,6 +426,90 @@ def check_risk_drift(
     return checks
 
 
+def check_direct_short_rollout(
+    conn: duckdb.DuckDBPyConnection,
+    config: AppConfig,
+) -> list[SurveillanceCheck]:
+    """Monitor direct short exposure rollout against configured short cap."""
+    cfg = config.governance.risk_drift
+    limits = config.risk
+
+    row = conn.execute(
+        """
+        SELECT nav, short_exposure
+        FROM portfolio_snapshots
+        ORDER BY date DESC, snapshot_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    if row is None:
+        return [
+            SurveillanceCheck(
+                detector="short_rollout",
+                severity=SeverityLevel.OK,
+                message="No portfolio snapshots — skipping short rollout check.",
+            )
+        ]
+
+    nav, short_exposure = row
+    if nav is None or nav <= 0:
+        return [
+            SurveillanceCheck(
+                detector="short_rollout",
+                severity=SeverityLevel.WARNING,
+                message="NAV is zero or negative for short rollout monitoring.",
+            )
+        ]
+
+    short_value = abs(float(short_exposure or 0.0))
+    short_ratio = short_value / float(nav)
+    short_limit = max(float(limits.max_short_exposure), 0.0)
+
+    if short_limit == 0.0 and short_ratio > 0.0:
+        return [
+            SurveillanceCheck(
+                detector="short_rollout",
+                severity=SeverityLevel.HALT,
+                message=(
+                    "Direct short exposure detected while max_short_exposure is 0%."
+                ),
+                metric_name="short_exposure_ratio",
+                current_value=short_ratio,
+                threshold_value=short_limit,
+            )
+        ]
+
+    short_warn = short_limit * (1.0 - cfg.exposure_warn_buffer)
+    if short_ratio >= short_limit:
+        severity = SeverityLevel.HALT
+        msg = f"Short exposure {short_ratio:.0%} exceeds limit {short_limit:.0%}."
+    elif short_ratio >= short_warn:
+        severity = SeverityLevel.WARNING
+        msg = (
+            f"Short exposure {short_ratio:.0%} approaching "
+            f"limit {short_limit:.0%} (warn at {short_warn:.0%})."
+        )
+    else:
+        severity = SeverityLevel.OK
+        msg = f"Short exposure {short_ratio:.0%} within limits."
+
+    return [
+        SurveillanceCheck(
+            detector="short_rollout",
+            severity=severity,
+            message=msg,
+            metric_name="short_exposure_ratio",
+            current_value=short_ratio,
+            threshold_value=short_limit,
+            details={
+                "short_margin_rate": limits.short_margin_rate,
+                "require_locate": limits.require_locate,
+            },
+        )
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 4. Data Quality — stale symbols, price gaps, plausibility
 # ---------------------------------------------------------------------------

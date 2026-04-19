@@ -118,13 +118,13 @@ def derive_lifecycle_state(
     any_exit_active = any(is_active_order_status(status) for status in normalized_exit_statuses)
     any_exit_filled = any(is_filled_order_status(status) for status in normalized_exit_statuses)
 
-    if any_exit_filled and current_position_qty <= 0.0:
+    if any_exit_filled and abs(current_position_qty) <= 1e-9:
         return BrokerLifecycleState.CLOSED
 
     if any_exit_active:
         return BrokerLifecycleState.EXIT_PENDING
 
-    if current_position_qty > 0.0 and has_exit_orders:
+    if abs(current_position_qty) > 1e-9 and has_exit_orders:
         return BrokerLifecycleState.ACTIVE_MONITORING
 
     if has_exit_orders:
@@ -349,8 +349,8 @@ def snapshot_from_broker_state(
         position_qty=current_position_qty,
         has_entry_fill=order_has_fill(status=entry_status, filled_qty=entry_filled_qty),
         has_exit_orders=has_exit_orders,
-        has_open_position=current_position_qty > 0.0,
-        is_flat=current_position_qty <= 0.0,
+        has_open_position=abs(current_position_qty) > 1e-9,
+        is_flat=abs(current_position_qty) <= 1e-9,
     )
 
 

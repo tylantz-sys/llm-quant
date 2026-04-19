@@ -66,16 +66,56 @@ def _insert_snapshots_with_exposure(
     nav: float,
     gross_exposure: float,
     net_exposure: float,
+    long_exposure: float | None = None,
+    short_exposure: float | None = None,
     snapshot_date: date | None = None,
 ) -> None:
     """Insert a single portfolio snapshot with explicit exposure values."""
     d = snapshot_date or datetime.now(tz=UTC).date()
+    cols = [
+        row[0]
+        for row in conn.execute("DESCRIBE portfolio_snapshots").fetchall()
+    ]
+    insert_cols = [
+        "snapshot_id",
+        "date",
+        "nav",
+        "cash",
+        "gross_exposure",
+        "net_exposure",
+        "total_pnl",
+        "daily_pnl",
+    ]
+    insert_vals: list[float | int | date] = [
+        0,
+        d,
+        nav,
+        nav * 0.5,
+        gross_exposure,
+        net_exposure,
+        0.0,
+        0.0,
+    ]
+    if "long_exposure" in cols:
+        insert_cols.append("long_exposure")
+        inferred_long = max((gross_exposure + net_exposure) / 2.0, 0.0)
+        insert_vals.append(inferred_long if long_exposure is None else long_exposure)
+    if "short_exposure" in cols:
+        insert_cols.append("short_exposure")
+        inferred_short = max((gross_exposure - net_exposure) / 2.0, 0.0)
+        insert_vals.append(inferred_short if short_exposure is None else short_exposure)
+
+    insert_cols_sql = ", ".join(insert_cols)
+    placeholders = ", ".join(["?"] * len(insert_cols))
+    next_snapshot_row = conn.execute(
+        "SELECT nextval('seq_snapshot_id')"
+    ).fetchone()
+    assert next_snapshot_row is not None
+    insert_vals[0] = next_snapshot_row[0]
     conn.execute(
-        "INSERT INTO portfolio_snapshots "
-        "(snapshot_id, date, nav, cash, gross_exposure, net_exposure, "
-        "total_pnl, daily_pnl) "
-        "VALUES (nextval('seq_snapshot_id'), ?, ?, ?, ?, ?, ?, ?)",
-        [d, nav, nav * 0.5, gross_exposure, net_exposure, 0.0, 0.0],
+        f"INSERT INTO portfolio_snapshots ({insert_cols_sql}) "
+        f"VALUES ({placeholders})",
+        insert_vals,
     )
     conn.commit()
 
@@ -596,6 +636,67 @@ class TestCheckRiskDrift:
         assert checks[0].severity == SeverityLevel.WARNING
 
 
+class TestCheckDirectShortRollout:
+    """Tests for check_direct_short_rollout detector."""
+
+    def test_empty_db_returns_ok(self, tmp_db):
+        from llm_quant.surveillance.detectors import check_direct_short_rollout
+
+        config = AppConfig()
+        checks = check_direct_short_rollout(tmp_db, config)
+        assert len(checks) == 1
+        assert checks[0].severity == SeverityLevel.OK
+
+    def test_short_exposure_within_limit_returns_ok(self, tmp_db):
+        from llm_quant.surveillance.detectors import check_direct_short_rollout
+
+        _insert_snapshots_with_exposure(
+            tmp_db,
+            nav=100_000,
+            gross_exposure=80_000,
+            net_exposure=60_000,
+            short_exposure=10_000,
+            long_exposure=70_000,
+        )
+        config = AppConfig()
+        checks = check_direct_short_rollout(tmp_db, config)
+        assert len(checks) == 1
+        assert checks[0].severity == SeverityLevel.OK
+
+    def test_short_exposure_warning_threshold(self, tmp_db):
+        from llm_quant.surveillance.detectors import check_direct_short_rollout
+
+        # max_short_exposure=20%, warn at 18% with default warn buffer
+        _insert_snapshots_with_exposure(
+            tmp_db,
+            nav=100_000,
+            gross_exposure=95_000,
+            net_exposure=57_000,
+            short_exposure=19_000,
+            long_exposure=76_000,
+        )
+        config = AppConfig()
+        checks = check_direct_short_rollout(tmp_db, config)
+        assert len(checks) == 1
+        assert checks[0].severity == SeverityLevel.WARNING
+
+    def test_short_exposure_breach_halts(self, tmp_db):
+        from llm_quant.surveillance.detectors import check_direct_short_rollout
+
+        _insert_snapshots_with_exposure(
+            tmp_db,
+            nav=100_000,
+            gross_exposure=105_000,
+            net_exposure=55_000,
+            short_exposure=25_000,
+            long_exposure=80_000,
+        )
+        config = AppConfig()
+        checks = check_direct_short_rollout(tmp_db, config)
+        assert len(checks) == 1
+        assert checks[0].severity == SeverityLevel.HALT
+
+
 class TestCheckDataQuality:
     """Tests for check_data_quality detector."""
 
@@ -888,20 +989,29 @@ class TestCheckHarvestGovernance:
 
         now = datetime.now(tz=UTC)
         events = [
-            (1, 60.0, 100.0, 0.1, "take_profit_partial"),
-            (2, 55.0, 100.0, 0.1, "take_profit_partial"),
-            (3, 50.0, 100.0, 0.1, "take_profit_partial"),
-            (4, 45.0, 100.0, 0.1, "trailing_stop"),
-            (5, 40.0, 100.0, 0.1, "trailing_stop"),
+            (1, 86.0, 100.0, 0.1, "take_profit_partial", 1, None),
+            (2, 85.0, 100.0, 0.1, "take_profit_partial", 1, None),
+            (3, 84.0, 100.0, 0.1, "take_profit_partial", 1, None),
+            (4, 83.0, 100.0, 0.1, "trailing_stop", 2, now - timedelta(days=4, minutes=1)),
+            (5, 82.0, 100.0, 0.1, "trailing_stop", 2, now - timedelta(days=5, minutes=1)),
         ]
-        for event_id, realized_pnl, peak_pnl, giveback, reason in events:
+        for (
+            event_id,
+            realized_pnl,
+            peak_pnl,
+            giveback,
+            reason,
+            reduction_sequence,
+            trailing_stop_activated_at,
+        ) in events:
             tmp_db.execute(
                 """
                 INSERT INTO profit_take_events (
                     event_id, timestamp, pod_id, symbol, event_type,
                     decision_source, realized_pnl, pre_reduction_peak_unrealized_pnl,
-                    peak_to_reduction_drawdown_pct, reason, metadata_json
-                ) VALUES (?, ?, 'default', 'SPY', 'executed', 'llm', ?, ?, ?, ?, '{}')
+                    peak_to_reduction_drawdown_pct, reason, reduction_sequence,
+                    trailing_stop_activated_at, metadata_json
+                ) VALUES (?, ?, 'default', 'SPY', 'executed', 'llm', ?, ?, ?, ?, ?, ?, '{}')
                 """,
                 [
                     event_id,
@@ -910,6 +1020,8 @@ class TestCheckHarvestGovernance:
                     peak_pnl,
                     giveback,
                     reason,
+                    reduction_sequence,
+                    trailing_stop_activated_at,
                 ],
             )
         tmp_db.commit()

@@ -73,6 +73,17 @@ def test_derive_lifecycle_closed_when_exit_fills_and_position_is_flat() -> None:
     assert state is BrokerLifecycleState.CLOSED
 
 
+def test_derive_lifecycle_short_position_counts_as_open() -> None:
+    state = derive_lifecycle_state(
+        entry_status="filled",
+        entry_filled_qty=5,
+        has_exit_orders=True,
+        exit_statuses=["canceled"],
+        position_qty=-5,
+    )
+    assert state is BrokerLifecycleState.ACTIVE_MONITORING
+
+
 def test_entry_submission_gate_allows_only_pending_flat_state() -> None:
     snapshot = snapshot_from_broker_state(
         symbol="AAPL",

@@ -9,6 +9,7 @@ import duckdb
 
 from llm_quant import cli
 from llm_quant.db.schema import init_schema
+from llm_quant.trading.portfolio import Portfolio, Position
 
 
 class _FakeConfig:
@@ -20,6 +21,7 @@ class _FakeConfig:
         self.execution = SimpleNamespace(
             signal_source="strategy_overlay" if strategy_overlay else "llm",
             claude_overlay_only=False,
+            overlay_auth_required=False,
             strategy_set="candidate_crypto",
             intraday_enabled=intraday_enabled,
             intraday_timeframe_minutes=5,
@@ -142,3 +144,49 @@ def test_eod_flat_crypto_runtime_returns_before_clock_lookup(
     monkeypatch.setattr(alpaca_module.AlpacaClient, "from_env", staticmethod(_boom_from_env))
 
     cli.eod_flat(pod="crypto-ethbtc-paper")
+
+
+def test_rollback_rejected_entry_order_unwinds_long_ghost_position() -> None:
+    portfolio = Portfolio(initial_capital=1_000.0)
+    portfolio.cash = 800.0
+    portfolio.positions["SPY"] = Position(
+        symbol="SPY",
+        shares=2,
+        avg_cost=100.0,
+        current_price=100.0,
+    )
+    order = SimpleNamespace(
+        intent_type="entry",
+        symbol="SPY",
+        status="rejected",
+        notional=None,
+    )
+
+    rolled_back = cli._rollback_rejected_entry_order(portfolio, order)
+
+    assert rolled_back is True
+    assert portfolio.cash == 1_000.0
+    assert "SPY" not in portfolio.positions
+
+
+def test_rollback_rejected_entry_order_unwinds_short_ghost_position() -> None:
+    portfolio = Portfolio(initial_capital=1_000.0)
+    portfolio.cash = 1_200.0
+    portfolio.positions["SPY"] = Position(
+        symbol="SPY",
+        shares=-2,
+        avg_cost=100.0,
+        current_price=100.0,
+    )
+    order = SimpleNamespace(
+        intent_type="entry_short",
+        symbol="SPY",
+        status="rejected",
+        notional=None,
+    )
+
+    rolled_back = cli._rollback_rejected_entry_order(portfolio, order)
+
+    assert rolled_back is True
+    assert portfolio.cash == 1_000.0
+    assert "SPY" not in portfolio.positions

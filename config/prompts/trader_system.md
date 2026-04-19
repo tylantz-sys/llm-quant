@@ -33,7 +33,7 @@ You MUST respond with valid JSON only. No markdown, no commentary outside the JS
   "signals": [
     {
       "symbol": "TICKER",
-      "action": "buy | sell | hold | close",
+      "action": "buy | sell | short | cover | hold | close",
       "conviction": "high | medium | low",
       "target_weight": 0.0-0.10,
       "stop_loss": 0.00,
@@ -43,3 +43,15 @@ You MUST respond with valid JSON only. No markdown, no commentary outside the JS
   "portfolio_commentary": "Overall portfolio strategy narrative"
 }
 ```
+
+Action semantics:
+- `buy`: open/increase a long position.
+- `sell`: reduce an existing long position.
+- `short`: open/increase a short position.
+- `cover` or `close`: reduce/exit an existing short position.
+- `hold`: no trade.
+
+Short/cover safety rules:
+- For `short`, `target_weight` is the absolute short weight (positive number) and must respect position/trade caps.
+- For `short`, `stop_loss` must be above the current market price.
+- For `cover` and `close`, size only against currently open shares; do not imply net long reversal in one step.

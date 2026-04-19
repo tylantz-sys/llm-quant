@@ -341,6 +341,79 @@ def test_reconciliation_requires_event_confirmed_position_close() -> None:
     ]
 
 
+def test_reconcile_short_entry_and_cover_rebuilds_flat_portfolio() -> None:
+    conn = duckdb.connect(":memory:")
+    portfolio = Portfolio(initial_capital=1_000.0)
+
+    persist_submitted_orders(
+        conn,
+        [
+            {
+                "order_id": "short-1",
+                "symbol": "SPY",
+                "side": "sell",
+                "qty": 5,
+                "intent_type": "entry_short",
+                "status": "accepted",
+            },
+            {
+                "order_id": "cover-1",
+                "symbol": "SPY",
+                "side": "buy",
+                "qty": 5,
+                "intent_type": "cover",
+                "parent_order_id": "short-1",
+                "exit_reason": "cover",
+                "status": "accepted",
+            },
+        ],
+    )
+
+    client = StubAlpacaClient(
+        {
+            "short-1": {
+                "id": "short-1",
+                "symbol": "SPY",
+                "side": "sell",
+                "status": "filled",
+                "qty": "5",
+                "filled_qty": "5",
+                "filled_avg_price": "100",
+                "submitted_at": datetime(2026, 4, 3, 14, 30, tzinfo=UTC).isoformat(),
+                "filled_at": datetime(2026, 4, 3, 14, 31, tzinfo=UTC).isoformat(),
+                "intent_type": "entry_short",
+            },
+            "cover-1": {
+                "id": "cover-1",
+                "symbol": "SPY",
+                "side": "buy",
+                "status": "filled",
+                "qty": "5",
+                "filled_qty": "5",
+                "filled_avg_price": "96",
+                "submitted_at": datetime(2026, 4, 3, 14, 40, tzinfo=UTC).isoformat(),
+                "filled_at": datetime(2026, 4, 3, 14, 45, tzinfo=UTC).isoformat(),
+                "intent_type": "cover",
+                "parent_order_id": "short-1",
+                "exit_reason": "cover",
+            },
+        }
+    )
+
+    result = reconcile_broker_orders(
+        conn,
+        client,
+        portfolio=portfolio,
+        broker_positions=[{"symbol": "SPY", "qty": "0"}],
+        order_ids=["short-1", "cover-1"],
+    )
+
+    assert result.status is ReconciliationStatus.SUCCESS
+    assert result.lifecycle["SPY"].state is BrokerLifecycleState.CLOSED
+    assert "SPY" not in portfolio.positions
+    assert portfolio.cash == 1_020.0
+
+
 def test_missing_tp_leg_is_classified_explicitly_not_silently_repaired() -> None:
     conn = duckdb.connect(":memory:")
     portfolio = Portfolio(initial_capital=1_000.0)

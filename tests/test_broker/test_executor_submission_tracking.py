@@ -1,12 +1,19 @@
-from llm_quant.broker.executor import BrokerOrderIntent, submit_order_intents
-from llm_quant.config import ExecutionConfig
+from llm_quant.brain.models import Action, TradeSignal
+from llm_quant.broker.executor import (
+    BrokerOrderIntent,
+    build_entry_order_intents,
+    submit_alpaca_orders,
+    submit_order_intents,
+)
+from llm_quant.config import ExecutionConfig, RiskLimits
+from llm_quant.trading.executor import ExecutedTrade
 
 
 class FakeAlpacaClient:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def submit_market_order(self, **kwargs):
+    def submit_market_order(self, **kwargs: object) -> dict[str, object]:
         self.calls.append(kwargs)
         return {
             "id": "ord_123",
@@ -17,11 +24,16 @@ class FakeAlpacaClient:
             "status": "accepted",
             "filled_qty": "0",
             "filled_avg_price": None,
-            "time_in_force": kwargs["time_in_force"],
+            "time_in_force": kwargs.get("time_in_force", "day"),
         }
 
 
-def test_submit_order_intents_returns_tracked_orders_with_ids_and_status():
+class _PortfolioStub:
+    def __init__(self, cash: float) -> None:
+        self.cash = cash
+
+
+def test_submit_order_intents_returns_tracked_orders_with_ids_and_status() -> None:
     client = FakeAlpacaClient()
     intents = [
         BrokerOrderIntent(
@@ -50,7 +62,7 @@ def test_submit_order_intents_returns_tracked_orders_with_ids_and_status():
     assert order.broker_raw is not None
 
 
-def test_submit_order_intents_preserves_notional_and_fractional_metadata():
+def test_submit_order_intents_preserves_notional_and_fractional_metadata() -> None:
     client = FakeAlpacaClient()
     intents = [
         BrokerOrderIntent(
@@ -78,3 +90,89 @@ def test_submit_order_intents_preserves_notional_and_fractional_metadata():
     assert order.time_in_force == "gtc"
     assert order.allow_fractional is True
     assert order.asset_class == "crypto"
+
+
+def test_build_entry_order_intents_supports_short_action() -> None:
+    signal = TradeSignal(
+        symbol="SPY",
+        action=Action.SHORT,
+        target_weight=0.10,
+        stop_loss=101.0,
+        conviction="high",
+        reasoning="short setup",
+    )
+    intents = build_entry_order_intents(
+        _PortfolioStub(cash=50_000.0),
+        [signal],
+        prices={"SPY": 100.0},
+        account_equity=100_000.0,
+        asset_class_map={"SPY": "equity"},
+        execution=ExecutionConfig(),
+    )
+
+    assert len(intents) == 1
+    assert intents[0].side == "sell"
+    assert intents[0].intent_type == "entry_short"
+    assert intents[0].qty > 0
+
+
+def test_submit_alpaca_orders_supports_short_and_cover_actions() -> None:
+    client = FakeAlpacaClient()
+    trades = [
+        ExecutedTrade(
+            symbol="SPY",
+            action="short",
+            shares=2,
+            price=100.0,
+            notional=200.0,
+            conviction="high",
+            reasoning="short",
+        ),
+        ExecutedTrade(
+            symbol="SPY",
+            action="cover",
+            shares=1,
+            price=95.0,
+            notional=95.0,
+            conviction="medium",
+            reasoning="cover",
+        ),
+    ]
+
+    submitted = submit_alpaca_orders(
+        client,
+        trades,
+        stop_losses={},
+        limits=RiskLimits(),
+        use_brackets=False,
+    )
+
+    assert [call["side"] for call in client.calls] == ["sell", "buy"]
+    assert [order.intent_type for order in submitted] == ["entry_short", "cover"]
+
+
+def test_submit_alpaca_orders_routes_close_short_as_cover_buy() -> None:
+    client = FakeAlpacaClient()
+    trades = [
+        ExecutedTrade(
+            symbol="SPY",
+            action="close",
+            shares=2,
+            price=101.0,
+            notional=202.0,
+            conviction="high",
+            reasoning="flatten short",
+            is_short_close=True,
+        )
+    ]
+
+    submitted = submit_alpaca_orders(
+        client,
+        trades,
+        stop_losses={},
+        limits=RiskLimits(),
+        use_brackets=False,
+    )
+
+    assert [call["side"] for call in client.calls] == ["buy"]
+    assert [order.intent_type for order in submitted] == ["cover"]

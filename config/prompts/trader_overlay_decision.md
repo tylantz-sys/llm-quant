@@ -5,7 +5,7 @@ Your task: act as a **risk/size gate**. You may scale weights up/down or reject 
 
 ## Constraints
 - **Do not introduce new symbols.**
-- **Do not change the side** (buy vs sell/close) unless you are rejecting it (set to hold).
+- **Do not change the side** (buy/short vs sell/cover/close) unless you are rejecting it (set to hold).
 - If you reject a signal: action="hold", target_weight=0, reasoning explains why.
 - Keep stop_loss and take_profit unchanged unless invalid.
 
@@ -41,7 +41,7 @@ Market Data:
   "signals": [
     {
       "symbol": "SPY",
-      "action": "buy | sell | close | hold",
+      "action": "buy | sell | short | cover | close | hold",
       "conviction": "low | medium | high",
       "target_weight": 0.0-1.0,
       "stop_loss": 0.0,

@@ -7,7 +7,7 @@ import duckdb
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 DDL_STATEMENTS = [
     """
@@ -61,6 +61,8 @@ DDL_STATEMENTS = [
         cash DOUBLE NOT NULL,
         gross_exposure DOUBLE NOT NULL,
         net_exposure DOUBLE NOT NULL,
+        long_exposure DOUBLE NOT NULL DEFAULT 0.0,
+        short_exposure DOUBLE NOT NULL DEFAULT 0.0,
         total_pnl DOUBLE NOT NULL,
         daily_pnl DOUBLE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -79,6 +81,8 @@ DDL_STATEMENTS = [
         market_value DOUBLE NOT NULL,
         unrealized_pnl DOUBLE NOT NULL,
         weight DOUBLE NOT NULL,
+        is_short BOOLEAN NOT NULL DEFAULT FALSE,
+        short_proceeds DOUBLE NOT NULL DEFAULT 0.0,
         stop_loss DOUBLE,
         PRIMARY KEY (snapshot_id, symbol),
         FOREIGN KEY (snapshot_id) REFERENCES portfolio_snapshots(snapshot_id)
@@ -1036,6 +1040,59 @@ def _migrate_v12_to_v13(conn: duckdb.DuckDBPyConnection) -> None:
     logger.info("Migrated schema to v13: profit-take lifecycle telemetry added.")
 
 
+def _migrate_v13_to_v14(conn: duckdb.DuckDBPyConnection) -> None:
+    """Add short-aware exposure telemetry to snapshots and positions."""
+    snapshot_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'portfolio_snapshots'"
+        ).fetchall()
+    }
+    if "long_exposure" not in snapshot_cols:
+        conn.execute(
+            "ALTER TABLE portfolio_snapshots "
+            "ADD COLUMN long_exposure DOUBLE DEFAULT 0.0"
+        )
+    if "short_exposure" not in snapshot_cols:
+        conn.execute(
+            "ALTER TABLE portfolio_snapshots "
+            "ADD COLUMN short_exposure DOUBLE DEFAULT 0.0"
+        )
+
+    # Backfill where possible from gross/net decomposition:
+    # gross = long + short, net = long - short.
+    conn.execute(
+        "UPDATE portfolio_snapshots "
+        "SET long_exposure = (gross_exposure + net_exposure) / 2.0 "
+        "WHERE long_exposure IS NULL"
+    )
+    conn.execute(
+        "UPDATE portfolio_snapshots "
+        "SET short_exposure = (gross_exposure - net_exposure) / 2.0 "
+        "WHERE short_exposure IS NULL"
+    )
+
+    position_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'positions'"
+        ).fetchall()
+    }
+    if "is_short" not in position_cols:
+        conn.execute(
+            "ALTER TABLE positions ADD COLUMN is_short BOOLEAN DEFAULT FALSE"
+        )
+    if "short_proceeds" not in position_cols:
+        conn.execute(
+            "ALTER TABLE positions ADD COLUMN short_proceeds DOUBLE DEFAULT 0.0"
+        )
+    conn.execute("UPDATE positions SET is_short = FALSE WHERE is_short IS NULL")
+    conn.execute("UPDATE positions SET short_proceeds = 0.0 WHERE short_proceeds IS NULL")
+    logger.info("Migrated schema to v14: short-aware snapshot and position telemetry added.")
+
+
 def _needs_v11_rotation_migration(
     conn: duckdb.DuckDBPyConnection,
     old_version: int,
@@ -1100,6 +1157,8 @@ def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
         _migrate_v11_to_v12(conn)
     if old_version < 13:
         _migrate_v12_to_v13(conn)
+    if old_version < 14:
+        _migrate_v13_to_v14(conn)
 
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)",

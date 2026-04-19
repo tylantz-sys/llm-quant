@@ -56,13 +56,13 @@ def test_indexes_created(pod_db):
     assert "idx_decisions_pod_date" in indexes
 
 
-def test_schema_version_is_13(pod_db):
-    """Verify schema_meta shows version 13 (profit-taking lifecycle telemetry)."""
+def test_schema_version_is_14(pod_db):
+    """Verify schema_meta shows version 14 (short-aware snapshot telemetry)."""
     row = pod_db.execute(
         "SELECT value FROM schema_meta WHERE key = 'version'"
     ).fetchone()
     assert row is not None
-    assert row[0] == "13"
+    assert row[0] == "14"
 
 
 def test_strategy_rotation_state_table_exists(pod_db):
@@ -246,4 +246,4 @@ def test_v12_migration_backfills_is_profit_take_defaults(pod_db):
         "SELECT value FROM schema_meta WHERE key = 'version'"
     ).fetchone()
     assert version_row is not None
-    assert version_row[0] == "13"
+    assert version_row[0] == "14"
