@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import importlib.util
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
@@ -19,6 +20,7 @@ from llm_quant.arb.funding_rates import (
     PERIODS_PER_YEAR,
     FundingCollector,
     FundingRecord,
+    _CcxtNotSupportedError,
     annualize_funding_rate,
     get_funding_connection,
     init_funding_schema,
@@ -29,6 +31,12 @@ from llm_quant.arb.funding_scanner import (
     FundingScanner,
     format_scan_report,
     rates_to_polars,
+)
+
+# Skip marker for tests that exercise ccxt-backed behaviour directly
+ccxt_required = pytest.mark.skipif(
+    importlib.util.find_spec("ccxt") is None,
+    reason="ccxt not installed; install with: pip install 'llm-quant[trackc]'",
 )
 
 # ------------------------------------------------------------------
@@ -335,13 +343,11 @@ class TestMockCCXT:
 
     def test_fetch_history_not_supported(self):
         """Exchanges that don't support historical rates should not crash."""
-        import ccxt as ccxt_mod
-
         mock_exchange = MagicMock()
         mock_exchange.id = "bybit"
         mock_exchange.markets = {"BTC/USDT:USDT": {}}
         mock_exchange.load_markets.return_value = None
-        mock_exchange.fetch_funding_rate_history.side_effect = ccxt_mod.NotSupported(
+        mock_exchange.fetch_funding_rate_history.side_effect = _CcxtNotSupportedError(
             "Not supported"
         )
 
@@ -376,6 +382,7 @@ class TestMockCCXT:
         result = collector._normalize_symbol("BTC/USDT:USDT", mock_exchange)
         assert result is None
 
+    @ccxt_required
     def test_unsupported_exchange(self):
         """Non-existent exchange should be skipped gracefully."""
         collector = FundingCollector(
