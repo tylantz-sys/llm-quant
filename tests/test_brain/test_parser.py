@@ -34,7 +34,7 @@ VALID_RESPONSE = """{
 }"""
 
 
-def test_parse_valid_response():
+def test_parse_valid_response() -> None:
     decision = parse_trading_decision(VALID_RESPONSE, date(2026, 3, 24))
     assert decision.market_regime == MarketRegime.RISK_ON
     assert decision.regime_confidence == 0.75
@@ -46,14 +46,14 @@ def test_parse_valid_response():
     assert decision.signals[0].stop_loss == 440.0
 
 
-def test_parse_json_in_code_block():
+def test_parse_json_in_code_block() -> None:
     wrapped = f"```json\n{VALID_RESPONSE}\n```"
     decision = parse_trading_decision(wrapped, date(2026, 3, 24))
     assert decision.market_regime == MarketRegime.RISK_ON
     assert len(decision.signals) == 2
 
 
-def test_parse_missing_optional_fields():
+def test_parse_missing_optional_fields() -> None:
     minimal = """{
         "market_regime": "transition",
         "regime_confidence": 0.5,
@@ -65,7 +65,7 @@ def test_parse_missing_optional_fields():
     assert decision.portfolio_commentary == ""
 
 
-def test_parse_invalid_signal_skipped():
+def test_parse_invalid_signal_skipped() -> None:
     """Signals with invalid enums should be skipped, not crash."""
     response = """{
         "market_regime": "risk_off",
@@ -94,13 +94,13 @@ def test_parse_invalid_signal_skipped():
     assert decision.signals[0].symbol == "QQQ"
 
 
-def test_parse_invalid_json_raises():
+def test_parse_invalid_json_raises() -> None:
     with pytest.raises(ValueError, match="Could not locate JSON"):
         parse_trading_decision("not json at all", date(2026, 3, 24))
 
 
-def test_parse_clamps_target_weight():
-    """target_weight > 0.10 should be clamped."""
+def test_parse_clamps_target_weight() -> None:
+    """target_weight > 1.0 should be clamped."""
     response = """{
         "market_regime": "risk_on",
         "regime_confidence": 0.8,
@@ -116,7 +116,51 @@ def test_parse_clamps_target_weight():
         ]
     }"""
     decision = parse_trading_decision(response, date(2026, 3, 24))
-    assert decision.signals[0].target_weight == 0.10
+    assert decision.signals[0].target_weight == 0.25
+
+
+def test_parse_short_signal_keeps_positive_weight_and_rounds_prices() -> None:
+    response = """{
+        "market_regime": "risk_off",
+        "regime_confidence": 0.85,
+        "signals": [
+            {
+                "symbol": "SPY",
+                "action": "short",
+                "conviction": "high",
+                "target_weight": 0.05555,
+                "stop_loss": 505.129,
+                "take_profit": 480.871,
+                "reasoning": "Bearish catalyst"
+            }
+        ]
+    }"""
+    decision = parse_trading_decision(response, date(2026, 3, 24))
+    signal = decision.signals[0]
+    assert signal.action == Action.SHORT
+    assert signal.target_weight == 0.0556
+    assert signal.stop_loss == 505.13
+    assert signal.take_profit == 480.87
+
+
+def test_parse_cover_signal() -> None:
+    response = """{
+        "market_regime": "risk_off",
+        "regime_confidence": 0.70,
+        "signals": [
+            {
+                "symbol": "SPY",
+                "action": "cover",
+                "conviction": "medium",
+                "target_weight": 0.02,
+                "stop_loss": 0.0,
+                "take_profit": 0.0,
+                "reasoning": "Reduce short"
+            }
+        ]
+    }"""
+    decision = parse_trading_decision(response, date(2026, 3, 24))
+    assert decision.signals[0].action == Action.COVER
 
 
 def test_parse_clamps_confidence():

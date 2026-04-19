@@ -52,6 +52,7 @@ class ExecutedTrade:
     strategy_id: str = ""
     entry_batch: int = 1
     exit_reason: str = ""
+    short_proceeds: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +133,16 @@ def execute_signals(
             )
         elif signal.action == Action.SELL:
             trade = _execute_sell(portfolio, signal, price, nav, asset_class_map)
+        elif signal.action == Action.SHORT:
+            trade = _execute_short(
+                portfolio,
+                signal,
+                price,
+                nav,
+                asset_class_map,
+            )
+        elif signal.action == Action.COVER:
+            trade = _execute_cover(portfolio, signal, price, nav, asset_class_map)
         elif signal.action == Action.CLOSE:
             trade = _execute_close(portfolio, signal, price)
         elif signal.action == Action.HOLD:
@@ -316,6 +327,139 @@ def _execute_sell(
     )
 
 
+def _execute_short(
+    portfolio: Portfolio,
+    signal: TradeSignal,
+    price: float,
+    nav: float,
+    asset_class_map: dict[str, str] | None = None,
+) -> ExecutedTrade | None:
+    """Open or add to a short position."""
+    existing = portfolio.positions.get(signal.symbol)
+    if existing is not None and existing.shares > 0:
+        logger.warning("SHORT %s: cannot short while holding a long position.", signal.symbol)
+        return None
+
+    current_notional = abs(existing.market_value) if existing is not None else 0.0
+    target_notional = signal.target_weight * nav
+    additional_notional = target_notional - current_notional
+    if additional_notional <= 0.0:
+        logger.debug(
+            "SHORT %s: already at or above target short weight – skipping.",
+            signal.symbol,
+        )
+        return None
+
+    asset_class = (asset_class_map or {}).get(signal.symbol, "equity")
+    allow_fractional = str(asset_class).lower() == "crypto"
+    if allow_fractional:
+        shares_to_short = round(additional_notional / price, 6)
+    else:
+        shares_to_short = math.floor(additional_notional / price)
+    if shares_to_short <= 0:
+        logger.debug(
+            "SHORT %s: computed 0 shares (notional=%.2f, price=%.4f) – skipping.",
+            signal.symbol,
+            additional_notional,
+            price,
+        )
+        return None
+
+    proceeds = shares_to_short * price
+    portfolio.cash += proceeds
+
+    if existing is not None:
+        existing_short_shares = abs(existing.shares)
+        total_short_shares = existing_short_shares + shares_to_short
+        existing.avg_cost = (
+            existing_short_shares * existing.avg_cost + shares_to_short * price
+        ) / total_short_shares
+        existing.shares = -total_short_shares
+        existing.current_price = price
+        existing.stop_loss = round(signal.stop_loss, 2)
+        existing.short_proceeds += proceeds
+    else:
+        portfolio.positions[signal.symbol] = _make_position(
+            signal.symbol,
+            -shares_to_short,
+            price,
+            signal.stop_loss,
+            short_proceeds=proceeds,
+        )
+
+    return ExecutedTrade(
+        symbol=signal.symbol,
+        action="short",
+        shares=shares_to_short,
+        price=price,
+        notional=proceeds,
+        conviction=signal.conviction.value,
+        reasoning=signal.reasoning,
+        strategy_id=signal.strategy_id,
+        entry_batch=signal.entry_batch,
+        exit_reason=signal.exit_reason,
+        short_proceeds=proceeds,
+    )
+
+
+def _execute_cover(
+    portfolio: Portfolio,
+    signal: TradeSignal,
+    price: float,
+    nav: float,
+    asset_class_map: dict[str, str] | None = None,
+) -> ExecutedTrade | None:
+    """Reduce or close a short position toward a target weight."""
+    existing = portfolio.positions.get(signal.symbol)
+    if existing is None or existing.shares >= 0:
+        logger.warning("COVER %s: no short position to cover.", signal.symbol)
+        return None
+
+    target_notional = signal.target_weight * nav
+    current_notional = abs(existing.shares * price)
+    reduce_notional = current_notional - target_notional
+    if reduce_notional <= 0.0:
+        logger.debug(
+            "COVER %s: short position already at or below target weight.",
+            signal.symbol,
+        )
+        return None
+
+    asset_class = (asset_class_map or {}).get(signal.symbol, "equity")
+    allow_fractional = str(asset_class).lower() == "crypto"
+    if allow_fractional:
+        shares_to_cover = round(reduce_notional / price, 6)
+    else:
+        shares_to_cover = math.floor(reduce_notional / price)
+    shares_to_cover = min(shares_to_cover, abs(existing.shares))
+
+    if shares_to_cover <= 0:
+        return None
+
+    cover_cost = shares_to_cover * price
+    portfolio.cash -= cover_cost
+    existing.shares += shares_to_cover
+    existing.current_price = price
+
+    if existing.shares >= -1e-9:
+        del portfolio.positions[signal.symbol]
+    elif signal.stop_loss > 0.0:
+        existing.stop_loss = round(signal.stop_loss, 2)
+
+    return ExecutedTrade(
+        symbol=signal.symbol,
+        action="cover",
+        shares=shares_to_cover,
+        price=price,
+        notional=cover_cost,
+        conviction=signal.conviction.value,
+        reasoning=signal.reasoning,
+        strategy_id=signal.strategy_id,
+        entry_batch=signal.entry_batch,
+        exit_reason=signal.exit_reason,
+    )
+
+
 def _execute_close(
     portfolio: Portfolio,
     signal: TradeSignal,
@@ -323,13 +467,19 @@ def _execute_close(
 ) -> ExecutedTrade | None:
     """Close an entire position."""
     existing = portfolio.positions.get(signal.symbol)
-    if existing is None or existing.shares <= 0:
+    if existing is None or existing.shares == 0:
         logger.warning("CLOSE %s: no position to close.", signal.symbol)
         return None
 
-    shares_to_close = existing.shares
-    proceeds = shares_to_close * price
-    portfolio.cash += proceeds
+    shares_to_close = abs(existing.shares)
+    if existing.shares > 0:
+        proceeds = shares_to_close * price
+        portfolio.cash += proceeds
+        notional = proceeds
+    else:
+        cover_cost = shares_to_close * price
+        portfolio.cash -= cover_cost
+        notional = cover_cost
     del portfolio.positions[signal.symbol]
 
     return ExecutedTrade(
@@ -337,7 +487,7 @@ def _execute_close(
         action="close",
         shares=shares_to_close,
         price=price,
-        notional=proceeds,
+        notional=notional,
         conviction=signal.conviction.value,
         reasoning=signal.reasoning,
         strategy_id=signal.strategy_id,
@@ -351,6 +501,7 @@ def _make_position(
     shares: float,
     price: float,
     stop_loss: float,
+    short_proceeds: float = 0.0,
 ) -> Position:
     """Create a new ``Position`` dataclass.
 
@@ -366,4 +517,5 @@ def _make_position(
         avg_cost=price,
         current_price=price,
         stop_loss=stop_loss,
+        short_proceeds=short_proceeds,
     )

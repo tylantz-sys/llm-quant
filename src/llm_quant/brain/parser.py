@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from datetime import date
+from enum import Enum
 from typing import Any
 
 from llm_quant.brain.models import (
@@ -82,7 +83,8 @@ def _parse_enum_safe(enum_cls: type, value: Any, default: Any = None) -> Any:
             pass
         # Try name match
         try:
-            return enum_cls[value.upper().strip()]
+            if issubclass(enum_cls, Enum):
+                return enum_cls.__members__[value.upper().strip()]
         except KeyError:
             pass
     logger.warning(
@@ -159,9 +161,6 @@ def _parse_signal(raw_signal: dict[str, Any]) -> TradeSignal | None:
         )
         stop_loss = 0.0
 
-    # Reasoning (optional, default to empty string)
-    reasoning = str(raw_signal.get("reasoning", ""))
-
     # Parse take_profit with validation
     try:
         take_profit = float(raw_signal.get("take_profit", 0.0))
@@ -180,6 +179,32 @@ def _parse_signal(raw_signal: dict[str, Any]) -> TradeSignal | None:
             take_profit,
         )
         take_profit = 0.0
+
+    # Reasoning (optional, default to empty string)
+    reasoning = str(raw_signal.get("reasoning", ""))
+
+    if action == Action.SHORT and stop_loss > 0.0 and take_profit > 0.0:
+        if stop_loss <= take_profit:
+            logger.warning(
+                "Signal for %s has short stop/take ordering that looks inverted: stop_loss=%.2f take_profit=%.2f",
+                symbol,
+                stop_loss,
+                take_profit,
+            )
+
+    if action == Action.SHORT and stop_loss > 0.0 and take_profit <= 0.0:
+        logger.warning(
+            "Signal for %s is SHORT without a positive take_profit price.",
+            symbol,
+        )
+
+    if action == Action.COVER and target_weight < 0.0:
+        logger.warning(
+            "Signal for %s has negative target_weight %.4f for COVER; setting to 0.0",
+            symbol,
+            target_weight,
+        )
+        target_weight = 0.0
 
     strategy_id = str(raw_signal.get("strategy_id", "") or "")
     exit_reason = str(raw_signal.get("exit_reason", "") or "")

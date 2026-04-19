@@ -30,6 +30,7 @@ class Position:
     avg_cost: float
     current_price: float
     stop_loss: float = 0.0
+    short_proceeds: float = 0.0
 
     # -- derived properties ------------------------------------------------
 
@@ -44,16 +45,23 @@ class Position:
         return self.shares * self.avg_cost
 
     @property
+    def is_short(self) -> bool:
+        return self.shares < 0.0
+
+    @property
     def unrealized_pnl(self) -> float:
         """Unrealised profit / loss in currency terms."""
+        if self.is_short:
+            return abs(self.cost_basis) - abs(self.market_value)
         return self.market_value - self.cost_basis
 
     @property
     def pnl_pct(self) -> float:
         """Unrealised P&L as a percentage of cost basis."""
-        if self.avg_cost == 0.0:
+        basis = abs(self.cost_basis)
+        if basis == 0.0:
             return 0.0
-        return (self.current_price - self.avg_cost) / self.avg_cost
+        return self.unrealized_pnl / basis
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +166,7 @@ class Portfolio:
             sector_weights[sector] = sector_weights.get(sector, 0.0) + weight
         return sector_weights
 
-    def to_snapshot_dict(self) -> dict:
+    def to_snapshot_dict(self) -> dict[str, object]:
         """Serialise current state for DB persistence / prompt building.
 
         Returns a flat dict suitable for insertion into
@@ -183,6 +191,8 @@ class Portfolio:
                     "pnl_pct": p.pnl_pct,
                     "weight": (p.market_value / current_nav if current_nav else 0.0),
                     "stop_loss": p.stop_loss,
+                    "is_short": p.is_short,
+                    "short_proceeds": p.short_proceeds,
                 }
                 for p in self.positions.values()
             ],
@@ -229,7 +239,7 @@ class Portfolio:
         existing position using broker-reported quantity and price.
         """
         normalized_side = (side or "").strip().lower()
-        if normalized_side not in {"buy", "sell"}:
+        if normalized_side not in {"buy", "sell", "sell_short", "buy_to_cover"}:
             raise ValueError(f"Unsupported broker fill side: {side!r}")
 
         fill_qty = float(qty)
@@ -278,6 +288,102 @@ class Portfolio:
                 fill_qty,
                 fill_px,
                 stop_loss,
+                self.cash,
+                order_id,
+                intent_type,
+                fill_time,
+            )
+            return
+
+        if normalized_side == "sell_short":
+            proceeds = fill_qty * fill_px
+            self.cash += proceeds
+
+            if position is None:
+                self.positions[symbol] = Position(
+                    symbol=symbol,
+                    shares=-fill_qty,
+                    avg_cost=fill_px,
+                    current_price=fill_px,
+                    stop_loss=stop_loss,
+                    short_proceeds=proceeds,
+                )
+            else:
+                if position.shares > 0.0:
+                    logger.warning(
+                        "Applied broker SELL_SHORT fill against long position: %s qty=%.6f price=%.4f order_id=%s intent_type=%s",
+                        symbol,
+                        fill_qty,
+                        fill_px,
+                        order_id,
+                        intent_type,
+                    )
+                    return
+                existing_short_shares = abs(position.shares)
+                new_total_shares = existing_short_shares + fill_qty
+                weighted_cost = (existing_short_shares * position.avg_cost) + proceeds
+                position.shares = -new_total_shares
+                position.avg_cost = weighted_cost / new_total_shares
+                position.current_price = fill_px
+                position.short_proceeds += proceeds
+                if stop_loss > 0.0:
+                    position.stop_loss = stop_loss
+
+            logger.info(
+                "Applied broker SELL_SHORT fill: %s qty=%.6f price=%.4f stop_loss=%.4f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+                symbol,
+                fill_qty,
+                fill_px,
+                stop_loss,
+                self.cash,
+                order_id,
+                intent_type,
+                fill_time,
+            )
+            return
+
+        if normalized_side == "buy_to_cover":
+            cover_cost = fill_qty * fill_px
+            self.cash -= cover_cost
+
+            if position is None or position.shares >= 0.0:
+                logger.warning(
+                    "Applied broker BUY_TO_COVER fill for missing short position: %s qty=%.6f price=%.4f order_id=%s intent_type=%s",
+                    symbol,
+                    fill_qty,
+                    fill_px,
+                    order_id,
+                    intent_type,
+                )
+                return
+
+            remaining_shares = position.shares + fill_qty
+            position.current_price = fill_px
+
+            if remaining_shares >= -1e-9:
+                del self.positions[symbol]
+                logger.info(
+                    "Applied broker BUY_TO_COVER fill and closed short: %s qty=%.6f price=%.4f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+                    symbol,
+                    fill_qty,
+                    fill_px,
+                    self.cash,
+                    order_id,
+                    intent_type,
+                    fill_time,
+                )
+                return
+
+            position.shares = remaining_shares
+            if stop_loss > 0.0:
+                position.stop_loss = stop_loss
+
+            logger.info(
+                "Applied broker BUY_TO_COVER fill: %s qty=%.6f price=%.4f remaining=%.6f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+                symbol,
+                fill_qty,
+                fill_px,
+                position.shares,
                 self.cash,
                 order_id,
                 intent_type,

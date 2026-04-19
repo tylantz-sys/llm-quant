@@ -1082,8 +1082,8 @@ def _run_single_pod(
             else {}
         )
 
-        entry_signals = [s for s in signals if s.action == Action.BUY]
-        other_signals = [s for s in signals if s.action != Action.BUY]
+        entry_signals = [s for s in signals if s.action in {Action.BUY, Action.SHORT}]
+        other_signals = [s for s in signals if s.action not in {Action.BUY, Action.SHORT}]
 
         entry_signals = apply_scale_in(
             entry_signals,

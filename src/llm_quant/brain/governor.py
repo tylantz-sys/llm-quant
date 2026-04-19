@@ -14,6 +14,16 @@ from llm_quant.brain.models import (
 )
 
 
+_ACTION_REDUCTION_MAP: dict[Action, tuple[Action, ...]] = {
+    Action.BUY: (Action.BUY,),
+    Action.SHORT: (Action.SHORT,),
+    Action.SELL: (Action.SELL, Action.CLOSE),
+    Action.COVER: (Action.COVER, Action.CLOSE),
+    Action.CLOSE: (Action.CLOSE,),
+    Action.HOLD: (Action.HOLD,),
+}
+
+
 def fallback_governor_decision(
     *,
     context: MarketContext,
@@ -119,7 +129,9 @@ def enforce_governor_constraints(
             )
             continue
 
-        if overlay_signal.action not in {candidate_action, Action.HOLD}:
+        allowed_actions = set(_ACTION_REDUCTION_MAP.get(candidate_action, (candidate_action,)))
+        allowed_actions.add(Action.HOLD)
+        if overlay_signal.action not in allowed_actions:
             violations.append(
                 f"side_flip:{symbol}:{candidate_action.value}->{overlay_signal.action.value}"
             )
@@ -155,7 +167,7 @@ def enforce_governor_constraints(
             continue
 
         target_weight = candidate_weight
-        if candidate_action == Action.BUY:
+        if candidate_action in {Action.BUY, Action.SHORT}:
             min_w = candidate_weight * down
             max_w = candidate_weight * max_up
             proposed = float(overlay_signal.target_weight)

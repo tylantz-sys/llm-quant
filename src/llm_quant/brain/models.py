@@ -11,6 +11,8 @@ from typing import Any
 class Action(StrEnum):
     BUY = "buy"
     SELL = "sell"
+    SHORT = "short"
+    COVER = "cover"
     HOLD = "hold"
     CLOSE = "close"
 
@@ -40,6 +42,10 @@ class TradeSignal:
     entry_batch: int = 1
     exit_reason: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_short(self) -> bool:
+        return self.action == Action.SHORT
 
     def __post_init__(self) -> None:
         # Normalise price-level fields at construction so every code path

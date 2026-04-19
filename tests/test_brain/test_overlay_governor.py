@@ -150,3 +150,43 @@ def test_fallback_governor_decision_holds_all_candidates():
     )
     assert fallback.decision_type == "overlay"
     assert all(signal.action == Action.HOLD for signal in fallback.signals)
+
+
+def test_governor_clamps_short_weight_without_side_flip() -> None:
+    candidate_signals = [
+        {
+            "symbol": "SPY",
+            "action": "short",
+            "target_weight": 0.05,
+            "stop_loss": 505.0,
+            "take_profit": 480.0,
+            "strategy_id": "strat-short",
+            "reasoning": "candidate short",
+        }
+    ]
+    decision = _decision(
+        [
+            TradeSignal(
+                symbol="SPY",
+                action=Action.SHORT,
+                conviction=Conviction.HIGH,
+                target_weight=0.10,
+                stop_loss=505.0,
+                take_profit=480.0,
+                strategy_id="strat-short",
+                reasoning="overlay short scale up",
+            )
+        ]
+    )
+    sanitized, audit, fallback_required = enforce_governor_constraints(
+        decision=decision,
+        candidate_signals=candidate_signals,
+        strict=True,
+        max_upscale=1.20,
+        max_downscale=0.0,
+        decision_date=date(2026, 3, 31),
+    )
+    assert fallback_required is False
+    assert audit["scaled_count"] == 1
+    assert sanitized[0].action == Action.SHORT
+    assert sanitized[0].target_weight == 0.06

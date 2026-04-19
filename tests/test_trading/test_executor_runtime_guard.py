@@ -21,6 +21,18 @@ def _buy_signal() -> TradeSignal:
     )
 
 
+def _short_signal() -> TradeSignal:
+    return TradeSignal(
+        symbol="SPY",
+        action=Action.SHORT,
+        conviction=Conviction.MEDIUM,
+        target_weight=0.10,
+        stop_loss=105.0,
+        reasoning="test short",
+        take_profit=90.0,
+    )
+
+
 def test_ensure_runtime_execution_allowed_rejects_alpaca_mode() -> None:
     with pytest.raises(RuntimeExecutionNotAllowedError, match="forbidden in alpaca mode"):
         ensure_runtime_execution_allowed(ExecutionMode.ALPACA)
@@ -58,3 +70,41 @@ def test_execute_signals_still_allows_paper_mode() -> None:
     assert len(executed) == 1
     assert executed[0].symbol == "SPY"
     assert "SPY" in portfolio.positions
+
+
+def test_execute_signals_supports_short_and_cover() -> None:
+    portfolio = Portfolio(initial_capital=1_000.0)
+
+    short_executed = execute_signals(
+        portfolio,
+        [_short_signal()],
+        {"SPY": 100.0},
+        portfolio.nav,
+        mode=ExecutionMode.PAPER,
+    )
+
+    assert len(short_executed) == 1
+    assert short_executed[0].action == "short"
+    assert portfolio.positions["SPY"].shares == -1
+    assert portfolio.cash == 1_100.0
+
+    cover_signal = TradeSignal(
+        symbol="SPY",
+        action=Action.COVER,
+        conviction=Conviction.MEDIUM,
+        target_weight=0.0,
+        stop_loss=0.0,
+        reasoning="test cover",
+    )
+    cover_executed = execute_signals(
+        portfolio,
+        [cover_signal],
+        {"SPY": 95.0},
+        portfolio.nav,
+        mode=ExecutionMode.PAPER,
+    )
+
+    assert len(cover_executed) == 1
+    assert cover_executed[0].action == "cover"
+    assert portfolio.cash == 1_005.0
+    assert "SPY" not in portfolio.positions

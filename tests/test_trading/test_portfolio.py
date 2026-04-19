@@ -22,6 +22,14 @@ def test_position_negative_pnl():
     assert pos.pnl_pct < 0
 
 
+def test_short_position_properties() -> None:
+    pos = Position(symbol="SPY", shares=-10, avg_cost=450.0, current_price=440.0)
+    assert pos.is_short is True
+    assert pos.market_value == -4400.0
+    assert pos.unrealized_pnl == 100.0
+    assert pos.pnl_pct > 0
+
+
 def test_portfolio_nav(sample_portfolio):
     # cash=80000, SPY: 20*460=9200, QQQ: 15*390=5850
     expected_nav = 80_000.0 + 9_200.0 + 5_850.0
@@ -63,3 +71,36 @@ def test_portfolio_to_snapshot(sample_portfolio):
     assert snap["nav"] == sample_portfolio.nav
     assert snap["cash"] == sample_portfolio.cash
     assert len(snap["positions"]) == 2
+
+
+def test_apply_broker_fill_sell_short_and_buy_to_cover() -> None:
+    portfolio = Portfolio(initial_capital=1_000.0)
+
+    portfolio.apply_broker_fill(
+        symbol="SPY",
+        side="sell_short",
+        qty=2.0,
+        fill_price=100.0,
+        stop_loss=105.0,
+        fill_time=None,
+        order_id="order-1",
+        intent_type="entry",
+    )
+
+    assert portfolio.cash == 1_200.0
+    assert portfolio.positions["SPY"].shares == -2.0
+    assert portfolio.positions["SPY"].short_proceeds == 200.0
+
+    portfolio.apply_broker_fill(
+        symbol="SPY",
+        side="buy_to_cover",
+        qty=2.0,
+        fill_price=90.0,
+        stop_loss=0.0,
+        fill_time=None,
+        order_id="order-2",
+        intent_type="exit",
+    )
+
+    assert portfolio.cash == 1_020.0
+    assert "SPY" not in portfolio.positions
