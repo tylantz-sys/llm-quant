@@ -575,9 +575,10 @@ def evaluate_synthetic_exit(
         and ((price >= pos.stop_loss) if pos.is_short else (price <= pos.stop_loss))
     )
     if stop_loss_hit:
+        action = Action.COVER if pos.is_short else Action.CLOSE
         return TradeSignal(
             symbol=pos.symbol,
-            action=Action.CLOSE,
+            action=action,
             conviction=Conviction.HIGH,
             target_weight=0.0,
             stop_loss=0.0,
@@ -624,9 +625,10 @@ def evaluate_synthetic_exit(
             trail_price = state.peak_price * (1.0 - policy.trailing_stop_pct)
             trailing_hit = price <= trail_price
         if trailing_hit:
+            action = Action.COVER if pos.is_short else Action.CLOSE
             return TradeSignal(
                 symbol=pos.symbol,
-                action=Action.CLOSE,
+                action=action,
                 conviction=Conviction.HIGH,
                 target_weight=0.0,
                 stop_loss=0.0,
@@ -668,9 +670,10 @@ def _evaluate_synthetic_exit_tier2(
             partial_hit = reachable_high >= partial_target
 
     if stop_hit and partial_hit:
+        action = Action.COVER if pos.is_short else Action.CLOSE
         return TradeSignal(
             symbol=pos.symbol,
-            action=Action.CLOSE,
+            action=action,
             conviction=Conviction.HIGH,
             target_weight=0.0,
             stop_loss=0.0,
@@ -684,9 +687,10 @@ def _evaluate_synthetic_exit_tier2(
         )
 
     if stop_hit:
+        action = Action.COVER if pos.is_short else Action.CLOSE
         return TradeSignal(
             symbol=pos.symbol,
-            action=Action.CLOSE,
+            action=action,
             conviction=Conviction.HIGH,
             target_weight=0.0,
             stop_loss=0.0,
@@ -733,9 +737,10 @@ def _evaluate_synthetic_exit_tier2(
             trail_price = observed_peak * (1.0 - policy.trailing_stop_pct)
             trailing_hit = reachable_low <= trail_price
         if trailing_hit:
+            action = Action.COVER if pos.is_short else Action.CLOSE
             return TradeSignal(
                 symbol=pos.symbol,
-                action=Action.CLOSE,
+                action=action,
                 conviction=Conviction.HIGH,
                 target_weight=0.0,
                 stop_loss=0.0,

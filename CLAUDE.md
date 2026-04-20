@@ -130,7 +130,7 @@ For executing the current strategy on a day-to-day basis:
 The `/trade` command runs the full autonomous trading cycle:
 1. **Build context**: `cd E:/llm-quant && PYTHONPATH=src python scripts/build_context.py` — fetches data if stale, computes indicators, outputs JSON market snapshot
 2. **Analyze & decide**: Read system_prompt + decision_prompt, assess regime (informed by `config/macro-briefing.md`), select 0-5 signals, output JSON decision
-3. **Execute**: `cd E:/llm-quant && PYTHONPATH=src python scripts/execute_decision.py <<< '<JSON>'` — risk-checks, executes, saves snapshot
+3. **Execute**: `cd E:/llm-quant && PYTHONPATH=src python scripts/execute_decision.py <<< '<JSON>'` — risk-checks, executes, saves snapshot. In Alpaca mode, short locate approval is resolved from broker asset metadata (`get_asset` `shortable` / `easy_to_borrow`) and rejects unknown locate state when locate is required.
 4. **Report**: Display regime, trades, rejections, updated portfolio as markdown tables
 
 ### Helper Scripts

@@ -121,7 +121,7 @@ def test_synthetic_exit_engine_short_stop_loss_triggers_on_price_rise():
     )
 
     assert len(signals) == 1
-    assert signals[0].action.value == "close"
+    assert signals[0].action.value == "cover"
     assert signals[0].exit_reason == "stop_loss"
 
 
@@ -188,9 +188,39 @@ def test_synthetic_exit_engine_short_trailing_stop_after_partial():
     )
 
     assert len(signals) == 1
-    assert signals[0].action.value == "close"
+    assert signals[0].action.value == "cover"
     assert signals[0].exit_reason == "trailing_stop"
     assert telemetry[0].trailing_stop_price == 97.44
+
+
+def test_tier2_short_same_bar_stop_and_tp_resolves_to_cover_stop():
+    portfolio = _portfolio_with_short_position("SPY", 10, 100.0)
+    states = {"SPY": IntradayPositionState(symbol="SPY", entry_price=100.0)}
+    policy = build_exit_policy(
+        RiskLimits(
+            partial_take_profit_enabled=True,
+            partial_take_profit_pct=0.02,
+            partial_take_profit_size=0.5,
+        ),
+        ExecutionConfig(),
+    )
+
+    signal = evaluate_synthetic_exit(
+        SyntheticExitContext(
+            position=portfolio.positions["SPY"],
+            price=99.5,
+            nav=portfolio.nav,
+            state=states["SPY"],
+            bar_high=105.5,
+            bar_low=97.5,
+            parity_tier="tier2_ohlc_conservative",
+        ),
+        policy,
+    )
+
+    assert signal is not None
+    assert signal.exit_reason == "stop_loss"
+    assert signal.action.value == "cover"
 
 
 def test_tier2_ohlc_partial_tp_can_trigger_without_close_reaching_target():

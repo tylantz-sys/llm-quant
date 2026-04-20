@@ -121,6 +121,22 @@ def _normalize_broker_fill_semantic_action(
     return "unknown"
 
 
+def _normalize_local_trade_semantic_action(trade: ExecutedTrade) -> str:
+    """Return a semantic action label for locally executed paper trades."""
+    action = (trade.action or "").strip().lower()
+    if action == "buy":
+        return "long_entry"
+    if action == "sell":
+        return "long_exit"
+    if action == "short":
+        return "short_entry"
+    if action == "cover":
+        return "short_cover"
+    if action == "close":
+        return "short_cover" if trade.is_short_close else "long_exit"
+    return "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Trade logging
 # ---------------------------------------------------------------------------
@@ -201,7 +217,7 @@ def log_trades(
             insert_vals.append(trade.strategy_id or None)
         if "semantic_action" in trade_cols:
             insert_cols.append("semantic_action")
-            insert_vals.append(None)
+            insert_vals.append(_normalize_local_trade_semantic_action(trade))
         if "entry_batch" in trade_cols:
             insert_cols.append("entry_batch")
             insert_vals.append(trade.entry_batch)

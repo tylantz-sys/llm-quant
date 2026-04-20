@@ -1,6 +1,7 @@
 from datetime import date
 
-from llm_quant.trading.ledger import log_broker_fills
+from llm_quant.trading.executor import ExecutedTrade
+from llm_quant.trading.ledger import log_broker_fills, log_trades
 
 
 def _snapshot() -> dict:
@@ -76,3 +77,49 @@ def test_log_broker_fills_preserves_short_side_and_semantics(tmp_db) -> None:
         "order-cover-1",
         "order-short-1",
     )
+
+
+def test_log_trades_preserves_short_semantics_for_local_paper_execution(tmp_db) -> None:
+    trades = [
+        ExecutedTrade(
+            symbol="SPY",
+            action="short",
+            shares=2.0,
+            price=100.0,
+            notional=200.0,
+            conviction="medium",
+            reasoning="local short",
+        ),
+        ExecutedTrade(
+            symbol="SPY",
+            action="cover",
+            shares=2.0,
+            price=95.0,
+            notional=190.0,
+            conviction="medium",
+            reasoning="local cover",
+        ),
+    ]
+
+    inserted_ids = log_trades(
+        tmp_db,
+        trades,
+        date(2026, 4, 20),
+        decision_id=7,
+        pod_id="default",
+    )
+
+    rows = tmp_db.execute(
+        """
+        SELECT action, semantic_action
+        FROM trades
+        WHERE trade_id IN (?, ?)
+        ORDER BY trade_id ASC
+        """,
+        inserted_ids,
+    ).fetchall()
+
+    assert rows == [
+        ("short", "short_entry"),
+        ("cover", "short_cover"),
+    ]
