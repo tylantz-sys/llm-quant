@@ -694,6 +694,7 @@ class RiskManager:
                         entry_price=price,
                         atr=atr,
                         atr_multiplier=multiplier,
+                        is_short=is_short,
                     )
                 )
             else:

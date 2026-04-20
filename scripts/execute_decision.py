@@ -30,6 +30,7 @@ import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -59,6 +60,53 @@ from llm_quant.trading.runtime_controls import (
 
 logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 logger = logging.getLogger(__name__)
+
+
+def _coerce_optional_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y"}:
+            return True
+        if normalized in {"0", "false", "no", "n"}:
+            return False
+    return None
+
+
+def _build_alpaca_locate_lookup(client: Any) -> Callable[[str], bool | None]:
+    cache: dict[str, bool | None] = {}
+
+    def _lookup(symbol: str) -> bool | None:
+        normalized = symbol.strip().upper()
+        if not normalized:
+            return None
+        if normalized in cache:
+            return cache[normalized]
+
+        asset = client.get_asset(normalized)
+        shortable = _coerce_optional_bool(
+            asset.get("shortable") if isinstance(asset, dict) else None
+        )
+        easy_to_borrow = _coerce_optional_bool(
+            asset.get("easy_to_borrow") if isinstance(asset, dict) else None
+        )
+
+        if shortable is False:
+            cache[normalized] = False
+        elif easy_to_borrow is not None:
+            cache[normalized] = easy_to_borrow
+        elif shortable is True:
+            cache[normalized] = True
+        else:
+            cache[normalized] = None
+        return cache[normalized]
+
+    return _lookup
 
 
 def _submit_to_alpaca(
@@ -255,6 +303,8 @@ def main():  # noqa: PLR0912, PLR0915 — orchestration entry point; decomposing
             print(json.dumps({"error": f"Alpaca client init failed: {exc}"}))
             sys.exit(1)
 
+    locate_lookup = _build_alpaca_locate_lookup(alpaca_client) if alpaca_client else None
+
     conn = get_connection(db_path)
 
     try:
@@ -369,7 +419,10 @@ def main():  # noqa: PLR0912, PLR0915 — orchestration entry point; decomposing
         # Risk filter
         risk_mgr = RiskManager(config)
         approved, rejected = risk_mgr.filter_signals(
-            governed_signals, portfolio, prices
+            governed_signals,
+            portfolio,
+            prices,
+            locate_lookup=locate_lookup,
         )
 
         # Enforce crypto basket equal-weight sizing — clamp BUY crypto target_weights

@@ -382,6 +382,32 @@ class TestBackwardCompatibility:
         assert new_keys.issubset(metrics.keys())
 
 
+class TestComputePerformanceShortTradeStats:
+    """Headline performance trade stats must include short lifecycle PnL."""
+
+    def test_short_cover_counts_in_win_rate_and_avg_trade_pnl(self, tmp_db):
+        _insert_snapshots(tmp_db, date(2026, 1, 1), [100_000.0, 100_000.0])
+        _insert_trade(tmp_db, 1, "SPY", "short", 10, 100.0)
+        _insert_trade(tmp_db, 2, "SPY", "cover", 10, 90.0)
+
+        metrics = compute_performance(tmp_db)
+
+        assert metrics["total_trades"] == 2
+        assert metrics["win_rate"] == 1.0
+        assert metrics["avg_trade_pnl"] == 100.0
+
+    def test_close_on_short_lot_is_treated_as_short_exit(self, tmp_db):
+        _insert_snapshots(tmp_db, date(2026, 1, 1), [100_000.0, 100_000.0])
+        _insert_trade(tmp_db, 1, "TLT", "short", 5, 200.0)
+        _insert_trade(tmp_db, 2, "TLT", "close", 5, 190.0)
+
+        metrics = compute_performance(tmp_db)
+
+        assert metrics["total_trades"] == 2
+        assert metrics["win_rate"] == 1.0
+        assert metrics["avg_trade_pnl"] == 50.0
+
+
 def _insert_trade(
     conn,
     trade_id: int,

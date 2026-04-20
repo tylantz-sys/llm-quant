@@ -184,6 +184,13 @@ def _execute_buy(
     current_notional = 0.0
 
     existing = portfolio.positions.get(signal.symbol)
+    if existing is not None and existing.shares < 0:
+        logger.warning(
+            "BUY %s: cannot buy while holding a short position. COVER first.",
+            signal.symbol,
+        )
+        return None
+
     if existing is not None:
         current_notional = existing.market_value
 
@@ -474,6 +481,7 @@ def _execute_close(
 
     shares_to_close = abs(existing.shares)
     is_short_close = existing.shares < 0
+    action = "cover" if is_short_close else "close"
     if existing.shares > 0:
         proceeds = shares_to_close * price
         portfolio.cash += proceeds
@@ -486,7 +494,7 @@ def _execute_close(
 
     return ExecutedTrade(
         symbol=signal.symbol,
-        action="close",
+        action=action,
         shares=shares_to_close,
         price=price,
         notional=notional,

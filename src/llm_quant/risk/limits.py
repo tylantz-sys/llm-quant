@@ -458,6 +458,8 @@ def check_atr_stop_loss(
     entry_price: float,
     atr: float,
     atr_multiplier: float,
+    *,
+    is_short: bool = False,
 ) -> RiskCheckResult:
     """Validate that a stop-loss is at least ``atr_multiplier`` ATRs from entry.
 
@@ -475,6 +477,8 @@ def check_atr_stop_loss(
     atr_multiplier:
         Minimum required distance as a multiple of ATR (e.g. 2.0 for equities,
         2.5-3.0 for crypto/volatile commodities).
+    is_short:
+        Whether the proposed trade is a short entry.
     """
     if entry_price <= 0.0 or atr <= 0.0:
         return RiskCheckResult(
@@ -485,7 +489,9 @@ def check_atr_stop_loss(
             limit_value=atr_multiplier,
         )
 
-    distance = entry_price - stop_loss_price
+    distance = (
+        stop_loss_price - entry_price if is_short else entry_price - stop_loss_price
+    )
     distance_in_atrs = distance / atr if atr > 0 else 0.0
     passed = distance_in_atrs >= atr_multiplier
     return RiskCheckResult(

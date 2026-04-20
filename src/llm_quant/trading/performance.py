@@ -344,28 +344,80 @@ def compute_performance(  # noqa: C901, PLR0912, PLR0915
     total_trades = len(trade_rows)
 
     if total_trades > 0:
-        # Compute per-trade P&L via a simple FIFO approach:
-        # For sells / closes, P&L = (sell_price - avg_buy_price) * shares
-        # We build a cost-basis tracker per symbol.
-        cost_basis: dict[str, float] = {}  # symbol -> avg cost per share
+        # Compute realized P&L with separate FIFO queues for long and short lots.
+        # This keeps headline metrics consistent with long and short lifecycles.
+        long_lots: dict[str, list[list[float]]] = {}
+        short_lots: dict[str, list[list[float]]] = {}
         pnl_list: list[float] = []
+
+        def _match_lots(
+            queue: list[list[float]],
+            qty: float,
+            exit_price: float,
+            *,
+            is_short: bool,
+        ) -> None:
+            remaining = qty
+            while remaining > 0 and queue:
+                lot_qty, lot_price = queue[0]
+                matched = min(remaining, lot_qty)
+                pnl = (
+                    (lot_price - exit_price) * matched
+                    if is_short
+                    else (exit_price - lot_price) * matched
+                )
+                pnl_list.append(pnl)
+                lot_qty -= matched
+                remaining -= matched
+                if lot_qty <= 0:
+                    queue.pop(0)
+                else:
+                    queue[0][0] = lot_qty
 
         for row in trade_rows:
             symbol: str = row[0]
-            action: str = row[1]
+            action = str(row[1]).lower() if row[1] else ""
             shares: float = float(row[2])
             price: float = float(row[3])
 
+            if shares <= 0:
+                continue
+
             if action == "buy":
-                # We don't track cumulative share count here; we use a
-                # simplified per-trade P&L model.  For a proper FIFO we
-                # would need lot tracking.  Instead, record cost for
-                # later sell comparison.
-                cost_basis[symbol] = price  # last buy price as proxy
-            elif action in ("sell", "close"):
-                buy_price = cost_basis.get(symbol, price)
-                trade_pnl = (price - buy_price) * shares
-                pnl_list.append(trade_pnl)
+                long_lots.setdefault(symbol, []).append([shares, price])
+                continue
+
+            if action == "short":
+                short_lots.setdefault(symbol, []).append([shares, price])
+                continue
+
+            if action == "sell":
+                _match_lots(
+                    long_lots.setdefault(symbol, []),
+                    shares,
+                    price,
+                    is_short=False,
+                )
+                continue
+
+            if action == "cover":
+                _match_lots(
+                    short_lots.setdefault(symbol, []),
+                    shares,
+                    price,
+                    is_short=True,
+                )
+                continue
+
+            if action == "close":
+                long_queue = long_lots.setdefault(symbol, [])
+                short_queue = short_lots.setdefault(symbol, [])
+                if short_queue and not long_queue:
+                    _match_lots(short_queue, shares, price, is_short=True)
+                elif long_queue:
+                    _match_lots(long_queue, shares, price, is_short=False)
+                elif short_queue:
+                    _match_lots(short_queue, shares, price, is_short=True)
 
         if pnl_list:
             wins = sum(1 for p in pnl_list if p > 0)
