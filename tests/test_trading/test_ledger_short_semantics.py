@@ -1,10 +1,11 @@
 from datetime import date
+from typing import Any
 
 from llm_quant.trading.executor import ExecutedTrade
 from llm_quant.trading.ledger import log_broker_fills, log_trades
 
 
-def _snapshot() -> dict:
+def _snapshot() -> dict[str, dict[str, object]]:
     return {
         "intraday_position_state": {},
         "order_state": {},
@@ -13,7 +14,7 @@ def _snapshot() -> dict:
     }
 
 
-def test_log_broker_fills_preserves_short_side_and_semantics(tmp_db) -> None:
+def test_log_broker_fills_preserves_short_side_and_semantics(tmp_db: Any) -> None:
     fills = [
         {
             "symbol": "SPY",
@@ -79,7 +80,7 @@ def test_log_broker_fills_preserves_short_side_and_semantics(tmp_db) -> None:
     )
 
 
-def test_log_trades_preserves_short_semantics_for_local_paper_execution(tmp_db) -> None:
+def test_log_trades_preserves_short_semantics_for_local_paper_execution(tmp_db: Any) -> None:
     trades = [
         ExecutedTrade(
             symbol="SPY",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 from types import SimpleNamespace
+from typing import Any, Callable, cast
 
 import pytest
 
@@ -18,48 +19,48 @@ from scripts import execute_decision
 
 
 class _Cursor:
-    def __init__(self, row):
+    def __init__(self, row: tuple[float]) -> None:
         self._row = row
 
-    def fetchone(self):
+    def fetchone(self) -> tuple[float]:
         return self._row
 
 
 class _Conn:
-    def execute(self, query, params=None):
+    def execute(self, query: str, params: object | None = None) -> _Cursor:
         del params
         if "SELECT close FROM market_data_daily" in query:
             return _Cursor((500.0,))
         raise AssertionError(f"Unexpected query: {query}")
 
-    def close(self):
+    def close(self) -> None:
         return None
 
 
 class _AlpacaClient:
-    def get_asset(self, symbol: str):
+    def get_asset(self, symbol: str) -> dict[str, bool]:
         assert symbol == "SPY"
         return {"shortable": True, "easy_to_borrow": True}
 
 
 class _Scanner:
-    def __init__(self, _config):
+    def __init__(self, _config: object) -> None:
         pass
 
-    def run_full_scan(self, _conn):
+    def run_full_scan(self, _conn: object) -> SimpleNamespace:
         return SimpleNamespace(
             overall_severity=SimpleNamespace(value="ok"),
             halt_checks=[],
             warning_checks=[],
         )
 
-    def persist_scan(self, _conn, _report):
+    def persist_scan(self, _conn: object, _report: object) -> None:
         return None
 
 
 def test_execute_decision_dry_run_passes_broker_locate_lookup_to_risk_manager(
     monkeypatch: pytest.MonkeyPatch,
-    sample_config,
+    sample_config: Any,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     sample_config.general.db_path = "test.duckdb"
@@ -67,8 +68,7 @@ def test_execute_decision_dry_run_passes_broker_locate_lookup_to_risk_manager(
     monkeypatch.setattr(execute_decision, "load_config_for_pod", lambda _pod: sample_config)
     monkeypatch.setattr(execute_decision, "get_connection", lambda _db: _Conn())
     monkeypatch.setattr(
-        execute_decision.AlpacaClient,
-        "from_env",
+        "scripts.execute_decision.AlpacaClient.from_env",
         classmethod(lambda cls: _AlpacaClient()),
     )
     monkeypatch.setattr(execute_decision, "SurveillanceScanner", _Scanner)
@@ -94,8 +94,7 @@ def test_execute_decision_dry_run_passes_broker_locate_lookup_to_risk_manager(
         ),
     )
     monkeypatch.setattr(
-        execute_decision.Portfolio,
-        "from_db",
+        "scripts.execute_decision.Portfolio.from_db",
         classmethod(lambda cls, *_args, **_kwargs: Portfolio(initial_capital=100_000.0)),
     )
     monkeypatch.setattr(execute_decision, "build_exit_policy", lambda *_args, **_kwargs: object())
@@ -133,10 +132,16 @@ def test_execute_decision_dry_run_passes_broker_locate_lookup_to_risk_manager(
     )
 
     class _RiskManager:
-        def __init__(self, _config):
+        def __init__(self, _config: object) -> None:
             pass
 
-        def filter_signals(self, signals, portfolio, prices, locate_lookup=None):
+        def filter_signals(
+            self,
+            signals: object,
+            portfolio: object,
+            prices: object,
+            locate_lookup: Callable[[str], bool | None] | None = None,
+        ) -> tuple[list[object], list[object]]:
             del signals, portfolio, prices
             assert callable(locate_lookup)
             assert locate_lookup("SPY") is True
@@ -146,7 +151,8 @@ def test_execute_decision_dry_run_passes_broker_locate_lookup_to_risk_manager(
     monkeypatch.setattr("sys.argv", ["execute_decision.py", "--broker", "alpaca", "--dry-run"])
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"ok": True})))
 
-    execute_decision.main()
+    main = cast(Callable[[], None], execute_decision.main)
+    main()
 
     output = json.loads(capsys.readouterr().out)
     assert output["dry_run"] is True
