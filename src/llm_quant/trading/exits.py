@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time as dt_time
-import warnings
+from datetime import datetime
+from datetime import time as dt_time
 from typing import Literal
 
 from llm_quant.brain.models import Action, Conviction, TradeSignal
@@ -18,8 +18,8 @@ SyntheticExitParityTier = Literal["tier1_close_only", "tier2_ohlc_conservative"]
 SYNTHETIC_EXIT_PARITY_MODE = "synthetic/daily-conservative"
 SYNTHETIC_EXIT_EXECUTION_ASSUMPTION = "close-only daily bars; not exact intraday parity"
 SYNTHETIC_EXIT_EXECUTION_ASSUMPTION_TIER2 = (
-    "conservative daily OHLC reachability with pessimistic same-bar ambiguity resolution; "
-    "not exact intraday parity"
+    "conservative daily OHLC reachability with pessimistic "
+    "same-bar ambiguity resolution; not exact intraday parity"
 )
 
 
@@ -253,12 +253,16 @@ def resolve_take_profit_price(
     entry_price: float,
     stop_loss: float,
     policy: ExitPolicy,
+    *,
+    is_short: bool = False,
 ) -> float:
     """Resolve full take-profit price from canonical policy."""
     if policy.take_profit_mode == "pct":
-        return round(entry_price * (1.0 + policy.take_profit_pct), 2)
-    risk = max(entry_price - stop_loss, 0.0)
-    return round(entry_price + policy.take_profit_rr * risk, 2)
+        multiplier = 1.0 - policy.take_profit_pct if is_short else 1.0 + policy.take_profit_pct
+        return round(entry_price * multiplier, 2)
+    risk = max(stop_loss - entry_price, 0.0) if is_short else max(entry_price - stop_loss, 0.0)
+    target = entry_price - policy.take_profit_rr * risk if is_short else entry_price + policy.take_profit_rr * risk
+    return round(target, 2)
 
 
 def build_broker_exit_plan(
@@ -267,23 +271,37 @@ def build_broker_exit_plan(
     stop_loss: float,
     policy: ExitPolicy,
     runtime: ExitRuntime,
+    *,
+    is_short: bool = False,
 ) -> BrokerExitPlan:
-    full_take_profit = resolve_take_profit_price(entry_price, stop_loss, policy)
+    full_take_profit = resolve_take_profit_price(
+        entry_price,
+        stop_loss,
+        policy,
+        is_short=is_short,
+    )
     partial_take_profit_price = None
     remainder_take_profit_price = None
     partial_take_profit_size = None
     trailing_stop_pct = None
 
     if runtime.broker_exit_kind == "oco" and policy.uses_partial_take_profit:
-        partial_take_profit_price = round(
-            entry_price * (1.0 + policy.partial_take_profit_pct), 2
+        partial_multiplier = (
+            1.0 - policy.partial_take_profit_pct
+            if is_short
+            else 1.0 + policy.partial_take_profit_pct
         )
+        partial_take_profit_price = round(entry_price * partial_multiplier, 2)
         partial_take_profit_size = policy.partial_take_profit_size
         remainder_pct = policy.partial_take_profit_pct * max(
             policy.remainder_take_profit_mult, 0.0
         )
-        remainder_take_profit_price = round(entry_price * (1.0 + remainder_pct), 2)
-        if remainder_take_profit_price <= partial_take_profit_price:
+        remainder_multiplier = 1.0 - remainder_pct if is_short else 1.0 + remainder_pct
+        remainder_take_profit_price = round(entry_price * remainder_multiplier, 2)
+        if is_short:
+            if remainder_take_profit_price >= partial_take_profit_price:
+                remainder_take_profit_price = round(partial_take_profit_price - 0.01, 2)
+        elif remainder_take_profit_price <= partial_take_profit_price:
             remainder_take_profit_price = round(partial_take_profit_price + 0.01, 2)
         if policy.uses_trailing_stop:
             trailing_stop_pct = policy.trailing_stop_pct
@@ -334,21 +352,49 @@ def evaluate_position_exits(
             )
             states[symbol] = state
 
-        observed_peak = price
-        if bar_highs is not None:
-            observed_peak = max(observed_peak, bar_highs.get(symbol, observed_peak))
-        peak_price = max(state.peak_price, observed_peak)
+        if pos.is_short:
+            observed_extreme = price
+            if bar_lows is not None:
+                observed_extreme = min(
+                    observed_extreme,
+                    bar_lows.get(symbol, observed_extreme),
+                )
+            previous_extreme = (
+                state.peak_price if state.peak_price > 0 else observed_extreme
+            )
+            peak_price = min(previous_extreme, observed_extreme)
+        else:
+            observed_extreme = price
+            if bar_highs is not None:
+                observed_extreme = max(
+                    observed_extreme,
+                    bar_highs.get(symbol, observed_extreme),
+                )
+            peak_price = max(state.peak_price, observed_extreme)
 
         partial_target_price = None
         if policy.uses_partial_take_profit:
-            partial_target_price = round(
-                state.entry_price * (1.0 + policy.partial_take_profit_pct),
-                4,
-            )
+            if pos.is_short:
+                partial_target_price = round(
+                    state.entry_price * (1.0 - policy.partial_take_profit_pct),
+                    4,
+                )
+            else:
+                partial_target_price = round(
+                    state.entry_price * (1.0 + policy.partial_take_profit_pct),
+                    4,
+                )
 
         trailing_stop_price = None
         if policy.uses_trailing_stop and state.partial_exit_taken:
-            trailing_stop_price = round(peak_price * (1.0 - policy.trailing_stop_pct), 4)
+            if pos.is_short:
+                trailing_stop_price = round(
+                    peak_price * (1.0 + policy.trailing_stop_pct), 4
+                )
+            else:
+                trailing_stop_price = round(
+                    peak_price * (1.0 - policy.trailing_stop_pct), 4
+                )
 
         unprotected = bool(
             runtime.broker != "paper"
@@ -400,13 +446,15 @@ def evaluate_broker_exit_status(
     states: dict[str, IntradayPositionState],
     policy: ExitPolicy,
 ) -> list[BrokerExitStatus]:
-    """Evaluate synthetic intraday Alpaca exit status using broker-authoritative state only."""
+    """Evaluate intraday broker exit status using broker-authoritative state only."""
     statuses: list[BrokerExitStatus] = []
     if not policy.uses_partial_take_profit:
         return statuses
 
     for symbol, pos in portfolio.positions.items():
-        current_price = float(prices.get(symbol, pos.current_price) or pos.current_price)
+        current_price = float(
+            prices.get(symbol, pos.current_price) or pos.current_price
+        )
         state = states.get(symbol)
         if state is None:
             state = IntradayPositionState(
@@ -419,33 +467,64 @@ def evaluate_broker_exit_status(
 
         entry_price = float(state.entry_price or pos.avg_cost)
         if entry_price <= 0:
-            raise RuntimeError(f"Missing entry price for synthetic broker exit status: {symbol}")
+            msg = f"Missing entry price for synthetic broker exit status: {symbol}"
+            raise RuntimeError(msg)
 
-        peak_price = max(float(state.peak_price or entry_price), current_price)
+        if pos.is_short:
+            previous_extreme = float(state.peak_price or entry_price)
+            peak_price = min(previous_extreme, current_price)
+        else:
+            peak_price = max(float(state.peak_price or entry_price), current_price)
         stop_loss_price = float(pos.stop_loss or 0.0)
         if stop_loss_price <= 0:
-            raise RuntimeError(f"Missing stop loss for synthetic broker exit status: {symbol}")
+            msg = f"Missing stop loss for synthetic broker exit status: {symbol}"
+            raise RuntimeError(msg)
 
-        tp1_price = round(entry_price * (1.0 + policy.partial_take_profit_pct), 4)
-        tp2_pct = policy.partial_take_profit_pct * max(policy.remainder_take_profit_mult, 0.0)
-        tp2_price = round(entry_price * (1.0 + tp2_pct), 4)
+        if pos.is_short:
+            tp1_price = round(entry_price * (1.0 - policy.partial_take_profit_pct), 4)
+        else:
+            tp1_price = round(entry_price * (1.0 + policy.partial_take_profit_pct), 4)
+        tp2_pct = policy.partial_take_profit_pct * max(
+            policy.remainder_take_profit_mult, 0.0
+        )
+        if pos.is_short:
+            tp2_price = round(entry_price * (1.0 - tp2_pct), 4)
+        else:
+            tp2_price = round(entry_price * (1.0 + tp2_pct), 4)
         trailing_active = bool(state.partial_exit_taken)
         trailing_stop_price = None
         if policy.uses_trailing_stop and trailing_active:
-            trailing_stop_price = round(
-                peak_price * (1.0 - policy.trailing_stop_pct),
-                4,
-            )
+            if pos.is_short:
+                trailing_stop_price = round(
+                    peak_price * (1.0 + policy.trailing_stop_pct),
+                    4,
+                )
+            else:
+                trailing_stop_price = round(
+                    peak_price * (1.0 - policy.trailing_stop_pct),
+                    4,
+                )
 
-        tp1_hit = bool(not state.partial_exit_taken and current_price >= tp1_price)
-        tp2_hit = bool(state.partial_exit_taken and current_price >= tp2_price)
-        stop_loss_hit = bool(current_price <= stop_loss_price)
-        trailing_hit = bool(
-            policy.uses_trailing_stop
-            and trailing_active
-            and trailing_stop_price is not None
-            and current_price <= trailing_stop_price
-        )
+        if pos.is_short:
+            tp1_hit = bool(not state.partial_exit_taken and current_price <= tp1_price)
+            tp2_hit = bool(state.partial_exit_taken and current_price <= tp2_price)
+            stop_loss_hit = bool(current_price >= stop_loss_price)
+            trailing_hit = bool(
+                policy.uses_trailing_stop
+                and trailing_active
+                and trailing_stop_price is not None
+                and current_price >= trailing_stop_price
+            )
+        else:
+            tp1_hit = bool(not state.partial_exit_taken and current_price >= tp1_price)
+            tp2_hit = bool(state.partial_exit_taken and current_price >= tp2_price)
+            stop_loss_hit = bool(current_price <= stop_loss_price)
+            trailing_hit = bool(
+                policy.uses_trailing_stop
+                and trailing_active
+                and trailing_stop_price is not None
+                and current_price <= trailing_stop_price
+            )
 
         statuses.append(
             BrokerExitStatus(
@@ -491,7 +570,11 @@ def evaluate_synthetic_exit(
         if signal is not None:
             return signal
 
-    if pos.stop_loss and price <= pos.stop_loss:
+    stop_loss_hit = bool(
+        pos.stop_loss
+        and ((price >= pos.stop_loss) if pos.is_short else (price <= pos.stop_loss))
+    )
+    if stop_loss_hit:
         return TradeSignal(
             symbol=pos.symbol,
             action=Action.CLOSE,
@@ -505,25 +588,42 @@ def evaluate_synthetic_exit(
 
     if policy.uses_partial_take_profit and not state.partial_exit_taken:
         partial_target = state.entry_price * (1.0 + policy.partial_take_profit_pct)
-        if price >= partial_target:
-            current_weight = pos.market_value / nav if nav else 0.0
-            target_weight = max(current_weight * (1.0 - policy.partial_take_profit_size), 0.0)
+        partial_hit = price >= partial_target
+        action = Action.SELL
+        if pos.is_short:
+            partial_target = state.entry_price * (1.0 - policy.partial_take_profit_pct)
+            partial_hit = price <= partial_target
+            action = Action.COVER
+        if partial_hit:
+            if pos.is_short:
+                current_weight = abs(pos.market_value) / nav if nav else 0.0
+            else:
+                current_weight = pos.market_value / nav if nav else 0.0
+            target_weight = max(
+                current_weight * (1.0 - policy.partial_take_profit_size), 0.0
+            )
             return TradeSignal(
                 symbol=pos.symbol,
-                action=Action.SELL,
+                action=action,
                 conviction=Conviction.HIGH,
                 target_weight=round(target_weight, 4),
                 stop_loss=pos.stop_loss,
                 reasoning=(
-                    f"Canonical exit engine partial TP reached (+{policy.partial_take_profit_pct:.1%})."
+                    "Canonical exit engine partial TP reached "
+                    f"(+{policy.partial_take_profit_pct:.1%})."
                 ),
                 exit_reason="tp_partial",
                 entry_batch=state.entry_batch or 1,
             )
 
     if policy.uses_trailing_stop and state.partial_exit_taken:
-        trail_price = state.peak_price * (1.0 - policy.trailing_stop_pct)
-        if price <= trail_price:
+        if pos.is_short:
+            trail_price = state.peak_price * (1.0 + policy.trailing_stop_pct)
+            trailing_hit = price >= trail_price
+        else:
+            trail_price = state.peak_price * (1.0 - policy.trailing_stop_pct)
+            trailing_hit = price <= trail_price
+        if trailing_hit:
             return TradeSignal(
                 symbol=pos.symbol,
                 action=Action.CLOSE,
@@ -531,7 +631,8 @@ def evaluate_synthetic_exit(
                 target_weight=0.0,
                 stop_loss=0.0,
                 reasoning=(
-                    f"Canonical exit engine trailing stop hit ({policy.trailing_stop_pct:.2%})."
+                    "Canonical exit engine trailing stop hit "
+                    f"({policy.trailing_stop_pct:.2%})."
                 ),
                 exit_reason="trailing_stop",
                 entry_batch=state.entry_batch or 1,
@@ -552,12 +653,19 @@ def _evaluate_synthetic_exit_tier2(
     reachable_low = price if bar_low is None else min(bar_low, price)
     reachable_high = price if bar_high is None else max(bar_high, price)
 
-    stop_hit = bool(pos.stop_loss and reachable_low <= pos.stop_loss)
+    if pos.is_short:
+        stop_hit = bool(pos.stop_loss and reachable_high >= pos.stop_loss)
+    else:
+        stop_hit = bool(pos.stop_loss and reachable_low <= pos.stop_loss)
     partial_target = None
     partial_hit = False
     if policy.uses_partial_take_profit and not state.partial_exit_taken:
-        partial_target = state.entry_price * (1.0 + policy.partial_take_profit_pct)
-        partial_hit = reachable_high >= partial_target
+        if pos.is_short:
+            partial_target = state.entry_price * (1.0 - policy.partial_take_profit_pct)
+            partial_hit = reachable_low <= partial_target
+        else:
+            partial_target = state.entry_price * (1.0 + policy.partial_take_profit_pct)
+            partial_hit = reachable_high >= partial_target
 
     if stop_hit and partial_hit:
         return TradeSignal(
@@ -568,7 +676,8 @@ def _evaluate_synthetic_exit_tier2(
             stop_loss=0.0,
             reasoning=(
                 "Canonical exit engine conservative OHLC parity saw stop-loss and "
-                "take-profit reachable in the same bar; pessimistically resolving to stop-loss."
+                "take-profit reachable in the same bar; "
+                "pessimistically resolving to stop-loss."
             ),
             exit_reason="stop_loss",
             entry_batch=state.entry_batch or 1,
@@ -581,22 +690,33 @@ def _evaluate_synthetic_exit_tier2(
             conviction=Conviction.HIGH,
             target_weight=0.0,
             stop_loss=0.0,
-            reasoning="Canonical exit engine stop-loss triggered via conservative OHLC reachability.",
+            reasoning=(
+                "Canonical exit engine stop-loss triggered via "
+                "conservative OHLC reachability."
+            ),
             exit_reason="stop_loss",
             entry_batch=state.entry_batch or 1,
         )
 
     if partial_hit and partial_target is not None:
-        current_weight = pos.market_value / nav if nav else 0.0
-        target_weight = max(current_weight * (1.0 - policy.partial_take_profit_size), 0.0)
+        if pos.is_short:
+            current_weight = abs(pos.market_value) / nav if nav else 0.0
+            action = Action.COVER
+        else:
+            current_weight = pos.market_value / nav if nav else 0.0
+            action = Action.SELL
+        target_weight = max(
+            current_weight * (1.0 - policy.partial_take_profit_size), 0.0
+        )
         return TradeSignal(
             symbol=pos.symbol,
-            action=Action.SELL,
+            action=action,
             conviction=Conviction.HIGH,
             target_weight=round(target_weight, 4),
             stop_loss=pos.stop_loss,
             reasoning=(
-                "Canonical exit engine partial TP reached via conservative OHLC reachability "
+                "Canonical exit engine partial TP reached "
+                "via conservative OHLC reachability "
                 f"(+{policy.partial_take_profit_pct:.1%})."
             ),
             exit_reason="tp_partial",
@@ -604,9 +724,15 @@ def _evaluate_synthetic_exit_tier2(
         )
 
     if policy.uses_trailing_stop and state.partial_exit_taken:
-        observed_peak = max(state.peak_price, reachable_high)
-        trail_price = observed_peak * (1.0 - policy.trailing_stop_pct)
-        if reachable_low <= trail_price:
+        if pos.is_short:
+            observed_peak = min(state.peak_price, reachable_low)
+            trail_price = observed_peak * (1.0 + policy.trailing_stop_pct)
+            trailing_hit = reachable_high >= trail_price
+        else:
+            observed_peak = max(state.peak_price, reachable_high)
+            trail_price = observed_peak * (1.0 - policy.trailing_stop_pct)
+            trailing_hit = reachable_low <= trail_price
+        if trailing_hit:
             return TradeSignal(
                 symbol=pos.symbol,
                 action=Action.CLOSE,
@@ -614,7 +740,8 @@ def _evaluate_synthetic_exit_tier2(
                 target_weight=0.0,
                 stop_loss=0.0,
                 reasoning=(
-                    "Canonical exit engine trailing stop hit via conservative OHLC reachability "
+                    "Canonical exit engine trailing stop hit "
+                    "via conservative OHLC reachability "
                     f"({policy.trailing_stop_pct:.2%})."
                 ),
                 exit_reason="trailing_stop",
@@ -651,7 +778,8 @@ def _evaluate_synthetic_exit(
 def parse_eod_time(value: str) -> dt_time:
     parts = value.split(":")
     if len(parts) != 2:
-        raise ValueError("EOD time must be HH:MM")
+        msg = "EOD time must be HH:MM"
+        raise ValueError(msg)
     hour, minute = (int(part) for part in parts)
     return dt_time(hour=hour, minute=minute)
 

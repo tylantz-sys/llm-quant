@@ -10,7 +10,7 @@ from typing import Any
 
 import duckdb
 
-from llm_quant.brain.models import Action, Conviction, TradeSignal
+from llm_quant.brain.models import Action, TradeSignal
 from llm_quant.trading.portfolio import Portfolio
 
 logger = logging.getLogger(__name__)
@@ -76,21 +76,20 @@ def upsert_position_states(
     if not states:
         return
 
-    rows: list[list[Any]] = []
-    for state in states.values():
-        rows.append(
-            [
-                pod_id,
-                state.symbol,
-                state.entry_batch,
-                state.entry_price,
-                state.peak_price,
-                state.partial_exit_taken,
-                state.last_entry_ts,
-                state.last_exit_ts,
-                state.cooldown_until_ts,
-            ]
-        )
+    rows: list[list[Any]] = [
+        [
+            pod_id,
+            state.symbol,
+            state.entry_batch,
+            state.entry_price,
+            state.peak_price,
+            state.partial_exit_taken,
+            state.last_entry_ts,
+            state.last_exit_ts,
+            state.cooldown_until_ts,
+        ]
+        for state in states.values()
+    ]
 
     conn.executemany(
         """
@@ -106,7 +105,7 @@ def upsert_position_states(
 
 def apply_scale_in(
     signals: list[TradeSignal],
-    portfolio: Portfolio,
+    _portfolio: Portfolio,
     states: dict[str, IntradayPositionState],
     scale_in_tranches: int,
 ) -> list[TradeSignal]:
@@ -196,7 +195,9 @@ def merge_intraday_signals(
 ) -> list[TradeSignal]:
     """Merge intraday signals, prioritizing profit-taking exits."""
     exit_symbols = {
-        s.symbol for s in profit_signals if s.action in (Action.SELL, Action.CLOSE)
+        s.symbol
+        for s in profit_signals
+        if s.action in (Action.SELL, Action.COVER, Action.CLOSE)
     }
     filtered_entries = [s for s in entry_signals if s.symbol not in exit_symbols]
     return other_signals + profit_signals + filtered_entries
@@ -219,8 +220,7 @@ def update_peak_prices(
                 peak_price=price,
             )
             states[symbol] = state
-        if price > state.peak_price:
-            state.peak_price = price
+        state.peak_price = max(state.peak_price, price)
 
 
 def generate_profit_taking_signals(
@@ -296,13 +296,19 @@ def update_state_from_trades(
             state = IntradayPositionState(symbol=symbol)
             states[symbol] = state
 
-        if trade.action == "buy":
+        if trade.action in ("buy", "short"):
             state.entry_batch = max(state.entry_batch, trade.entry_batch)
             state.entry_price = trade.price
             state.last_entry_ts = now_ts
             state.partial_exit_taken = False
-            state.peak_price = max(state.peak_price, trade.price)
-        elif trade.action in ("sell", "close"):
+            if trade.action == "short":
+                if state.peak_price <= 0.0:
+                    state.peak_price = trade.price
+                else:
+                    state.peak_price = min(state.peak_price, trade.price)
+            else:
+                state.peak_price = max(state.peak_price, trade.price)
+        elif trade.action in ("sell", "cover", "close"):
             state.last_exit_ts = now_ts
             state.cooldown_until_ts = None
             if trade.exit_reason == partial_exit_reason:

@@ -8,14 +8,28 @@ def test_resolve_take_profit_pct() -> None:
     assert tp == 130.81
 
 
+def test_resolve_take_profit_pct_short() -> None:
+    limits = RiskLimits(take_profit_mode="pct", take_profit_pct=0.03)
+    tp = resolve_take_profit(127.0, 130.0, limits, is_short=True)
+    assert tp == 123.19
+
+
 def test_resolve_take_profit_rr() -> None:
     limits = RiskLimits(take_profit_mode="rr", take_profit_rr=2.0)
     tp = resolve_take_profit(127.0, 120.0, limits)
     assert tp == 141.0
 
 
+def test_resolve_take_profit_rr_short() -> None:
+    limits = RiskLimits(take_profit_mode="rr", take_profit_rr=2.0)
+    tp = resolve_take_profit(127.0, 130.0, limits, is_short=True)
+    assert tp == 121.0
+
+
 def test_bracket_prices_valid() -> None:
     assert bracket_prices_valid(127.0, 120.0, 130.0)
+    assert bracket_prices_valid(127.0, 130.0, 120.0, entry_side="sell")
     assert not bracket_prices_valid(127.0, 0.0, 130.0)
     assert not bracket_prices_valid(127.0, 120.0, 120.0)
     assert not bracket_prices_valid(127.0, 130.0, 129.0)
+    assert not bracket_prices_valid(127.0, 130.0, 128.0, entry_side="sell")

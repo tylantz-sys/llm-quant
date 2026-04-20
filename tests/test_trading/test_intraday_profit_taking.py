@@ -7,6 +7,7 @@ from llm_quant.trading.intraday import (
     apply_scale_in,
     generate_profit_taking_signals,
     merge_intraday_signals,
+    update_state_from_trades,
 )
 from llm_quant.trading.portfolio import Portfolio, Position
 
@@ -150,3 +151,76 @@ def test_merge_intraday_signals_prioritizes_profit_exits():
     merged = merge_intraday_signals(entry, other, profit)
     assert len(merged) == 1
     assert merged[0].action == Action.SELL
+
+
+def test_merge_intraday_signals_prioritizes_cover_profit_exits() -> None:
+    entry = [
+        TradeSignal(
+            symbol="SPY",
+            action=Action.SHORT,
+            conviction=Conviction.MEDIUM,
+            target_weight=0.2,
+            stop_loss=105.0,
+            reasoning="entry",
+        )
+    ]
+    profit = [
+        TradeSignal(
+            symbol="SPY",
+            action=Action.COVER,
+            conviction=Conviction.HIGH,
+            target_weight=0.1,
+            stop_loss=0.0,
+            reasoning="tp",
+            exit_reason="tp_partial",
+        )
+    ]
+
+    merged = merge_intraday_signals(entry, [], profit)
+    assert len(merged) == 1
+    assert merged[0].action == Action.COVER
+
+
+def test_update_state_from_trades_short_entry_sets_short_price_anchor():
+    now = datetime.now(tz=UTC)
+    states: dict[str, IntradayPositionState] = {}
+
+    class _Trade:
+        symbol = "SPY"
+        action = "short"
+        entry_batch = 1
+        price = 101.5
+        exit_reason = ""
+
+    update_state_from_trades(states, [_Trade()], now)
+
+    state = states["SPY"]
+    assert state.entry_price == 101.5
+    assert state.peak_price == 101.5
+    assert state.partial_exit_taken is False
+
+
+def test_update_state_from_trades_cover_partial_sets_partial_exit_flag():
+    now = datetime.now(tz=UTC)
+    states = {
+        "SPY": IntradayPositionState(
+            symbol="SPY",
+            entry_batch=1,
+            entry_price=100.0,
+            peak_price=98.0,
+            partial_exit_taken=False,
+        )
+    }
+
+    class _Trade:
+        symbol = "SPY"
+        action = "cover"
+        entry_batch = 1
+        price = 98.0
+        exit_reason = "tp_partial"
+
+    update_state_from_trades(states, [_Trade()], now)
+
+    state = states["SPY"]
+    assert state.partial_exit_taken is True
+    assert state.last_exit_ts == now

@@ -472,7 +472,9 @@ def compute_strategy_performance(
     if not rows:
         return []
 
-    lots: dict[tuple[str, str], list[list[float]]] = {}
+    # Two separate FIFO lot queues per (strategy, symbol): long and short.
+    long_lots: dict[tuple[str, str], list[list[float]]] = {}
+    short_lots: dict[tuple[str, str], list[list[float]]] = {}
     stats: dict[str, dict[str, float]] = {}
 
     def _stat_bucket(strategy: str) -> dict[str, float]:
@@ -485,6 +487,40 @@ def compute_strategy_performance(
             }
         return stats[strategy]
 
+    def _match_lots(
+        queue: list[list[float]],
+        qty: float,
+        exit_price: float,
+        *,
+        is_short: bool,
+        bucket: dict[str, float],
+    ) -> None:
+        """FIFO lot matching for long exits (sell/close) and short exits (cover).
+
+        For long exits: PnL = (exit_price - entry_price) * qty
+        For short exits: PnL = (entry_price - exit_price) * qty
+        """
+        remaining = qty
+        while remaining > 0 and queue:
+            lot_qty, lot_price = queue[0]
+            matched = min(remaining, lot_qty)
+            if is_short:
+                pnl = (lot_price - exit_price) * matched
+            else:
+                pnl = (exit_price - lot_price) * matched
+            bucket["realized_pnl"] += pnl
+            bucket["trades"] += 1
+            if pnl > 0:
+                bucket["wins"] += 1
+            else:
+                bucket["losses"] += 1
+            lot_qty -= matched
+            remaining -= matched
+            if lot_qty <= 0:
+                queue.pop(0)
+            else:
+                queue[0][0] = lot_qty
+
     for row in rows:
         _, _, symbol, action, shares, price, strategy_id = row
         strategy = strategy_id or "unattributed"
@@ -493,36 +529,30 @@ def compute_strategy_performance(
             continue
 
         key = (strategy, symbol)
-        if action == "buy":
-            lots.setdefault(key, []).append([qty, float(price)])
+        px = float(price)
+        act = str(action).lower() if action else ""
+
+        if act == "buy":
+            long_lots.setdefault(key, []).append([qty, px])
             continue
 
-        if action not in {"sell", "close"}:
+        if act == "short":
+            short_lots.setdefault(key, []).append([qty, px])
             continue
 
-        queue = lots.setdefault(key, [])
-        if not queue:
+        if act in {"sell", "close"}:
+            queue = long_lots.setdefault(key, [])
+            if not queue:
+                continue
+            _match_lots(queue, qty, px, is_short=False, bucket=_stat_bucket(strategy))
             continue
 
-        remaining = qty
-        while remaining > 0 and queue:
-            lot_qty, lot_price = queue[0]
-            matched = min(remaining, lot_qty)
-            pnl = (float(price) - lot_price) * matched
-            bucket = _stat_bucket(strategy)
-            bucket["realized_pnl"] += pnl
-            bucket["trades"] += 1
-            if pnl > 0:
-                bucket["wins"] += 1
-            else:
-                bucket["losses"] += 1
-
-            lot_qty -= matched
-            remaining -= matched
-            if lot_qty <= 0:
-                queue.pop(0)
-            else:
-                queue[0][0] = lot_qty
+        if act == "cover":
+            queue = short_lots.setdefault(key, [])
+            if not queue:
+                continue
+            _match_lots(queue, qty, px, is_short=True, bucket=_stat_bucket(strategy))
+            continue
 
     results: list[dict] = []
     for strategy, bucket in stats.items():

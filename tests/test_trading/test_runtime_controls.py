@@ -135,3 +135,64 @@ def test_filter_signals_by_asset_class():
     assert dropped == 1
     assert len(filtered) == 1
     assert filtered[0].symbol == "USO"
+
+
+def test_compute_recent_realized_expectancy_short_profitable(tmp_db):
+    # Short 10 @ 100, cover 10 @ 90 → PnL = +100. Expectancy should be +100.
+    conn = tmp_db
+    conn.execute(
+        """
+        INSERT INTO trades
+        (trade_id, date, pod_id, symbol, action, shares, price, notional)
+        VALUES
+        (1, DATE '2026-01-01', 'default', 'SPY', 'short', 10, 100, 1000),
+        (2, DATE '2026-01-02', 'default', 'SPY', 'cover', 10, 90,   900)
+        """
+    )
+    expectancy, sample_size = compute_recent_realized_expectancy(
+        conn, pod_id="default", lookback_closed_trades=10
+    )
+    assert sample_size == 1
+    assert expectancy == 100.0
+
+
+def test_compute_recent_realized_expectancy_short_losing(tmp_db):
+    # Short 10 @ 100, cover 10 @ 110 → PnL = -100. Expectancy should be -100.
+    conn = tmp_db
+    conn.execute(
+        """
+        INSERT INTO trades
+        (trade_id, date, pod_id, symbol, action, shares, price, notional)
+        VALUES
+        (1, DATE '2026-01-01', 'default', 'SPY', 'short', 10, 100, 1000),
+        (2, DATE '2026-01-02', 'default', 'SPY', 'cover', 10, 110, 1100)
+        """
+    )
+    expectancy, sample_size = compute_recent_realized_expectancy(
+        conn, pod_id="default", lookback_closed_trades=10
+    )
+    assert sample_size == 1
+    assert expectancy == -100.0
+
+
+def test_compute_recent_realized_expectancy_mixed_long_short(tmp_db):
+    # Long: buy 1 @ 100, sell 1 @ 110 → +10
+    # Short: short 1 @ 200, cover 1 @ 180 → +20
+    # Expectancy = (10 + 20) / 2 = 15
+    conn = tmp_db
+    conn.execute(
+        """
+        INSERT INTO trades
+        (trade_id, date, pod_id, symbol, action, shares, price, notional)
+        VALUES
+        (1, DATE '2026-01-01', 'default', 'SPY', 'buy',   1, 100, 100),
+        (2, DATE '2026-01-02', 'default', 'SPY', 'sell',  1, 110, 110),
+        (3, DATE '2026-01-03', 'default', 'QQQ', 'short', 1, 200, 200),
+        (4, DATE '2026-01-04', 'default', 'QQQ', 'cover', 1, 180, 180)
+        """
+    )
+    expectancy, sample_size = compute_recent_realized_expectancy(
+        conn, pod_id="default", lookback_closed_trades=10
+    )
+    assert sample_size == 2
+    assert expectancy == 15.0

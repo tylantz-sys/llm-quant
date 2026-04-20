@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Any
@@ -125,6 +126,77 @@ def _get_alpaca_account() -> dict[str, float | str]:
     return client.get_account()
 
 
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        numeric_map = {0: False, 1: True}
+        if value in numeric_map:
+            return numeric_map[int(value)]
+        return None
+
+    text = str(value).strip().lower()
+    bool_map = {
+        "true": True,
+        "1": True,
+        "yes": True,
+        "y": True,
+        "on": True,
+        "false": False,
+        "0": False,
+        "no": False,
+        "n": False,
+        "off": False,
+    }
+    if text in bool_map:
+        return bool_map[text]
+    return None
+
+
+def _build_alpaca_locate_lookup(client: Any) -> Callable[[str], bool | None]:
+    cache: dict[str, bool | None] = {}
+
+    def lookup(symbol: str) -> bool | None:
+        normalized = str(symbol or "").upper()
+        if not normalized:
+            return None
+        if normalized in cache:
+            return cache[normalized]
+
+        try:
+            asset = client.get_asset(normalized)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Alpaca asset locate lookup failed for %s: %s",
+                normalized,
+                exc,
+            )
+            cache[normalized] = None
+            return None
+
+        shortable = _coerce_optional_bool(
+            asset.get("shortable") if isinstance(asset, dict) else None
+        )
+        easy_to_borrow = _coerce_optional_bool(
+            asset.get("easy_to_borrow") if isinstance(asset, dict) else None
+        )
+
+        if shortable is False:
+            cache[normalized] = False
+        elif easy_to_borrow is not None:
+            cache[normalized] = easy_to_borrow
+        elif shortable is True:
+            cache[normalized] = True
+        else:
+            cache[normalized] = None
+
+        return cache[normalized]
+
+    return lookup
+
+
 def _overlay_auth_present() -> bool:
     return bool(os.getenv("ANTHROPIC_API_KEY"))
 
@@ -168,7 +240,11 @@ def _sync_live_alpaca_positions(portfolio: Any) -> int:
         return 0
 
     broker_symbols = {
-        _normalize_symbol(str(p.get("symbol", "") if isinstance(p, dict) else getattr(p, "symbol", "")))
+        _normalize_symbol(
+            str(
+                p.get("symbol", "") if isinstance(p, dict) else getattr(p, "symbol", "")
+            )
+        )
         for p in broker_positions
     }
 
@@ -183,7 +259,10 @@ def _sync_live_alpaca_positions(portfolio: Any) -> int:
         if _normalize_symbol(str(symbol)) not in broker_symbols:
             # Position was closed at Alpaca (stop-loss / take-profit / manual) between runs.
             # Recover cash using last known price so NAV stays consistent.
-            price = float(getattr(position, "current_price", None) or getattr(position, "avg_cost", 0.0))
+            price = float(
+                getattr(position, "current_price", None)
+                or getattr(position, "avg_cost", 0.0)
+            )
             proceeds = shares * price
             portfolio.cash += proceeds
             del portfolio.positions[symbol]
@@ -194,7 +273,9 @@ def _sync_live_alpaca_positions(portfolio: Any) -> int:
             closed += 1
 
     if closed:
-        console.print(f"  [green]OK[/green] Synced {closed} position(s) closed at Alpaca between runs")
+        console.print(
+            f"  [green]OK[/green] Synced {closed} position(s) closed at Alpaca between runs"
+        )
     return closed
 
 
@@ -486,6 +567,7 @@ def _run_single_pod(
         persist_reconciliation_snapshot,
         save_portfolio_snapshot,
     )
+
     alpaca_client = None
     from llm_quant.trading.portfolio import Portfolio
     from llm_quant.broker.executor import (
@@ -572,9 +654,9 @@ def _run_single_pod(
             str(asset_class).lower()
             for asset_class in (config.execution.asset_class_filter or [])
         }
-        uses_crypto_only_runtime = bool(asset_class_filters) and asset_class_filters <= {
-            "crypto"
-        }
+        uses_crypto_only_runtime = bool(
+            asset_class_filters
+        ) and asset_class_filters <= {"crypto"}
         if uses_crypto_only_runtime:
             console.print(
                 "[yellow]Crypto-only intraday pod detected — skipping equities RTH clock guard.[/yellow]"
@@ -589,7 +671,9 @@ def _run_single_pod(
                             "[yellow]RTH closed — logging decisions only.[/yellow]"
                         )
                     else:
-                        console.print("[yellow]RTH closed — skipped intraday run.[/yellow]")
+                        console.print(
+                            "[yellow]RTH closed — skipped intraday run.[/yellow]"
+                        )
                         conn.close()
                         if global_lock:
                             global_lock.release()
@@ -613,9 +697,7 @@ def _run_single_pod(
     overlay_required_symbols: list[str] = []
     if use_strategy_overlay:
         # Pre-fetch promoted symbols so overlay has the required intraday inputs.
-        overlay_required_symbols = required_symbols(
-            load_specs_for_set(strategy_set)
-        )
+        overlay_required_symbols = required_symbols(load_specs_for_set(strategy_set))
 
     symbols = get_tradeable_symbols(
         config,
@@ -787,9 +869,7 @@ def _run_single_pod(
         f" | Positions: {len(portfolio.positions)}"
     )
     if live_account_context is not None:
-        console.print(
-            f"  Live Alpaca Equity: ${live_account_context['equity']:,.2f}"
-        )
+        console.print(f"  Live Alpaca Equity: ${live_account_context['equity']:,.2f}")
     console.print(
         f"  Peak NAV: ${peak_nav:,.2f} | Drawdown: {current_drawdown_pct:.2f}%"
     )
@@ -843,9 +923,12 @@ def _run_single_pod(
         # Pre-filter strategy_symbols by symbol_exclude so excluded symbols are never
         # fetched as market data or passed to intraday freshness checks.
         if config.execution.symbol_exclude:
-            _excluded_norm = {_normalize_symbol(s) for s in config.execution.symbol_exclude}
+            _excluded_norm = {
+                _normalize_symbol(s) for s in config.execution.symbol_exclude
+            }
             strategy_symbols = [
-                s for s in strategy_symbols
+                s
+                for s in strategy_symbols
                 if _normalize_symbol(s) not in _excluded_norm
             ]
 
@@ -959,9 +1042,8 @@ def _run_single_pod(
                 )
                 governor_audit.update(overlay_audit)
                 if fallback_required:
-                    fallback_reason = (
-                        "strict governor policy violation: "
-                        + ", ".join(overlay_audit.get("policy_violations", []))
+                    fallback_reason = "strict governor policy violation: " + ", ".join(
+                        overlay_audit.get("policy_violations", [])
                     )
                     decision = fallback_governor_decision(
                         context=context,
@@ -1045,10 +1127,14 @@ def _run_single_pod(
 
     # Filter out any symbols explicitly excluded from this pod's execution universe
     if config.execution.symbol_exclude:
-        excluded_set = {s.upper().replace("-", "").replace("/", "") for s in config.execution.symbol_exclude}
+        excluded_set = {
+            s.upper().replace("-", "").replace("/", "")
+            for s in config.execution.symbol_exclude
+        }
         before = len(decision.signals)
         decision.signals = [
-            sig for sig in decision.signals
+            sig
+            for sig in decision.signals
             if sig.symbol.upper().replace("-", "").replace("/", "") not in excluded_set
         ]
         dropped = before - len(decision.signals)
@@ -1096,7 +1182,9 @@ def _run_single_pod(
     signals = signals
     context_payload = None
     now_ts = None
-    order_states: dict = {}  # populated early below if intraday_use_oco; reused in OCO section
+    order_states: dict = (
+        {}
+    )  # populated early below if intraday_use_oco; reused in OCO section
     if config.execution.intraday_enabled:
         now_row = conn.execute(
             "SELECT MAX(timestamp) FROM market_data_intraday"
@@ -1110,13 +1198,13 @@ def _run_single_pod(
         # Do NOT gate on alpaca_client here — it isn't created until line ~1335.
         # DB-only read; safe to do even before broker client is instantiated.
         order_states = (
-            load_order_states(conn, pod_id)
-            if config.execution.intraday_use_oco
-            else {}
+            load_order_states(conn, pod_id) if config.execution.intraday_use_oco else {}
         )
 
         entry_signals = [s for s in signals if s.action in {Action.BUY, Action.SHORT}]
-        other_signals = [s for s in signals if s.action not in {Action.BUY, Action.SHORT}]
+        other_signals = [
+            s for s in signals if s.action not in {Action.BUY, Action.SHORT}
+        ]
 
         entry_signals = apply_scale_in(
             entry_signals,
@@ -1137,17 +1225,23 @@ def _run_single_pod(
         # the full position qty. Normalize symbols (strip /- separators) before comparing
         # since DB may store "XRP/USD" while signals use "XRP-USD".
         if order_states:
+
             def _norm_sym(s: str) -> str:
                 return s.replace("/", "").replace("-", "").upper()
 
             _protected_normalized = {
                 _norm_sym(sym)
                 for sym, st in order_states.items()
-                if st.oco_stop_order_id and st.stop_status not in ("filled", "cancelled", "expired", "rejected")
+                if st.oco_stop_order_id
+                and st.stop_status not in ("filled", "cancelled", "expired", "rejected")
             }
             if _protected_normalized:
                 before_prot = len(entry_signals)
-                entry_signals = [s for s in entry_signals if _norm_sym(s.symbol) not in _protected_normalized]
+                entry_signals = [
+                    s
+                    for s in entry_signals
+                    if _norm_sym(s.symbol) not in _protected_normalized
+                ]
                 if len(entry_signals) < before_prot:
                     console.print(
                         f"[yellow]WARN[/yellow] Blocked {before_prot - len(entry_signals)} BUY signal(s): "
@@ -1161,9 +1255,10 @@ def _run_single_pod(
             exit_policy,
             exit_runtime,
         )
-        if any(
-            item.unprotected for item in exit_telemetry
-        ) and exit_policy.fail_on_unprotected_exits:
+        if (
+            any(item.unprotected for item in exit_telemetry)
+            and exit_policy.fail_on_unprotected_exits
+        ):
             console.print(
                 "[red]FAIL[/red] Canonical exit engine detected unprotected live position(s)."
             )
@@ -1209,7 +1304,9 @@ def _run_single_pod(
                     convert_exit_to_orders(
                         status,
                         status.remaining_qty,
-                        allow_fractional=asset_class_map.get(status.symbol, "equity").lower()
+                        allow_fractional=asset_class_map.get(
+                            status.symbol, "equity"
+                        ).lower()
                         == "crypto",
                     )
                 )
@@ -1218,7 +1315,9 @@ def _run_single_pod(
                     try:
                         alpaca_client = AlpacaClient.from_env()
                     except AlpacaError as exc:
-                        console.print(f"[red]FAIL[/red] Alpaca client init failed: {exc}")
+                        console.print(
+                            f"[red]FAIL[/red] Alpaca client init failed: {exc}"
+                        )
                         conn.close()
                         _release_runtime_locks(global_lock, run_lock)
                         raise typer.Exit(1) from exc
@@ -1273,9 +1372,7 @@ def _run_single_pod(
         }
         if use_strategy_overlay:
             context_payload["selected_strategies"] = (
-                selected_ids
-                if selected_ids
-                else [spec.slug for spec in selected_specs]
+                selected_ids if selected_ids else [spec.slug for spec in selected_specs]
             )
 
     expectancy_value = None
@@ -1347,7 +1444,27 @@ def _run_single_pod(
         }
         log_intraday_context(conn, pod_id, now_ts, context_payload)
 
-    approved, rejected = risk_mgr.filter_signals(signals, portfolio, prices)
+    locate_lookup = None
+    if broker.lower() == "alpaca" and getattr(config.risk, "require_locate", False):
+        if alpaca_client is None:
+            try:
+                alpaca_client = AlpacaClient.from_env()
+            except AlpacaError as exc:
+                console.print(f"[red]FAIL[/red] Alpaca client init failed: {exc}")
+                conn.close()
+                if global_lock:
+                    global_lock.release()
+                if run_lock:
+                    run_lock.release()
+                raise typer.Exit(1) from exc
+        locate_lookup = _build_alpaca_locate_lookup(alpaca_client)
+
+    approved, rejected = risk_mgr.filter_signals(
+        signals,
+        portfolio,
+        prices,
+        locate_lookup=locate_lookup,
+    )
 
     if rejected:
         console.print(
@@ -1540,8 +1657,7 @@ def _run_single_pod(
         try:
             raw_positions = alpaca_client.list_positions()
             positions = {
-                p.get("symbol", ""): float(p.get("qty", 0.0))
-                for p in raw_positions
+                p.get("symbol", ""): float(p.get("qty", 0.0)) for p in raw_positions
             }
             asset_class_map = {
                 p.get("symbol", ""): p.get("asset_class", "us_equity")
@@ -1651,9 +1767,11 @@ def _run_single_pod(
         pod_id=pod_id,
         snapshot_date=today,
         snapshot={
-            "intraday_position_state": context_payload.get("exit_engine", {}).get("positions", {})
-            if context_payload
-            else {},
+            "intraday_position_state": (
+                context_payload.get("exit_engine", {}).get("positions", {})
+                if context_payload
+                else {}
+            ),
             "order_state": {},
             "lifecycle_state": {},
             "exit_policy_state": exit_policy_state,
@@ -2101,7 +2219,11 @@ def status(
         for sym, pos in sorted(active_positions.items()):
             pnl_color = "green" if pos.unrealized_pnl >= 0 else "red"
             weight = pos.market_value / portfolio.nav * 100
-            share_fmt = f"{pos.shares:.6f}" if abs(pos.shares - round(pos.shares)) > 1e-8 else f"{pos.shares:.0f}"
+            share_fmt = (
+                f"{pos.shares:.6f}"
+                if abs(pos.shares - round(pos.shares)) > 1e-8
+                else f"{pos.shares:.0f}"
+            )
             table.add_row(
                 sym,
                 share_fmt,
@@ -2183,7 +2305,9 @@ def trades(
     for t in recent:
         a_color = action_colors.get(t.get("action", "").lower(), "white")
         shares = float(t.get("shares", 0) or 0.0)
-        share_fmt = f"{shares:.6f}" if abs(shares - round(shares)) > 1e-8 else f"{shares:.0f}"
+        share_fmt = (
+            f"{shares:.6f}" if abs(shares - round(shares)) > 1e-8 else f"{shares:.0f}"
+        )
         table.add_row(
             str(t.get("trade_id", "")),
             str(t.get("date", "")),

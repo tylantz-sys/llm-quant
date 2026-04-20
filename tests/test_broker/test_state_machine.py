@@ -220,3 +220,54 @@ def test_advance_to_closed_sets_terminal_state() -> None:
     assert closed.is_flat is True
     assert closed.has_open_position is False
     assert closed.exit_order_id == "exit-1"
+
+
+def test_snapshot_from_broker_state_marks_entry_short_as_short() -> None:
+    snapshot = snapshot_from_broker_state(
+        symbol="SPY",
+        entry_order_id="short-1",
+        entry_status="filled",
+        entry_filled_qty=5,
+        position_qty=-5,
+        entry_intent_type="entry_short",
+        has_exit_orders=True,
+        exit_statuses=["new"],
+    )
+
+    assert snapshot.is_short is True
+
+
+def test_snapshot_from_broker_state_marks_entry_as_long() -> None:
+    snapshot = snapshot_from_broker_state(
+        symbol="SPY",
+        entry_order_id="entry-1",
+        entry_status="filled",
+        entry_filled_qty=5,
+        position_qty=5,
+        entry_intent_type="entry",
+        has_exit_orders=True,
+        exit_statuses=["new"],
+    )
+
+    assert snapshot.is_short is False
+
+
+def test_direction_is_preserved_across_lifecycle_transitions_for_short() -> None:
+    snapshot = snapshot_from_broker_state(
+        symbol="SPY",
+        entry_order_id="short-1",
+        entry_status="filled",
+        entry_filled_qty=5,
+        position_qty=-5,
+        entry_intent_type="entry_short",
+    )
+
+    bracket = advance_to_bracket_attached(snapshot)
+    monitoring = advance_to_active_monitoring(bracket)
+    exit_pending = advance_to_exit_pending(monitoring, exit_order_id="cover-1")
+    closed = advance_to_closed(exit_pending, exit_order_id="cover-1")
+
+    assert bracket.is_short is True
+    assert monitoring.is_short is True
+    assert exit_pending.is_short is True
+    assert closed.is_short is True

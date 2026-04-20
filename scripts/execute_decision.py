@@ -40,6 +40,7 @@ from llm_quant.config import load_config_for_pod
 from llm_quant.db.schema import get_connection
 from llm_quant.risk.basket import normalize_crypto_basket_weights
 from llm_quant.risk.manager import RiskManager
+from llm_quant.surveillance.scanner import SurveillanceScanner
 from llm_quant.trading.executor import execute_signals
 from llm_quant.trading.exits import (
     build_exit_policy,
@@ -50,6 +51,7 @@ from llm_quant.trading.exits import (
 from llm_quant.trading.ledger import log_trades, save_portfolio_snapshot
 from llm_quant.trading.portfolio import Portfolio
 from llm_quant.trading.runtime_controls import (
+    apply_entry_halt_freeze,
     apply_harvest_governance_controls,
     load_latest_harvest_governance_result,
     log_harvest_governance_action,
@@ -124,6 +126,8 @@ def _build_summary(
     exit_policy: object,
     exit_runtime: object,
     runtime_result: object,
+    surveillance_status: dict,
+    short_rollout_freeze_blocked: list[dict[str, str]],
     approved: list,
     rejected: list,
     executed: list,
@@ -146,6 +150,14 @@ def _build_summary(
             "exit_engine_signals": len(exit_signals),
             "total_signals_after_exit_merge": len(all_signals),
             "total_signals_after_governance": len(governed_signals),
+            "total_signals_after_short_rollout_freeze": (
+                len(governed_signals) - len(short_rollout_freeze_blocked)
+            ),
+        },
+        "surveillance": surveillance_status,
+        "short_rollout_freeze": {
+            "active": bool(short_rollout_freeze_blocked),
+            "blocked_signals": short_rollout_freeze_blocked,
         },
         "exit_engine": build_exit_telemetry_payload(
             exit_telemetry, exit_policy, exit_runtime
@@ -198,7 +210,7 @@ def _build_summary(
     }
 
 
-def main() -> None:  # noqa: PLR0912, PLR0915 — orchestration entry point; decomposing further adds no clarity
+def main():  # noqa: PLR0912, PLR0915 — orchestration entry point; decomposing further adds no clarity
     parser = argparse.ArgumentParser(description="Execute trading decision")
     parser.add_argument("--pod", default="default", help="Pod ID to execute for")
     parser.add_argument(
@@ -301,17 +313,58 @@ def main() -> None:  # noqa: PLR0912, PLR0915 — orchestration entry point; dec
             config=config,
             pod_id=pod_id,
         )
+
+        surveillance_status = {
+            "overall_severity": "ok",
+            "halts": 0,
+            "warnings": 0,
+            "halt_details": [],
+            "warning_details": [],
+        }
+        short_rollout_freeze_blocked: list[dict[str, str]] = []
+        halt_detectors: set[str] = set()
+        try:
+            scanner = SurveillanceScanner(config)
+            report = scanner.run_full_scan(conn)
+            scanner.persist_scan(conn, report)
+            surveillance_status = {
+                "overall_severity": report.overall_severity.value,
+                "halts": len(report.halt_checks),
+                "warnings": len(report.warning_checks),
+                "halt_details": [
+                    {"detector": c.detector, "message": c.message}
+                    for c in report.halt_checks
+                ],
+                "warning_details": [
+                    {"detector": c.detector, "message": c.message}
+                    for c in report.warning_checks
+                ],
+            }
+            halt_detectors = {c.detector for c in report.halt_checks}
+        except Exception as exc:
+            logger.warning("Surveillance scan failed in execute_decision: %s", exc)
+
         all_signals = exit_signals + decision.signals
         governed_signals = apply_harvest_governance_controls(
             all_signals,
             runtime_result,
             portfolio_symbols=set(portfolio.positions.keys()),
         )
-        log_harvest_governance_action(
-            conn,
-            pod_id=pod_id,
-            runtime_result=runtime_result,
-        ) if not dry_run else None
+        governed_signals, short_rollout_freeze_blocked = apply_entry_halt_freeze(
+            governed_signals,
+            halt_detectors,
+            entry_freeze_mode=config.governance.halt_policy.entry_freeze_mode,
+            entry_freeze_detectors=config.governance.halt_policy.entry_freeze_detectors,
+        )
+        (
+            log_harvest_governance_action(
+                conn,
+                pod_id=pod_id,
+                runtime_result=runtime_result,
+            )
+            if not dry_run
+            else None
+        )
 
         # Risk filter
         risk_mgr = RiskManager(config)
@@ -321,7 +374,9 @@ def main() -> None:  # noqa: PLR0912, PLR0915 — orchestration entry point; dec
 
         # Enforce crypto basket equal-weight sizing — clamp BUY crypto target_weights
         # to crypto_basket_target_weight so all basket constituents get flat allocation.
-        approved = normalize_crypto_basket_weights(approved, config.risk, asset_class_map)
+        approved = normalize_crypto_basket_weights(
+            approved, config.risk, asset_class_map
+        )
 
         # Dry-run: output preview and stop — no DB writes, no Alpaca calls
         if dry_run:
@@ -331,8 +386,13 @@ def main() -> None:  # noqa: PLR0912, PLR0915 — orchestration entry point; dec
                 "date": str(today),
                 "signals_received": len(decision.signals),
                 "signals_after_governance": len(governed_signals),
+                "signals_blocked_short_rollout_freeze": len(
+                    short_rollout_freeze_blocked
+                ),
+                "surveillance": surveillance_status,
                 "signals_approved": len(approved),
                 "signals_rejected": len(rejected),
+                "short_rollout_freeze_blocked": short_rollout_freeze_blocked,
                 "approved_signals": [
                     {
                         "symbol": s.symbol,
@@ -417,6 +477,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915 — orchestration entry point; dec
             exit_policy=exit_policy,
             exit_runtime=exit_runtime,
             runtime_result=runtime_result,
+            surveillance_status=surveillance_status,
+            short_rollout_freeze_blocked=short_rollout_freeze_blocked,
             approved=approved,
             rejected=rejected,
             executed=executed,

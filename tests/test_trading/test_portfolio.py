@@ -1,5 +1,8 @@
 """Tests for portfolio state management."""
 
+from datetime import date
+
+from llm_quant.trading.ledger import save_portfolio_snapshot
 from llm_quant.trading.portfolio import Portfolio, Position
 
 
@@ -104,3 +107,25 @@ def test_apply_broker_fill_sell_short_and_buy_to_cover() -> None:
 
     assert portfolio.cash == 1_020.0
     assert "SPY" not in portfolio.positions
+
+
+def test_from_db_restores_short_proceeds_metadata(tmp_db) -> None:
+    portfolio = Portfolio(initial_capital=1_000.0)
+    portfolio.cash = 1_200.0
+    portfolio.positions = {
+        "SPY": Position(
+            symbol="SPY",
+            shares=-2.0,
+            avg_cost=100.0,
+            current_price=95.0,
+            stop_loss=105.0,
+            short_proceeds=200.0,
+        )
+    }
+
+    save_portfolio_snapshot(tmp_db, portfolio, date(2026, 4, 19))
+
+    restored = Portfolio.from_db(tmp_db, initial_capital=1_000.0)
+    assert "SPY" in restored.positions
+    assert restored.positions["SPY"].shares == -2.0
+    assert restored.positions["SPY"].short_proceeds == 200.0

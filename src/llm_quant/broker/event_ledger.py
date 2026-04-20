@@ -11,6 +11,7 @@ from typing import Any
 import duckdb
 
 from llm_quant.broker.exceptions import CausalIntegrityError, OrderingError
+from llm_quant.db.schema import ensure_broker_event_ledger_schema
 
 
 class BrokerEventType(StrEnum):
@@ -205,86 +206,6 @@ def _coerce_event(event: BrokerLedgerEvent | dict[str, Any]) -> BrokerLedgerEven
         event_chain_id=str(event_chain_id),
         parent_event_order_id=payload.get("parent_event_order_id"),
     )
-
-
-def _ensure_event_ledger_table(conn: duckdb.DuckDBPyConnection) -> None:
-    conn.execute(
-        """
-        CREATE SEQUENCE IF NOT EXISTS broker_event_ledger_seq START 1
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS broker_event_ledger (
-            event_id BIGINT PRIMARY KEY DEFAULT nextval('broker_event_ledger_seq'),
-            pod_id VARCHAR NOT NULL DEFAULT 'default',
-            order_id VARCHAR NOT NULL,
-            event_type VARCHAR NOT NULL,
-            symbol VARCHAR NOT NULL,
-            side VARCHAR,
-            qty DOUBLE NOT NULL DEFAULT 0,
-            price DOUBLE,
-            event_time TIMESTAMP NOT NULL,
-            sequence_id BIGINT,
-            parent_order_id VARCHAR,
-            intent_type VARCHAR,
-            exit_reason VARCHAR,
-            metadata_json TEXT,
-            event_chain_id VARCHAR,
-            parent_event_order_id VARCHAR,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    columns = {
-        row[1]
-        for row in conn.execute("PRAGMA table_info('broker_event_ledger')").fetchall()
-    }
-    if "sequence_id" not in columns:
-        conn.execute("ALTER TABLE broker_event_ledger ADD COLUMN sequence_id BIGINT")
-    if "event_chain_id" not in columns:
-        conn.execute("ALTER TABLE broker_event_ledger ADD COLUMN event_chain_id VARCHAR")
-    if "parent_event_order_id" not in columns:
-        conn.execute("ALTER TABLE broker_event_ledger ADD COLUMN parent_event_order_id VARCHAR")
-    conn.execute(
-        """
-        UPDATE broker_event_ledger
-        SET sequence_id = event_id
-        WHERE sequence_id IS NULL
-        """
-    )
-    conn.execute(
-        """
-        UPDATE broker_event_ledger
-        SET event_chain_id = COALESCE(NULLIF(event_chain_id, ''), NULLIF(parent_order_id, ''), order_id)
-        WHERE event_chain_id IS NULL OR event_chain_id = ''
-        """
-    )
-    conn.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_broker_event_ledger_pod_sequence
-            ON broker_event_ledger (pod_id, sequence_id)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_broker_event_ledger_order_time
-            ON broker_event_ledger (pod_id, order_id, event_time, sequence_id)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_broker_event_ledger_symbol_time
-            ON broker_event_ledger (pod_id, symbol, event_time, sequence_id)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_broker_event_ledger_chain
-            ON broker_event_ledger (pod_id, event_chain_id, event_time, sequence_id)
-        """
-    )
-    conn.commit()
 
 
 def _next_sequence_id(
@@ -568,7 +489,7 @@ def append_event(
     event: BrokerLedgerEvent | dict[str, Any],
 ) -> BrokerLedgerEvent:
     """Append a new immutable broker event to the ledger."""
-    _ensure_event_ledger_table(conn)
+    ensure_broker_event_ledger_schema(conn)
     normalized = _validate_event_causality(conn, normalized=_coerce_event(event))
     if not normalized.order_id:
         raise ValueError("event order_id is required")
@@ -658,7 +579,7 @@ def get_events_for_order(
     pod_id: str = "default",
 ) -> list[BrokerLedgerEvent]:
     """Return immutable event history for a broker order."""
-    _ensure_event_ledger_table(conn)
+    ensure_broker_event_ledger_schema(conn)
     rows = conn.execute(
         """
         SELECT order_id, event_type, symbol, side, qty, price, event_time,
@@ -679,7 +600,7 @@ def ledger_ordering_digest(
     *,
     pod_id: str = "default",
 ) -> list[LedgerOrderingDigest]:
-    _ensure_event_ledger_table(conn)
+    ensure_broker_event_ledger_schema(conn)
     rows = conn.execute(
         """
         SELECT event_id, event_time, sequence_id, order_id, event_type, symbol, side, qty,
@@ -719,7 +640,7 @@ def validate_event_causal_closure(
     *,
     pod_id: str = "default",
 ) -> LedgerCausalValidationResult:
-    _ensure_event_ledger_table(conn)
+    ensure_broker_event_ledger_schema(conn)
     rows = conn.execute(
         """
         SELECT order_id, event_type, symbol, side, qty, price, event_time,
@@ -855,7 +776,7 @@ def rebuild_position_state_from_events(
     pod_id: str = "default",
 ) -> dict[str, RebuiltPositionState]:
     """Rebuild per-symbol position state by replaying immutable broker events."""
-    _ensure_event_ledger_table(conn)
+    ensure_broker_event_ledger_schema(conn)
     _validate_replay_sequence_order(conn, pod_id=pod_id)
     validate_event_causal_closure(conn, pod_id=pod_id)
     rows = conn.execute(

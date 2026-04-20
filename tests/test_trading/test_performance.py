@@ -4,7 +4,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from llm_quant.trading.performance import compute_performance
+from llm_quant.trading.performance import compute_performance, compute_strategy_performance
 
 
 def _insert_snapshots(
@@ -380,3 +380,121 @@ class TestBackwardCompatibility:
             "worst_positions",
         }
         assert new_keys.issubset(metrics.keys())
+
+
+def _insert_trade(
+    conn,
+    trade_id: int,
+    symbol: str,
+    action: str,
+    shares: float,
+    price: float,
+    strategy_id: str = "test-strat",
+    pod_id: str = "default",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO trades
+            (trade_id, date, pod_id, symbol, action, shares, price, notional, strategy_id)
+        VALUES (?, DATE '2026-01-01', ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [trade_id, pod_id, symbol, action, shares, price, shares * price, strategy_id],
+    )
+
+
+class TestComputeStrategyPerformanceShorts:
+    """Realized PnL attribution for short→cover trade pairs."""
+
+    def test_short_profitable_cover_below_entry(self, tmp_db):
+        # Short 10 @ 100, cover 10 @ 90 → PnL = (100 - 90) * 10 = +100
+        _insert_trade(tmp_db, 1, "SPY", "short", 10, 100.0)
+        _insert_trade(tmp_db, 2, "SPY", "cover", 10, 90.0)
+
+        results = compute_strategy_performance(tmp_db)
+        assert len(results) == 1
+        assert results[0]["realized_pnl"] == 100.0
+        assert results[0]["trades"] == 1
+        assert results[0]["wins"] == 1
+        assert results[0]["losses"] == 0
+        assert results[0]["win_rate"] == 1.0
+
+    def test_short_losing_cover_above_entry(self, tmp_db):
+        # Short 10 @ 100, cover 10 @ 110 → PnL = (100 - 110) * 10 = -100
+        _insert_trade(tmp_db, 1, "SPY", "short", 10, 100.0)
+        _insert_trade(tmp_db, 2, "SPY", "cover", 10, 110.0)
+
+        results = compute_strategy_performance(tmp_db)
+        assert len(results) == 1
+        assert results[0]["realized_pnl"] == -100.0
+        assert results[0]["trades"] == 1
+        assert results[0]["wins"] == 0
+        assert results[0]["losses"] == 1
+        assert results[0]["win_rate"] == 0.0
+
+    def test_mixed_long_and_short_portfolio(self, tmp_db):
+        # Long: buy 10 @ 100, sell 10 @ 110 → +100
+        _insert_trade(tmp_db, 1, "SPY", "buy", 10, 100.0)
+        _insert_trade(tmp_db, 2, "SPY", "sell", 10, 110.0)
+        # Short: short 5 @ 200, cover 5 @ 180 → (200-180)*5 = +100
+        _insert_trade(tmp_db, 3, "SPY", "short", 5, 200.0)
+        _insert_trade(tmp_db, 4, "SPY", "cover", 5, 180.0)
+
+        results = compute_strategy_performance(tmp_db)
+        assert len(results) == 1
+        assert results[0]["realized_pnl"] == 200.0
+        assert results[0]["trades"] == 2
+        assert results[0]["wins"] == 2
+        assert results[0]["win_rate"] == 1.0
+
+    def test_partial_cover_fifo(self, tmp_db):
+        # Short 20 @ 100, partial cover 10 @ 90 → (100-90)*10 = +100
+        _insert_trade(tmp_db, 1, "SPY", "short", 20, 100.0)
+        _insert_trade(tmp_db, 2, "SPY", "cover", 10, 90.0)
+
+        results = compute_strategy_performance(tmp_db)
+        assert results[0]["realized_pnl"] == 100.0
+        assert results[0]["trades"] == 1
+
+    def test_cover_without_matching_short_is_ignored(self, tmp_db):
+        # Orphan cover with no matching short open — no stats generated
+        _insert_trade(tmp_db, 1, "SPY", "cover", 10, 90.0)
+
+        results = compute_strategy_performance(tmp_db)
+        assert results == []
+
+    def test_short_and_long_separate_lot_queues(self, tmp_db):
+        # Simultaneous long and short on same symbol should not cross lots.
+        # Long: buy 10 @ 50, sell 10 @ 60 → +100
+        # Short: short 10 @ 200, cover 10 @ 150 → +500
+        _insert_trade(tmp_db, 1, "SPY", "buy", 10, 50.0, strategy_id="long-strat")
+        _insert_trade(tmp_db, 2, "SPY", "sell", 10, 60.0, strategy_id="long-strat")
+        _insert_trade(tmp_db, 3, "SPY", "short", 10, 200.0, strategy_id="short-strat")
+        _insert_trade(tmp_db, 4, "SPY", "cover", 10, 150.0, strategy_id="short-strat")
+
+        results = {r["strategy_id"]: r for r in compute_strategy_performance(tmp_db)}
+        assert results["long-strat"]["realized_pnl"] == 100.0
+        assert results["short-strat"]["realized_pnl"] == 500.0
+
+    def test_short_only_strategy_produces_nonzero_pnl(self, tmp_db):
+        """Performance attribution must not silently zero-out short-only strategies.
+
+        Regression guard: before the dual-FIFO fix, compute_strategy_performance
+        matched all exits against long_lots only, so cover trades found no match
+        and produced realized_pnl == 0.  This test detects that regression.
+        """
+        # Strategy that only ever shorts and covers — no long trades at all.
+        _insert_trade(tmp_db, 1, "TLT", "short", 5, 100.0, strategy_id="short-only")
+        _insert_trade(tmp_db, 2, "TLT", "cover", 5, 90.0, strategy_id="short-only")
+
+        results = compute_strategy_performance(tmp_db)
+        assert len(results) == 1, "Short-only strategy must produce attribution row"
+        r = results[0]
+        assert r["strategy_id"] == "short-only"
+        assert r["realized_pnl"] != 0.0, (
+            "realized_pnl must be non-zero for a closed short position; "
+            "zero indicates cover trades were silently dropped."
+        )
+        # Verify the sign is correct: cover below entry is a profit
+        assert r["realized_pnl"] == 50.0  # (100 - 90) * 5
+        assert r["wins"] == 1
+        assert r["losses"] == 0

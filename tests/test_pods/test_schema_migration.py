@@ -56,13 +56,13 @@ def test_indexes_created(pod_db):
     assert "idx_decisions_pod_date" in indexes
 
 
-def test_schema_version_is_14(pod_db):
-    """Verify schema_meta shows version 14 (short-aware snapshot telemetry)."""
+def test_schema_version_is_17(pod_db):
+    """Verify schema_meta shows version 17 (broker schema centralization)."""
     row = pod_db.execute(
         "SELECT value FROM schema_meta WHERE key = 'version'"
     ).fetchone()
     assert row is not None
-    assert row[0] == "14"
+    assert row[0] == "17"
 
 
 def test_strategy_rotation_state_table_exists(pod_db):
@@ -246,4 +246,107 @@ def test_v12_migration_backfills_is_profit_take_defaults(pod_db):
         "SELECT value FROM schema_meta WHERE key = 'version'"
     ).fetchone()
     assert version_row is not None
-    assert version_row[0] == "14"
+    assert version_row[0] == "17"
+
+
+def test_trades_short_lifecycle_columns_exist(pod_db):
+    trades_cols = {
+        row[0]
+        for row in pod_db.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'trades'"
+        ).fetchall()
+    }
+    assert {
+        "semantic_action",
+        "broker_side",
+        "intent_type",
+        "lifecycle_state",
+        "order_id",
+        "parent_order_id",
+    }.issubset(trades_cols)
+
+
+def test_broker_reconciliation_tables_and_indexes_exist(pod_db):
+    tables = {
+        row[0]
+        for row in pod_db.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    assert "broker_submitted_orders" in tables
+    assert "broker_fill_events" in tables
+    assert "broker_position_lifecycle" in tables
+
+    fill_cols = {
+        row[0]
+        for row in pod_db.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'broker_fill_events'"
+        ).fetchall()
+    }
+    assert {
+        "execution_id",
+        "execution_ref",
+        "execution_action",
+        "corrected_execution_id",
+        "reversal_execution_id",
+        "broker_fill_key",
+        "is_correction",
+        "is_reversal",
+    }.issubset(fill_cols)
+
+    indexes = {
+        row[0]
+        for row in pod_db.execute("SELECT index_name FROM duckdb_indexes()").fetchall()
+    }
+    assert "idx_broker_submitted_orders_pod_status" in indexes
+    assert "idx_broker_fill_events_pod_time" in indexes
+    assert "idx_broker_fill_events_identity" in indexes
+    assert "idx_broker_position_lifecycle_pod_state" in indexes
+
+
+def test_broker_event_ledger_table_and_indexes_exist(pod_db):
+    tables = {
+        row[0]
+        for row in pod_db.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    assert "broker_event_ledger" in tables
+
+    ledger_cols = {
+        row[0]
+        for row in pod_db.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'broker_event_ledger'"
+        ).fetchall()
+    }
+    assert {
+        "event_id",
+        "pod_id",
+        "order_id",
+        "event_type",
+        "symbol",
+        "side",
+        "qty",
+        "price",
+        "event_time",
+        "sequence_id",
+        "parent_order_id",
+        "intent_type",
+        "exit_reason",
+        "metadata_json",
+        "event_chain_id",
+        "parent_event_order_id",
+        "created_at",
+    }.issubset(ledger_cols)
+
+    indexes = {
+        row[0]
+        for row in pod_db.execute("SELECT index_name FROM duckdb_indexes()").fetchall()
+    }
+    assert "idx_broker_event_ledger_pod_sequence" in indexes
+    assert "idx_broker_event_ledger_order_time" in indexes
+    assert "idx_broker_event_ledger_symbol_time" in indexes
+    assert "idx_broker_event_ledger_chain" in indexes

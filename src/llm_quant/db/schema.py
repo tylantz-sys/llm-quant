@@ -7,7 +7,7 @@ import duckdb
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 17
 
 DDL_STATEMENTS = [
     """
@@ -95,6 +95,12 @@ DDL_STATEMENTS = [
         pod_id VARCHAR NOT NULL DEFAULT 'default',
         symbol VARCHAR NOT NULL,
         action VARCHAR NOT NULL,
+        semantic_action VARCHAR,
+        broker_side VARCHAR,
+        intent_type VARCHAR,
+        lifecycle_state VARCHAR,
+        order_id VARCHAR,
+        parent_order_id VARCHAR,
         shares DOUBLE NOT NULL,
         price DOUBLE NOT NULL,
         notional DOUBLE NOT NULL,
@@ -328,6 +334,71 @@ DDL_STATEMENTS = [
         PRIMARY KEY (symbol, report_date)
     )
     """,
+    # --- Broker reconciliation tables (v16) ---
+    """
+    CREATE TABLE IF NOT EXISTS broker_submitted_orders (
+        order_id VARCHAR PRIMARY KEY,
+        pod_id VARCHAR NOT NULL DEFAULT 'default',
+        symbol VARCHAR NOT NULL,
+        side VARCHAR NOT NULL,
+        qty DOUBLE,
+        order_type VARCHAR,
+        time_in_force VARCHAR,
+        intent_type VARCHAR,
+        parent_order_id VARCHAR,
+        exit_reason VARCHAR,
+        client_order_id VARCHAR,
+        status VARCHAR,
+        submitted_at TIMESTAMP,
+        updated_at TIMESTAMP,
+        raw_json TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS broker_fill_events (
+        order_id VARCHAR NOT NULL,
+        symbol VARCHAR NOT NULL,
+        side VARCHAR NOT NULL,
+        fill_qty DOUBLE NOT NULL,
+        fill_price DOUBLE NOT NULL,
+        fill_time TIMESTAMP NOT NULL,
+        intent_type VARCHAR,
+        parent_order_id VARCHAR,
+        exit_reason VARCHAR,
+        lifecycle_state VARCHAR,
+        is_forced_liquidation BOOLEAN NOT NULL DEFAULT FALSE,
+        commission DOUBLE NOT NULL DEFAULT 0.0,
+        execution_id VARCHAR,
+        execution_ref VARCHAR,
+        execution_action VARCHAR,
+        corrected_execution_id VARCHAR,
+        reversal_execution_id VARCHAR,
+        broker_fill_key VARCHAR,
+        is_correction BOOLEAN NOT NULL DEFAULT FALSE,
+        is_reversal BOOLEAN NOT NULL DEFAULT FALSE,
+        pod_id VARCHAR NOT NULL DEFAULT 'default',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (order_id, fill_time, fill_qty, fill_price)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS broker_position_lifecycle (
+        pod_id VARCHAR NOT NULL DEFAULT 'default',
+        symbol VARCHAR NOT NULL,
+        state VARCHAR NOT NULL,
+        entry_order_id VARCHAR,
+        exit_order_id VARCHAR,
+        position_qty DOUBLE NOT NULL DEFAULT 0,
+        is_short BOOLEAN NOT NULL DEFAULT FALSE,
+        has_entry_fill BOOLEAN NOT NULL DEFAULT FALSE,
+        has_exit_orders BOOLEAN NOT NULL DEFAULT FALSE,
+        has_open_position BOOLEAN NOT NULL DEFAULT FALSE,
+        is_flat BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (pod_id, symbol)
+    )
+    """,
     # --- Pod indexes (v4) ---
     """
     CREATE INDEX IF NOT EXISTS idx_trades_pod_id
@@ -357,7 +428,216 @@ DDL_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_profit_take_events_decision_id
         ON profit_take_events (decision_id)
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_broker_submitted_orders_pod_status
+        ON broker_submitted_orders (pod_id, status, symbol)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_broker_fill_events_pod_time
+        ON broker_fill_events (pod_id, fill_time DESC, symbol)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_broker_fill_events_identity
+        ON broker_fill_events (pod_id, order_id, execution_id, execution_ref, broker_fill_key)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_broker_position_lifecycle_pod_state
+        ON broker_position_lifecycle (pod_id, state, symbol)
+    """,
 ]
+
+
+def ensure_broker_reconciliation_schema(conn: duckdb.DuckDBPyConnection) -> None:
+    """Ensure broker reconciliation tables/columns/indexes exist.
+
+    Canonical ownership of these objects lives in this schema module.
+    Reconciliation runtime should call this helper rather than embedding DDL.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS broker_submitted_orders (
+            order_id VARCHAR PRIMARY KEY,
+            pod_id VARCHAR NOT NULL DEFAULT 'default',
+            symbol VARCHAR NOT NULL,
+            side VARCHAR NOT NULL,
+            qty DOUBLE,
+            order_type VARCHAR,
+            time_in_force VARCHAR,
+            intent_type VARCHAR,
+            parent_order_id VARCHAR,
+            exit_reason VARCHAR,
+            client_order_id VARCHAR,
+            status VARCHAR,
+            submitted_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            raw_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS broker_fill_events (
+            order_id VARCHAR NOT NULL,
+            symbol VARCHAR NOT NULL,
+            side VARCHAR NOT NULL,
+            fill_qty DOUBLE NOT NULL,
+            fill_price DOUBLE NOT NULL,
+            fill_time TIMESTAMP NOT NULL,
+            intent_type VARCHAR,
+            parent_order_id VARCHAR,
+            exit_reason VARCHAR,
+            lifecycle_state VARCHAR,
+            is_forced_liquidation BOOLEAN NOT NULL DEFAULT FALSE,
+            commission DOUBLE NOT NULL DEFAULT 0.0,
+            execution_id VARCHAR,
+            execution_ref VARCHAR,
+            execution_action VARCHAR,
+            corrected_execution_id VARCHAR,
+            reversal_execution_id VARCHAR,
+            broker_fill_key VARCHAR,
+            is_correction BOOLEAN NOT NULL DEFAULT FALSE,
+            is_reversal BOOLEAN NOT NULL DEFAULT FALSE,
+            pod_id VARCHAR NOT NULL DEFAULT 'default',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (order_id, fill_time, fill_qty, fill_price)
+        )
+        """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS broker_position_lifecycle (
+            pod_id VARCHAR NOT NULL DEFAULT 'default',
+            symbol VARCHAR NOT NULL,
+            state VARCHAR NOT NULL,
+            entry_order_id VARCHAR,
+            exit_order_id VARCHAR,
+            position_qty DOUBLE NOT NULL DEFAULT 0,
+            is_short BOOLEAN NOT NULL DEFAULT FALSE,
+            has_entry_fill BOOLEAN NOT NULL DEFAULT FALSE,
+            has_exit_orders BOOLEAN NOT NULL DEFAULT FALSE,
+            has_open_position BOOLEAN NOT NULL DEFAULT FALSE,
+            is_flat BOOLEAN NOT NULL DEFAULT TRUE,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (pod_id, symbol)
+        )
+        """)
+
+    columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info('broker_fill_events')").fetchall()
+    }
+    column_additions = [
+        ("execution_id", "VARCHAR"),
+        ("execution_ref", "VARCHAR"),
+        ("execution_action", "VARCHAR"),
+        ("corrected_execution_id", "VARCHAR"),
+        ("reversal_execution_id", "VARCHAR"),
+        ("broker_fill_key", "VARCHAR"),
+        ("is_correction", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("is_reversal", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    ]
+    for col, col_type in column_additions:
+        if col not in columns:
+            conn.execute(f"ALTER TABLE broker_fill_events ADD COLUMN {col} {col_type}")
+
+    lifecycle_columns = {
+        row[1]
+        for row in conn.execute(
+            "PRAGMA table_info('broker_position_lifecycle')"
+        ).fetchall()
+    }
+    if "is_short" not in lifecycle_columns:
+        conn.execute(
+            "ALTER TABLE broker_position_lifecycle ADD COLUMN is_short BOOLEAN NOT NULL DEFAULT FALSE"
+        )
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_broker_submitted_orders_pod_status
+            ON broker_submitted_orders (pod_id, status, symbol)
+        """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_broker_fill_events_pod_time
+            ON broker_fill_events (pod_id, fill_time DESC, symbol)
+        """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_broker_fill_events_identity
+            ON broker_fill_events (pod_id, order_id, execution_id, execution_ref, broker_fill_key)
+        """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_broker_position_lifecycle_pod_state
+            ON broker_position_lifecycle (pod_id, state, symbol)
+        """)
+
+
+def ensure_broker_event_ledger_schema(conn: duckdb.DuckDBPyConnection) -> None:
+    """Ensure broker event ledger table/sequence/indexes exist.
+
+    Canonical ownership of event-ledger schema lives in this module.
+    Runtime callers should use this helper instead of embedding DDL.
+    """
+    conn.execute("""
+        CREATE SEQUENCE IF NOT EXISTS broker_event_ledger_seq START 1
+        """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS broker_event_ledger (
+            event_id BIGINT PRIMARY KEY DEFAULT nextval('broker_event_ledger_seq'),
+            pod_id VARCHAR NOT NULL DEFAULT 'default',
+            order_id VARCHAR NOT NULL,
+            event_type VARCHAR NOT NULL,
+            symbol VARCHAR NOT NULL,
+            side VARCHAR,
+            qty DOUBLE NOT NULL DEFAULT 0,
+            price DOUBLE,
+            event_time TIMESTAMP NOT NULL,
+            sequence_id BIGINT,
+            parent_order_id VARCHAR,
+            intent_type VARCHAR,
+            exit_reason VARCHAR,
+            metadata_json TEXT,
+            event_chain_id VARCHAR,
+            parent_event_order_id VARCHAR,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+    columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info('broker_event_ledger')").fetchall()
+    }
+    column_additions = [
+        ("sequence_id", "BIGINT"),
+        ("event_chain_id", "VARCHAR"),
+        ("parent_event_order_id", "VARCHAR"),
+    ]
+    for col, col_type in column_additions:
+        if col not in columns:
+            conn.execute(
+                f"ALTER TABLE broker_event_ledger ADD COLUMN {col} {col_type}"
+            )
+
+    conn.execute("""
+        UPDATE broker_event_ledger
+        SET sequence_id = event_id
+        WHERE sequence_id IS NULL
+        """)
+    conn.execute("""
+        UPDATE broker_event_ledger
+        SET event_chain_id = COALESCE(NULLIF(event_chain_id, ''), NULLIF(parent_order_id, ''), order_id)
+        WHERE event_chain_id IS NULL OR event_chain_id = ''
+        """)
+
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_broker_event_ledger_pod_sequence
+            ON broker_event_ledger (pod_id, sequence_id)
+        """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_broker_event_ledger_order_time
+            ON broker_event_ledger (pod_id, order_id, event_time, sequence_id)
+        """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_broker_event_ledger_symbol_time
+            ON broker_event_ledger (pod_id, symbol, event_time, sequence_id)
+        """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_broker_event_ledger_chain
+            ON broker_event_ledger (pod_id, event_chain_id, event_time, sequence_id)
+        """)
 
 
 def _migrate_v1_to_v2(conn: duckdb.DuckDBPyConnection) -> None:
@@ -909,7 +1189,9 @@ def _migrate_v11_to_v12(conn: duckdb.DuckDBPyConnection) -> None:
             ("prev_hash", "VARCHAR NOT NULL DEFAULT ''"),
             ("row_hash", "VARCHAR NOT NULL DEFAULT ''"),
         ]
-        copy_trade_columns = [col for col, _ in final_trade_columns if col in trade_cols]
+        copy_trade_columns = [
+            col for col, _ in final_trade_columns if col in trade_cols
+        ]
         _rebuild_table_with_added_columns(
             conn,
             table_name="trades",
@@ -1034,9 +1316,7 @@ def _migrate_v12_to_v13(conn: duckdb.DuckDBPyConnection) -> None:
     ]
     for col, col_type in additions:
         if col not in event_cols:
-            conn.execute(
-                f"ALTER TABLE profit_take_events ADD COLUMN {col} {col_type}"
-            )
+            conn.execute(f"ALTER TABLE profit_take_events ADD COLUMN {col} {col_type}")
     logger.info("Migrated schema to v13: profit-take lifecycle telemetry added.")
 
 
@@ -1081,16 +1361,53 @@ def _migrate_v13_to_v14(conn: duckdb.DuckDBPyConnection) -> None:
         ).fetchall()
     }
     if "is_short" not in position_cols:
-        conn.execute(
-            "ALTER TABLE positions ADD COLUMN is_short BOOLEAN DEFAULT FALSE"
-        )
+        conn.execute("ALTER TABLE positions ADD COLUMN is_short BOOLEAN DEFAULT FALSE")
     if "short_proceeds" not in position_cols:
         conn.execute(
             "ALTER TABLE positions ADD COLUMN short_proceeds DOUBLE DEFAULT 0.0"
         )
     conn.execute("UPDATE positions SET is_short = FALSE WHERE is_short IS NULL")
-    conn.execute("UPDATE positions SET short_proceeds = 0.0 WHERE short_proceeds IS NULL")
-    logger.info("Migrated schema to v14: short-aware snapshot and position telemetry added.")
+    conn.execute(
+        "UPDATE positions SET short_proceeds = 0.0 WHERE short_proceeds IS NULL"
+    )
+    logger.info(
+        "Migrated schema to v14: short-aware snapshot and position telemetry added."
+    )
+
+
+def _migrate_v14_to_v15(conn: duckdb.DuckDBPyConnection) -> None:
+    """Add broker fill semantic columns to preserve short lifecycle intent."""
+    trade_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'trades'"
+        ).fetchall()
+    }
+    additions = [
+        ("semantic_action", "VARCHAR"),
+        ("broker_side", "VARCHAR"),
+        ("intent_type", "VARCHAR"),
+        ("lifecycle_state", "VARCHAR"),
+        ("order_id", "VARCHAR"),
+        ("parent_order_id", "VARCHAR"),
+    ]
+    for col, col_type in additions:
+        if col not in trade_cols:
+            conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
+    logger.info("Migrated schema to v15: broker fill lifecycle semantics preserved.")
+
+
+def _migrate_v15_to_v16(conn: duckdb.DuckDBPyConnection) -> None:
+    """Centralize broker reconciliation tables under canonical schema ownership."""
+    ensure_broker_reconciliation_schema(conn)
+    logger.info("Migrated schema to v16: broker reconciliation schema centralized.")
+
+
+def _migrate_v16_to_v17(conn: duckdb.DuckDBPyConnection) -> None:
+    """Centralize broker event ledger schema under canonical ownership."""
+    ensure_broker_event_ledger_schema(conn)
+    logger.info("Migrated schema to v17: broker event ledger schema centralized.")
 
 
 def _needs_v11_rotation_migration(
@@ -1159,6 +1476,12 @@ def init_schema(db_path: str | Path) -> duckdb.DuckDBPyConnection:
         _migrate_v12_to_v13(conn)
     if old_version < 14:
         _migrate_v13_to_v14(conn)
+    if old_version < 15:
+        _migrate_v14_to_v15(conn)
+    if old_version < 16:
+        _migrate_v15_to_v16(conn)
+    if old_version < 17:
+        _migrate_v16_to_v17(conn)
 
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)",

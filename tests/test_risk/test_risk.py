@@ -5,6 +5,7 @@ from llm_quant.risk.limits import (
     check_cash_reserve,
     check_drawdown_limit,
     check_gross_exposure,
+    check_locate_availability,
     check_margin_buffer,
     check_position_size,
     check_position_weight,
@@ -121,6 +122,129 @@ def test_stop_loss_required_missing() -> None:
 def test_stop_loss_not_required() -> None:
     result = check_stop_loss(has_stop_loss=False, require=False)
     assert result.passed
+
+
+def test_locate_required_missing_status_fails() -> None:
+    result = check_locate_availability(require_locate=True, locate_available=None)
+    assert not result.passed
+
+
+def test_risk_manager_rejects_short_when_locate_required_and_missing(
+    sample_portfolio: object,
+    sample_prices: object,
+    sample_config: object,
+) -> None:
+    sample_config.risk.require_locate = True
+    mgr = RiskManager(sample_config)
+    signal = TradeSignal(
+        symbol="SPY",
+        action=Action.SHORT,
+        conviction=Conviction.HIGH,
+        target_weight=0.02,
+        stop_loss=470.0,
+        reasoning="Short without locate",
+    )
+
+    approved, rejected = mgr.filter_signals([signal], sample_portfolio, sample_prices)
+    assert len(approved) == 0
+    assert len(rejected) == 1
+    assert any(r.rule == "locate_availability" and not r.passed for r in rejected[0][1])
+
+
+def test_risk_manager_accepts_short_when_locate_required_and_available(
+    sample_portfolio: object,
+    sample_prices: object,
+    sample_config: object,
+) -> None:
+    sample_config.risk.require_locate = True
+    mgr = RiskManager(sample_config)
+    signal = TradeSignal(
+        symbol="SPY",
+        action=Action.SHORT,
+        conviction=Conviction.HIGH,
+        target_weight=0.02,
+        stop_loss=470.0,
+        reasoning="Short with locate",
+        metadata={"locate_available": True},
+    )
+
+    approved, rejected = mgr.filter_signals([signal], sample_portfolio, sample_prices)
+    assert len(approved) == 1
+    assert len(rejected) == 0
+
+
+def test_risk_manager_short_passes_when_locate_not_required(
+    sample_portfolio: object,
+    sample_prices: object,
+    sample_config: object,
+) -> None:
+    sample_config.risk.require_locate = False
+    mgr = RiskManager(sample_config)
+    signal = TradeSignal(
+        symbol="SPY",
+        action=Action.SHORT,
+        conviction=Conviction.HIGH,
+        target_weight=0.02,
+        stop_loss=470.0,
+        reasoning="Short allowed by policy",
+    )
+
+    approved, rejected = mgr.filter_signals([signal], sample_portfolio, sample_prices)
+    assert len(approved) == 1
+    assert len(rejected) == 0
+
+
+def test_risk_manager_uses_locate_lookup_when_metadata_missing(
+    sample_portfolio: object,
+    sample_prices: object,
+    sample_config: object,
+) -> None:
+    sample_config.risk.require_locate = True
+    mgr = RiskManager(sample_config)
+    signal = TradeSignal(
+        symbol="SPY",
+        action=Action.SHORT,
+        conviction=Conviction.HIGH,
+        target_weight=0.02,
+        stop_loss=470.0,
+        reasoning="Short with broker locate lookup",
+    )
+
+    approved, rejected = mgr.filter_signals(
+        [signal],
+        sample_portfolio,
+        sample_prices,
+        locate_lookup=lambda symbol: symbol == "SPY",
+    )
+    assert len(approved) == 1
+    assert len(rejected) == 0
+
+
+def test_risk_manager_rejects_short_when_locate_lookup_reports_false(
+    sample_portfolio: object,
+    sample_prices: object,
+    sample_config: object,
+) -> None:
+    sample_config.risk.require_locate = True
+    mgr = RiskManager(sample_config)
+    signal = TradeSignal(
+        symbol="SPY",
+        action=Action.SHORT,
+        conviction=Conviction.HIGH,
+        target_weight=0.02,
+        stop_loss=470.0,
+        reasoning="Short rejected by broker locate lookup",
+    )
+
+    approved, rejected = mgr.filter_signals(
+        [signal],
+        sample_portfolio,
+        sample_prices,
+        locate_lookup=lambda _symbol: False,
+    )
+    assert len(approved) == 0
+    assert len(rejected) == 1
+    assert any(r.rule == "locate_availability" and not r.passed for r in rejected[0][1])
 
 
 def test_risk_manager_approves_valid_signal(
@@ -573,3 +697,39 @@ def test_risk_manager_cover_not_blocked_by_drawdown(
     dd_check = [c for c in checks if c.rule == "drawdown_limit"]
     assert dd_check
     assert dd_check[0].passed is True
+
+
+def test_risk_manager_close_short_reduces_net_exposure(
+    sample_config: object,
+    sample_prices: object,
+) -> None:
+    from llm_quant.trading.portfolio import Portfolio, Position
+
+    p = Portfolio(initial_capital=100_000.0)
+    p.cash = 102_000.0
+    p.positions = {
+        "GLD": Position(
+            symbol="GLD",
+            shares=-10,
+            avg_cost=185.0,
+            current_price=190.0,
+            stop_loss=192.0,
+            short_proceeds=1_850.0,
+        )
+    }
+
+    mgr = RiskManager(sample_config)
+    signal = TradeSignal(
+        symbol="GLD",
+        action=Action.CLOSE,
+        conviction=Conviction.MEDIUM,
+        target_weight=0.0,
+        stop_loss=0.0,
+        reasoning="Flatten short",
+    )
+
+    checks = mgr.check_trade(signal, p, sample_prices)
+    net_exposure_check = [c for c in checks if c.rule == "net_exposure"]
+    assert net_exposure_check
+    assert net_exposure_check[0].passed is True
+    assert net_exposure_check[0].current_value == 0.0

@@ -16,6 +16,7 @@ import math
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import duckdb
 
@@ -65,6 +66,40 @@ def _fmt_optional_ratio(value: float | None, decimals: int = 1) -> str:
     if value is None:
         return "N/A"
     return _fmt_pct(value, decimals=decimals)
+
+
+def _semantic_action_label(trade: dict[str, Any]) -> str:
+    """Render a human-readable action preserving short lifecycle semantics."""
+    semantic_action = (trade.get("semantic_action") or "").strip().lower()
+    if semantic_action:
+        labels = {
+            "long_entry": "LONG_ENTRY",
+            "long_exit": "LONG_EXIT",
+            "short_entry": "SHORT_ENTRY",
+            "short_cover": "SHORT_COVER",
+        }
+        return labels.get(semantic_action, semantic_action.upper())
+
+    broker_side = (trade.get("broker_side") or "").strip().lower()
+    intent_type = (trade.get("intent_type") or "").strip().lower()
+    lifecycle_state = (trade.get("lifecycle_state") or "").strip().lower()
+    action = (trade.get("action") or "").strip().lower()
+
+    if broker_side == "sell_short":
+        return "SHORT_ENTRY"
+    if broker_side == "buy_to_cover":
+        return "SHORT_COVER"
+
+    if action == "buy":
+        if "cover" in intent_type or "cover" in lifecycle_state:
+            return "SHORT_COVER"
+        return "LONG_ENTRY"
+    if action == "sell":
+        if "entry" in intent_type or "open" in lifecycle_state:
+            return "SHORT_ENTRY"
+        return "LONG_EXIT"
+
+    return (trade.get("action") or "UNKNOWN").upper()
 
 
 # ---------------------------------------------------------------------------
@@ -150,11 +185,20 @@ def _get_trades_for_date(
     conn: duckdb.DuckDBPyConnection, target_date: date
 ) -> list[dict]:
     """Get all trades for a given date."""
-    rows = conn.execute(
-        """
+    trade_cols = {c[0] for c in conn.execute("DESCRIBE trades").fetchall()}
+    has_semantic = "semantic_action" in trade_cols
+    has_broker_side = "broker_side" in trade_cols
+    has_intent_type = "intent_type" in trade_cols
+    has_lifecycle_state = "lifecycle_state" in trade_cols
+
+    query = """
         SELECT
             symbol,
             action,
+            %s,
+            %s,
+            %s,
+            %s,
             shares,
             price,
             notional,
@@ -166,21 +210,33 @@ def _get_trades_for_date(
         FROM trades
         WHERE date = ?
         ORDER BY trade_id ASC
-        """,
+        """
+    query = query % (
+        "semantic_action" if has_semantic else "NULL AS semantic_action",
+        "broker_side" if has_broker_side else "NULL AS broker_side",
+        "intent_type" if has_intent_type else "NULL AS intent_type",
+        "lifecycle_state" if has_lifecycle_state else "NULL AS lifecycle_state",
+    )
+    rows = conn.execute(
+        query,
         [target_date],
     ).fetchall()
     return [
         {
             "symbol": r[0],
             "action": r[1],
-            "shares": float(r[2]),
-            "price": float(r[3]),
-            "notional": float(r[4]),
-            "conviction": r[5] or "",
-            "reasoning": r[6] or "",
-            "strategy_id": r[7] or "",
-            "entry_batch": int(r[8]) if r[8] is not None else None,
-            "exit_reason": r[9] or "",
+            "semantic_action": r[2] or "",
+            "broker_side": r[3] or "",
+            "intent_type": r[4] or "",
+            "lifecycle_state": r[5] or "",
+            "shares": float(r[6]),
+            "price": float(r[7]),
+            "notional": float(r[8]),
+            "conviction": r[9] or "",
+            "reasoning": r[10] or "",
+            "strategy_id": r[11] or "",
+            "entry_batch": int(r[12]) if r[12] is not None else None,
+            "exit_reason": r[13] or "",
         }
         for r in rows
     ]
@@ -190,12 +246,21 @@ def _get_trades_for_range(
     conn: duckdb.DuckDBPyConnection, start_date: date, end_date: date
 ) -> list[dict]:
     """Get all trades within a date range (inclusive)."""
-    rows = conn.execute(
-        """
+    trade_cols = {c[0] for c in conn.execute("DESCRIBE trades").fetchall()}
+    has_semantic = "semantic_action" in trade_cols
+    has_broker_side = "broker_side" in trade_cols
+    has_intent_type = "intent_type" in trade_cols
+    has_lifecycle_state = "lifecycle_state" in trade_cols
+
+    query = """
         SELECT
             date,
             symbol,
             action,
+            %s,
+            %s,
+            %s,
+            %s,
             shares,
             price,
             notional,
@@ -207,7 +272,15 @@ def _get_trades_for_range(
         FROM trades
         WHERE date >= ? AND date <= ?
         ORDER BY date ASC, trade_id ASC
-        """,
+        """
+    query = query % (
+        "semantic_action" if has_semantic else "NULL AS semantic_action",
+        "broker_side" if has_broker_side else "NULL AS broker_side",
+        "intent_type" if has_intent_type else "NULL AS intent_type",
+        "lifecycle_state" if has_lifecycle_state else "NULL AS lifecycle_state",
+    )
+    rows = conn.execute(
+        query,
         [start_date, end_date],
     ).fetchall()
     return [
@@ -215,14 +288,18 @@ def _get_trades_for_range(
             "date": r[0],
             "symbol": r[1],
             "action": r[2],
-            "shares": float(r[3]),
-            "price": float(r[4]),
-            "notional": float(r[5]),
-            "conviction": r[6] or "",
-            "reasoning": r[7] or "",
-            "strategy_id": r[8] or "",
-            "entry_batch": int(r[9]) if r[9] is not None else None,
-            "exit_reason": r[10] or "",
+            "semantic_action": r[3] or "",
+            "broker_side": r[4] or "",
+            "intent_type": r[5] or "",
+            "lifecycle_state": r[6] or "",
+            "shares": float(r[7]),
+            "price": float(r[8]),
+            "notional": float(r[9]),
+            "conviction": r[10] or "",
+            "reasoning": r[11] or "",
+            "strategy_id": r[12] or "",
+            "entry_batch": int(r[13]) if r[13] is not None else None,
+            "exit_reason": r[14] or "",
         }
         for r in rows
     ]
@@ -700,10 +777,10 @@ def generate_daily_report(
     trades = _get_trades_for_date(conn, target_date)
     if trades:
         lines.append(
-            "| Symbol | Action | Shares | Price | Notional | Strategy | Batch | Exit | Conviction | Reasoning |"
+            "| Symbol | Action | Side | Intent | Shares | Price | Notional | Strategy | Batch | Exit | Conviction | Reasoning |"
         )
         lines.append(
-            "|--------|--------|--------|-------|----------|----------|-------|------|------------|-----------|"
+            "|--------|--------|------|--------|--------|-------|----------|----------|-------|------|------------|-----------|"
         )
         for t in trades:
             reasoning_short = (
@@ -713,7 +790,9 @@ def generate_daily_report(
             )
             lines.append(
                 f"| {t['symbol']} "
-                f"| {t['action']} "
+                f"| {_semantic_action_label(t)} "
+                f"| {(t['broker_side'] or '—').upper()} "
+                f"| {t['intent_type'] or '—'} "
                 f"| {t['shares']:.2f} "
                 f"| {_fmt_money(t['price'])} "
                 f"| {_fmt_money(t['notional'])} "
@@ -969,16 +1048,18 @@ def generate_weekly_report(
     lines.append("")
     if trades:
         lines.append(
-            "| Date | Symbol | Action | Shares | Price | Notional | Strategy | Exit | Conviction |"
+            "| Date | Symbol | Action | Side | Intent | Shares | Price | Notional | Strategy | Exit | Conviction |"
         )
         lines.append(
-            "|------|--------|--------|--------|-------|----------|----------|------|------------|"
+            "|------|--------|--------|------|--------|--------|-------|----------|----------|------|------------|"
         )
         for t in trades:
             lines.append(
                 f"| {t['date']} "
                 f"| {t['symbol']} "
-                f"| {t['action']} "
+                f"| {_semantic_action_label(t)} "
+                f"| {(t['broker_side'] or '—').upper()} "
+                f"| {t['intent_type'] or '—'} "
                 f"| {t['shares']:.2f} "
                 f"| {_fmt_money(t['price'])} "
                 f"| {_fmt_money(t['notional'])} "
@@ -1216,16 +1297,18 @@ def generate_monthly_report(
     lines.append("")
     if trades:
         lines.append(
-            "| Date | Symbol | Action | Shares | Price | Notional | Conviction |"
+            "| Date | Symbol | Action | Side | Intent | Shares | Price | Notional | Conviction |"
         )
         lines.append(
-            "|------|--------|--------|--------|-------|----------|------------|"
+            "|------|--------|--------|------|--------|--------|-------|----------|------------|"
         )
         for t in trades:
             lines.append(
                 f"| {t['date']} "
                 f"| {t['symbol']} "
-                f"| {t['action']} "
+                f"| {_semantic_action_label(t)} "
+                f"| {(t['broker_side'] or '—').upper()} "
+                f"| {t['intent_type'] or '—'} "
                 f"| {t['shares']:.2f} "
                 f"| {_fmt_money(t['price'])} "
                 f"| {_fmt_money(t['notional'])} "

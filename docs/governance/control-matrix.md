@@ -125,7 +125,7 @@ Direct short capability requires explicit post-trade monitoring separate from lo
 | **Detector** | Monitor latest `short_exposure / nav` from `portfolio_snapshots` and compare against `max_short_exposure`. Include `short_margin_rate` and `require_locate` in detector details for audit context. |
 | **Warning** | Short exposure reaches warn buffer zone (`max_short_exposure * (1 - exposure_warn_buffer)`). |
 | **Hard stop** | Short exposure exceeds `max_short_exposure`, or any non-zero short exposure appears while short cap is configured to 0%. |
-| **Immediate action** | Freeze new short entries. Allow only `cover`/risk-reduction orders until short exposure returns below warning threshold. Validate locate/margin policy settings before reopening short capacity. |
+| **Immediate action** | Freeze new short entries. Allow only `cover`/risk-reduction orders until short exposure returns below warning threshold. Validate locate/margin policy settings before reopening short capacity, and confirm locate eligibility from broker asset metadata (not prompt metadata alone). |
 | **Full reset** | Short exposure remains below warning threshold for 3 consecutive scans and governance state is `ok` or non-short-related warnings only. |
 
 **Why it matters:** Gross and net checks alone can hide directional concentration in shorts. A dedicated short rollout monitor makes direct-short activation observable and auditable.

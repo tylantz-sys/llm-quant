@@ -44,6 +44,7 @@ Use these terms consistently:
 - Intraday de-dup: one run per pod per 5-minute slot via `data/locks/intraday_{pod}.lock`.
 - Exit protection guard: if `fail_on_unprotected_exits = true`, the runtime fails loudly when native live protection cannot be verified.
 - Exit telemetry guardrail: intraday context snapshots record policy, runtime mode, broker realization path, and per-position protection metadata.
+- Broker reconciliation schema guardrail: broker order/fill/lifecycle/event-ledger tables are canonical in `db/schema.py` (schema v17), not runtime-owned ad hoc DDL.
 
 ## Empty Promoted Set Semantics (Phase 4)
 
@@ -126,6 +127,7 @@ During strict-governance cleanup:
 - Synthetic monitoring, backtest simulation, and native broker orders can still diverge in market microstructure and fill sequence even when governed by the same canonical exit policy.
 - `intraday_use_oco=true` does not mean “different policy”; it means the same policy is realized through native broker orders instead of synthetic monitoring.
 - Backtest parity does not mean live fill parity; it means stop-loss / partial TP / trailing / EOD semantics are evaluated through the same canonical policy layer.
+- Backtest short lifecycle parity now includes `short`, `cover`, and short `close`; one-step directional reversals still require two actions and are not a single atomic backtest transition.
 - If OCO legs cannot be resolved in live native mode and `fail_on_unprotected_exits = true`, the run fails instead of silently degrading.
 - If intraday bars are missing/stale for promoted-required symbols, overlay intentionally emits a no-trade decision for that slot.
 - Crypto uses synthetic monitoring by design (`intraday_use_oco=false`) to avoid broker OCO parity issues while still using the canonical exit engine.

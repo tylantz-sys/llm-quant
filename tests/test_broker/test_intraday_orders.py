@@ -117,6 +117,52 @@ def test_place_oco_exits_for_buys_creates_partial_and_oco():
     assert client.oco_orders[0]["take_profit"] == 104.0
 
 
+def test_place_oco_exits_for_short_creates_buy_side_partial_and_oco():
+    client = FakeClient()
+    states = {}
+    trades = [
+        ExecutedTrade(
+            symbol="SPY",
+            action="short",
+            shares=10,
+            price=100.0,
+            notional=1000.0,
+            conviction="medium",
+            reasoning="test",
+        )
+    ]
+
+    place_oco_exits_for_buys(
+        client,
+        states,
+        trades,
+        stop_losses={"SPY": 105.0},
+        partial_tp_pct=0.02,
+        partial_tp_size=0.50,
+        remainder_tp_mult=2.0,
+        default_stop_loss_pct=0.05,
+    )
+
+    assert client.limit_orders
+    assert client.oco_orders
+
+    state = states["SPY"]
+    assert state.position_side == "short"
+    assert state.partial_tp_order_id == "tp1"
+    assert state.oco_order_id == "oco1"
+    assert state.oco_tp_order_id == "oco_tp"
+    assert state.oco_stop_order_id == "oco_stop"
+
+    assert client.limit_orders[0]["side"] == "buy"
+    assert client.limit_orders[0]["qty"] == 5
+    assert client.limit_orders[0]["limit_price"] == 98.0
+
+    assert client.oco_orders[0]["side"] == "buy"
+    assert client.oco_orders[0]["qty"] == 5
+    assert client.oco_orders[0]["take_profit"] == 96.0
+    assert client.oco_orders[0]["stop_loss"] == 105.0
+
+
 def test_reconcile_orders_fallbacks_when_oco_legs_missing():
     client = MissingLegClient()
     states = {
@@ -142,6 +188,39 @@ def test_reconcile_orders_fallbacks_when_oco_legs_missing():
     assert client.stop_orders
 
 
+def test_reconcile_orders_short_position_qty_uses_absolute_and_preserves_state():
+    client = OCOCancelClient(
+        {
+            "tp1": {"id": "tp1", "status": "new", "filled_qty": 0},
+            "oco_tp": {"id": "oco_tp", "status": "new", "filled_qty": 0},
+            "oco_stop": {"id": "oco_stop", "status": "new", "filled_qty": 0},
+        }
+    )
+    states = {
+        "SPY": IntradayOrderState(
+            symbol="SPY",
+            position_side="short",
+            partial_tp_order_id="tp1",
+            oco_tp_order_id="oco_tp",
+            oco_stop_order_id="oco_stop",
+            hwm=100.0,
+            remaining_qty=5.0,
+            initial_stop_price=105.0,
+        )
+    }
+
+    reconcile_orders(
+        client,
+        states,
+        positions={"SPY": -5.0},
+        trailing_pct=0.01,
+    )
+
+    assert "SPY" in states
+    assert states["SPY"].position_side == "short"
+    assert states["SPY"].remaining_qty == pytest.approx(5.0)
+
+
 class FractionalClient(FakeClient):
     def __init__(self) -> None:
         super().__init__()
@@ -156,9 +235,17 @@ class FractionalClient(FakeClient):
         order = super().submit_oco_order(symbol, qty, side, take_profit, stop_loss)
         return order
 
-    def submit_stop_limit_order(self, symbol, qty, side, stop_price, limit_price, **kwargs):
+    def submit_stop_limit_order(
+        self, symbol, qty, side, stop_price, limit_price, **kwargs
+    ):
         self.stop_limit_orders.append(
-            {"symbol": symbol, "qty": qty, "side": side, "stop_price": stop_price, "limit_price": limit_price}
+            {
+                "symbol": symbol,
+                "qty": qty,
+                "side": side,
+                "stop_price": stop_price,
+                "limit_price": limit_price,
+            }
         )
         return {"id": f"sl-{len(self.stop_limit_orders)}"}
 
@@ -167,7 +254,6 @@ class FractionalClient(FakeClient):
 
     def cancel_order(self, order_id):
         self.cancelled.append(order_id)
-        return None
 
 
 class BrokenProtectionClient:
@@ -180,7 +266,9 @@ class BrokenProtectionClient:
     def submit_stop_order(self, symbol, qty, side, stop_price, **kwargs):
         raise AlpacaError("stop submit failed")
 
-    def submit_stop_limit_order(self, symbol, qty, side, stop_price, limit_price, **kwargs):
+    def submit_stop_limit_order(
+        self, symbol, qty, side, stop_price, limit_price, **kwargs
+    ):
         raise AlpacaError("stop submit failed")
 
 
@@ -196,7 +284,6 @@ class OCOCancelClient:
         self.cancelled.append(order_id)
         if order_id in self.orders:
             self.orders[order_id]["status"] = "canceled"
-        return None
 
 
 def test_place_oco_exits_for_buys_preserves_fractional_crypto_qty():
@@ -238,7 +325,7 @@ def test_place_oco_exits_for_buys_preserves_fractional_crypto_qty():
     assert client.oco_orders == []
     # State: remaining_qty tracks full position (stop covers all)
     assert states["BTC-USD"].remaining_qty == pytest.approx(0.75)
-    assert states["BTC-USD"].oco_tp_order_id is None   # TP2 not placed yet
+    assert states["BTC-USD"].oco_tp_order_id is None  # TP2 not placed yet
     assert states["BTC-USD"].oco_stop_order_id is not None
 
 
@@ -256,13 +343,13 @@ def test_reconcile_crypto_tp1_fill_splits_stop_and_adds_tp2():
         "ETH-USD": IntradayOrderState(
             symbol="ETH-USD",
             partial_tp_order_id="tp1",
-            oco_tp_order_id=None,       # TP2 not placed yet
+            oco_tp_order_id=None,  # TP2 not placed yet
             oco_stop_order_id="full-stop",
             hwm=2500.0,
-            remaining_qty=1.188688,     # position remaining after TP1 filled
+            remaining_qty=1.188688,  # position remaining after TP1 filled
             initial_stop_price=2125.0,
             stop_status="new",
-            protection_qty=2.377376,    # full-size stop was for 100%
+            protection_qty=2.377376,  # full-size stop was for 100%
         )
     }
 

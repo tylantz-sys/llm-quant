@@ -170,6 +170,7 @@ These determine whether a deployment can be trusted operationally, independent o
 | Signal state observable | runtime | can distinguish no data / no decision / zero signal / vetoed signal | telemetry / dashboard / logs | runtime readiness | Prevents silent ambiguity |
 | Risk veto observability | runtime | risk-off / kill switch reasons visible | telemetry / logs | runtime readiness | Must explain suppression |
 | Execution path observability | runtime | can see routed, rejected, filled, canceled orders | telemetry / logs | runtime readiness | Required for operator trust |
+| Broker-sourced locate enforcement | runtime | when `require_locate=true`, short approval uses broker asset metadata (`shortable` / `easy_to_borrow` via Alpaca `get_asset`) rather than LLM-only metadata, and unknown locate state rejects the trade (fail-closed) | runtime-backed / risk logs | runtime readiness | Prevents ambiguous short approval paths, prompt-dependent locate drift, and silent fail-open shorting |
 | Direct short rollout observability | runtime | `short_exposure_ratio` telemetry and `short_rollout` surveillance check active before enabling discretionary shorts | runtime-backed / surveillance logs | runtime readiness | Prevents silent short-cap drift during rollout |
 | Kill switches wired | runtime | confirmed active in runtime path | runtime-backed / code path review | deployment | Required before trust |
 | Incident logging | runtime | incidents recorded with timestamps and reasons | paper/deployment records | paper + deployment | Required for operations review |

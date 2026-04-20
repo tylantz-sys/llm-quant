@@ -206,6 +206,13 @@ def _parse_signal(raw_signal: dict[str, Any]) -> TradeSignal | None:
         )
         target_weight = 0.0
 
+    if action == Action.CLOSE:
+        logger.warning(
+            "Signal for %s uses CLOSE action — if this is a short exit, use COVER instead "
+            "to preserve short_cover audit semantics.",
+            symbol,
+        )
+
     strategy_id = str(raw_signal.get("strategy_id", "") or "")
     exit_reason = str(raw_signal.get("exit_reason", "") or "")
     entry_batch_raw = raw_signal.get("entry_batch", 1)

@@ -143,15 +143,33 @@ def _normalize_qty(qty: float, *, allow_fractional: bool) -> float:
     return float(max(int(math.floor(float(qty))), 0))
 
 
-def resolve_take_profit(price: float, stop_loss: float, limits: RiskLimits) -> float:
+def resolve_take_profit(
+    price: float,
+    stop_loss: float,
+    limits: RiskLimits,
+    *,
+    is_short: bool = False,
+) -> float:
     """Backward-compatible wrapper around canonical exit-policy resolution."""
     policy = build_exit_policy(limits, ExecutionConfig())
-    return resolve_take_profit_price(price, stop_loss, policy)
+    return resolve_take_profit_price(price, stop_loss, policy, is_short=is_short)
 
 
-def bracket_prices_valid(entry_price: float, stop_loss: float, take_profit: float) -> bool:
+def bracket_prices_valid(
+    entry_price: float,
+    stop_loss: float,
+    take_profit: float,
+    *,
+    entry_side: str = "buy",
+) -> bool:
     if entry_price <= 0 or take_profit <= 0 or stop_loss <= 0:
         return False
+    if entry_side == "sell":
+        if take_profit >= entry_price:
+            return False
+        if take_profit >= stop_loss:
+            return False
+        return True
     if take_profit <= entry_price:
         return False
     if take_profit <= stop_loss:
@@ -462,7 +480,9 @@ def submit_alpaca_orders(
                 )
             continue
 
-        if trade.action == "buy":
+        if trade.action in {"buy", "short"}:
+            entry_side = "buy" if trade.action == "buy" else "sell"
+            entry_intent = "entry" if trade.action == "buy" else "entry_short"
             stop_loss = stop_losses.get(symbol, 0.0)
             plan = build_broker_exit_plan(
                 symbol=symbol,
@@ -470,12 +490,19 @@ def submit_alpaca_orders(
                 stop_loss=stop_loss,
                 policy=policy,
                 runtime=runtime,
+                is_short=trade.action == "short",
             )
             if use_brackets and plan.kind == "bracket":
-                if bracket_prices_valid(trade.price, plan.stop_loss, plan.take_profit):
+                if bracket_prices_valid(
+                    trade.price,
+                    plan.stop_loss,
+                    plan.take_profit,
+                    entry_side=entry_side,
+                ):
                     logger.info(
-                        "Submitting canonical bracket order for %s: qty=%.0f, TP=%.2f, SL=%.2f",
+                        "Submitting canonical bracket order for %s: side=%s qty=%.0f, TP=%.2f, SL=%.2f",
                         symbol,
+                        entry_side,
                         trade.shares,
                         plan.take_profit,
                         plan.stop_loss,
@@ -484,7 +511,7 @@ def submit_alpaca_orders(
                     response = client.submit_bracket_order(
                         symbol=symbol,
                         qty=trade.shares,
-                        side="buy",
+                        side=entry_side,
                         take_profit=plan.take_profit,
                         stop_loss=plan.stop_loss,
                         time_in_force=_tif,
@@ -493,9 +520,9 @@ def submit_alpaca_orders(
                     submitted.append(
                         SubmittedBrokerOrder.from_alpaca_response(
                             response,
-                            intent_type="entry",
+                            intent_type=entry_intent,
                             symbol=symbol,
-                            side="buy",
+                            side=entry_side,
                             requested_qty=trade.shares,
                             order_type="market",
                             limit_price=plan.take_profit,
@@ -520,14 +547,14 @@ def submit_alpaca_orders(
                     response = client.submit_market_order(
                         symbol=symbol,
                         qty=trade.shares,
-                        side="buy",
+                        side=entry_side,
                     )
                     submitted.append(
                         SubmittedBrokerOrder.from_alpaca_response(
                             response,
-                            intent_type="entry",
+                            intent_type=entry_intent,
                             symbol=symbol,
-                            side="buy",
+                            side=entry_side,
                             requested_qty=trade.shares,
                             order_type="market",
                             limit_price=None,
@@ -542,7 +569,8 @@ def submit_alpaca_orders(
                     )
             else:
                 logger.info(
-                    "Submitting market buy for %s: qty=%.0f (broker exit kind=%s)",
+                    "Submitting market %s for %s: qty=%.0f (broker exit kind=%s)",
+                    entry_side,
                     symbol,
                     trade.shares,
                     plan.kind,
@@ -550,14 +578,14 @@ def submit_alpaca_orders(
                 response = client.submit_market_order(
                     symbol=symbol,
                     qty=trade.shares,
-                    side="buy",
+                    side=entry_side,
                 )
                 submitted.append(
                     SubmittedBrokerOrder.from_alpaca_response(
                         response,
-                        intent_type="entry",
+                        intent_type=entry_intent,
                         symbol=symbol,
-                        side="buy",
+                        side=entry_side,
                         requested_qty=trade.shares,
                         order_type="market",
                         limit_price=None,
@@ -570,7 +598,7 @@ def submit_alpaca_orders(
                         asset_class=asset_class,
                     )
                 )
-        elif trade.action in ("sell", "close", "short", "cover"):
+        elif trade.action in ("sell", "close", "cover"):
             side, intent_type = _route_trade_to_broker_action(trade)
             logger.info(
                 "Submitting market %s for %s: qty=%.0f",

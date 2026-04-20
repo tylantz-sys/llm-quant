@@ -163,7 +163,31 @@ def test_parse_cover_signal() -> None:
     assert decision.signals[0].action == Action.COVER
 
 
-def test_parse_clamps_confidence():
+def test_parse_close_signal_warns_about_cover_audit_semantics(caplog: pytest.LogCaptureFixture) -> None:
+    response = """{
+        "market_regime": "risk_off",
+        "regime_confidence": 0.70,
+        "signals": [
+            {
+                "symbol": "SPY",
+                "action": "close",
+                "conviction": "medium",
+                "target_weight": 0.0,
+                "stop_loss": 0.0,
+                "take_profit": 0.0,
+                "reasoning": "Flatten"
+            }
+        ]
+    }"""
+
+    with caplog.at_level("WARNING"):
+        decision = parse_trading_decision(response, date(2026, 3, 24))
+
+    assert decision.signals[0].action == Action.CLOSE
+    assert "use COVER instead" in caplog.text
+
+
+def test_parse_clamps_confidence() -> None:
     response = """{
         "market_regime": "risk_on",
         "regime_confidence": 1.5,

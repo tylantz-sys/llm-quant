@@ -7,8 +7,18 @@ from typing import Any
 
 import duckdb
 
-from llm_quant.brain.models import Action, TradeSignal
+from llm_quant.brain.models import Action, Conviction, TradeSignal
 from llm_quant.config import AppConfig, ProfitTakingMandateConfig
+
+
+# Halt-freeze policy is explicit by contract:
+# - BUY/SHORT are entry-risk actions and are blocked when freeze is active.
+# - COVER must always be allowed so short positions can be reduced/exited.
+# - SELL/CLOSE/HOLD remain allowed de-risk actions.
+ENTRY_HALT_BLOCKED_ACTIONS = frozenset({Action.BUY, Action.SHORT})
+ENTRY_HALT_ALWAYS_ALLOWED_ACTIONS = frozenset(
+    {Action.SELL, Action.COVER, Action.CLOSE, Action.HOLD}
+)
 
 
 @dataclass
@@ -105,10 +115,12 @@ def compute_recent_realized_expectancy(
     ).fetchall()
 
     closed_pnls: list[float] = []
-    open_lots: list[tuple[float, float]] = []
+    # Separate FIFO lot queues for long and short positions.
+    long_lots: list[tuple[float, float]] = []
+    short_lots: list[tuple[float, float]] = []
 
     for action, shares, price in reversed(rows):
-        normalized_action = str(action).lower()
+        normalized_action = str(action).lower() if action else ""
         qty = float(shares or 0.0)
         px = float(price or 0.0)
 
@@ -116,28 +128,48 @@ def compute_recent_realized_expectancy(
             continue
 
         if normalized_action == "buy":
-            open_lots.append((qty, px))
+            long_lots.append((qty, px))
             continue
 
-        if normalized_action not in {"sell", "close"}:
+        if normalized_action == "short":
+            short_lots.append((qty, px))
             continue
 
-        remaining = qty
-        realized_pnl = 0.0
-        while remaining > 0 and open_lots:
-            lot_qty, lot_price = open_lots[0]
-            matched = min(remaining, lot_qty)
-            realized_pnl += (px - lot_price) * matched
-            remaining -= matched
-            lot_qty -= matched
-            if lot_qty <= 0:
-                open_lots.pop(0)
-            else:
-                open_lots[0] = (lot_qty, lot_price)
+        if normalized_action in {"sell", "close"}:
+            remaining = qty
+            realized_pnl = 0.0
+            while remaining > 0 and long_lots:
+                lot_qty, lot_price = long_lots[0]
+                matched = min(remaining, lot_qty)
+                realized_pnl += (px - lot_price) * matched
+                remaining -= matched
+                lot_qty -= matched
+                if lot_qty <= 0:
+                    long_lots.pop(0)
+                else:
+                    long_lots[0] = (lot_qty, lot_price)
+            closed_pnls.append(realized_pnl)
+            if len(closed_pnls) >= lookback_closed_trades:
+                break
+            continue
 
-        closed_pnls.append(realized_pnl)
-        if len(closed_pnls) >= lookback_closed_trades:
-            break
+        if normalized_action == "cover":
+            remaining = qty
+            realized_pnl = 0.0
+            while remaining > 0 and short_lots:
+                lot_qty, lot_price = short_lots[0]
+                matched = min(remaining, lot_qty)
+                realized_pnl += (lot_price - px) * matched
+                remaining -= matched
+                lot_qty -= matched
+                if lot_qty <= 0:
+                    short_lots.pop(0)
+                else:
+                    short_lots[0] = (lot_qty, lot_price)
+            closed_pnls.append(realized_pnl)
+            if len(closed_pnls) >= lookback_closed_trades:
+                break
+            continue
 
     if not closed_pnls:
         return None, 0
@@ -153,7 +185,9 @@ def apply_expectancy_buy_scale(signals: list[TradeSignal], scale: float) -> int:
     for idx, signal in enumerate(signals):
         if signal.action != Action.BUY:
             continue
-        signals[idx] = replace(signal, target_weight=signal.target_weight * clamped_scale)
+        signals[idx] = replace(
+            signal, target_weight=signal.target_weight * clamped_scale
+        )
         applied += 1
     return applied
 
@@ -213,7 +247,9 @@ def resolve_active_profit_taking_mandate(
     governance = getattr(config, "governance", None)
     profit_taking = getattr(governance, "profit_taking", None)
     mandates = getattr(profit_taking, "mandates", None)
-    fallback_name = "crypto" if pod_id == "crypto" and hasattr(mandates, "crypto") else "default"
+    fallback_name = (
+        "crypto" if pod_id == "crypto" and hasattr(mandates, "crypto") else "default"
+    )
     fallback = getattr(mandates, fallback_name, None)
     return fallback_name if fallback is not None else None, fallback
 
@@ -247,14 +283,12 @@ def load_latest_harvest_governance_result(
             [pod_id],
         ).fetchone()
     except duckdb.BinderException:
-        row = conn.execute(
-            """
+        row = conn.execute("""
             SELECT checks_json
             FROM surveillance_scans
             ORDER BY scan_timestamp DESC
             LIMIT 1
-            """
-        ).fetchone()
+            """).fetchone()
     if row is None or row[0] is None:
         return HarvestGovernanceRuntimeResult(
             active_mandate_name=active_mandate_name,
@@ -325,31 +359,105 @@ def apply_harvest_governance_controls(
             signal.symbol for signal in signals if signal.action == Action.CLOSE
         }
         adjusted.extend(signals)
-        for symbol in sorted(portfolio_symbols - existing_close_symbols):
-            adjusted.append(
-                TradeSignal(
-                    symbol=symbol,
-                    action=Action.CLOSE,
-                    target_weight=0.0,
-                    conviction=signals[0].conviction if signals else "medium",
-                    reasoning="Harvest governance forced temporary EOD flatten.",
-                    stop_loss=0.0,
-                    take_profit=0.0,
-                    strategy_id="harvest_governance",
-                    exit_reason="harvest_governance_flatten",
-                )
+        adjusted.extend(
+            TradeSignal(
+                symbol=symbol,
+                action=Action.CLOSE,
+                target_weight=0.0,
+                conviction=signals[0].conviction if signals else Conviction.MEDIUM,
+                reasoning="Harvest governance forced temporary EOD flatten.",
+                stop_loss=0.0,
+                take_profit=0.0,
+                strategy_id="harvest_governance",
+                exit_reason="harvest_governance_flatten",
             )
+            for symbol in sorted(portfolio_symbols - existing_close_symbols)
+        )
         return adjusted
 
     scale = max(0.0, min(runtime_result.allocation_scale, 1.0))
     for signal in signals:
         if signal.action == Action.BUY:
-            adjusted.append(
-                replace(signal, target_weight=signal.target_weight * scale)
-            )
+            adjusted.append(replace(signal, target_weight=signal.target_weight * scale))
         else:
             adjusted.append(signal)
     return adjusted
+
+
+def apply_entry_halt_freeze(
+    signals: list[TradeSignal],
+    halt_detectors: set[str] | None,
+    *,
+    entry_freeze_mode: str = "short_rollout_only",
+    entry_freeze_detectors: list[str] | None = None,
+) -> tuple[list[TradeSignal], list[dict[str, str]]]:
+    """Freeze entry risk when governance is halted, according to *entry_freeze_mode*.
+
+        Modes:
+        - ``"short_rollout_only"`` (default): freeze entry-risk actions only when the
+            ``short_rollout`` detector is in HALT.
+        - ``"any_halt"``: freeze entry-risk actions if ANY detector is in
+            ``halt_detectors``.
+        - ``"specific_detectors"``: freeze entry-risk actions when any detector listed
+            in *entry_freeze_detectors* appears in ``halt_detectors``.
+
+        Action policy under freeze (explicit, not omission-based):
+        - Blocked: ``BUY``, ``SHORT``
+        - Always allowed: ``SELL``, ``COVER``, ``CLOSE``, ``HOLD``
+    """
+    if not halt_detectors:
+        return list(signals), []
+
+    if entry_freeze_mode == "short_rollout_only":
+        should_freeze = "short_rollout" in halt_detectors
+    elif entry_freeze_mode == "any_halt":
+        should_freeze = True  # halt_detectors is non-empty at this point
+    elif entry_freeze_mode == "specific_detectors":
+        triggers = set(entry_freeze_detectors or ["short_rollout"])
+        should_freeze = bool(halt_detectors & triggers)
+    else:
+        # Unknown mode — fall back to safe default (freeze on short_rollout)
+        should_freeze = "short_rollout" in halt_detectors
+
+    if not should_freeze:
+        return list(signals), []
+
+    allowed: list[TradeSignal] = []
+    blocked: list[dict[str, str]] = []
+    for signal in signals:
+        if signal.action in ENTRY_HALT_ALWAYS_ALLOWED_ACTIONS:
+            allowed.append(signal)
+            continue
+
+        if signal.action in ENTRY_HALT_BLOCKED_ACTIONS:
+            blocked.append(
+                {
+                    "symbol": signal.symbol,
+                    "action": signal.action.value,
+                    "reason": "entry_halt_freeze",
+                }
+            )
+            continue
+
+        # Unknown/future actions are pass-through by default to avoid trapping exits.
+        allowed.append(signal)
+
+    return allowed, blocked
+
+
+def apply_short_rollout_halt_freeze(
+    signals: list[TradeSignal],
+    halt_detectors: set[str] | None,
+) -> tuple[list[TradeSignal], list[dict[str, str]]]:
+    """Backward-compatible alias for :func:`apply_entry_halt_freeze`.
+
+    Uses ``short_rollout_only`` mode — identical to the original behaviour.
+    """
+    return apply_entry_halt_freeze(
+        signals,
+        halt_detectors,
+        entry_freeze_mode="short_rollout_only",
+    )
 
 
 def log_harvest_governance_action(

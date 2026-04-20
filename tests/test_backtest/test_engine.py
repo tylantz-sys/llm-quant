@@ -75,6 +75,16 @@ def _make_prices(
     )
 
 
+def _zero_cost_model() -> CostModel:
+    return CostModel(
+        spread_bps=0.0,
+        slippage_volatility_factor=0.0,
+        commission_per_share=0.0,
+        min_commission=0.0,
+        flat_slippage_bps=0.0,
+    )
+
+
 class AlwaysBuyStrategy(Strategy):
     """Test strategy that buys everything on every rebalance."""
 
@@ -1189,6 +1199,224 @@ class TestSellExecutionSemantics:
         assert trades[0].shares == 10
         assert "SPY" not in portfolio.positions
         assert signal_noop_reasons == {}
+
+
+class TestShortExecutionSemantics:
+    def test_short_signal_opens_short_position_and_marks_unrealized_pnl(self):
+        engine = BacktestEngine(
+            strategy=NeverTradeStrategy(StrategyConfig(name="no_trade")),
+            initial_capital=100_000.0,
+        )
+
+        portfolio = Portfolio(initial_capital=100_000.0)
+        trades = engine._execute_signals(
+            [
+                TradeSignal(
+                    symbol="SPY",
+                    action=Action.SHORT,
+                    conviction=Conviction.HIGH,
+                    target_weight=0.10,
+                    stop_loss=105.0,
+                    reasoning="open short",
+                )
+            ],
+            portfolio,
+            {"SPY": 100.0},
+            date(2020, 1, 6),
+            _zero_cost_model(),
+            1.0,
+            {},
+            {},
+        )
+
+        assert len(trades) == 1
+        assert trades[0].action == "short"
+        assert trades[0].shares == 100
+        assert portfolio.cash == 110_000.0
+        assert portfolio.positions["SPY"].shares == -100
+        assert portfolio.positions["SPY"].avg_cost == 100.0
+
+        portfolio.update_prices({"SPY": 90.0})
+        assert portfolio.positions["SPY"].unrealized_pnl == 1_000.0
+        assert portfolio.nav == 101_000.0
+
+    def test_cover_signal_partially_reduces_short_position(self):
+        engine = BacktestEngine(
+            strategy=NeverTradeStrategy(StrategyConfig(name="no_trade")),
+            initial_capital=100_000.0,
+        )
+
+        portfolio = Portfolio(initial_capital=100_000.0)
+        portfolio.positions["SPY"] = Position(
+            symbol="SPY",
+            shares=-100,
+            avg_cost=100.0,
+            current_price=100.0,
+            stop_loss=105.0,
+            short_proceeds=10_000.0,
+        )
+        portfolio.cash = 110_000.0
+
+        trades = engine._execute_signals(
+            [
+                TradeSignal(
+                    symbol="SPY",
+                    action=Action.COVER,
+                    conviction=Conviction.MEDIUM,
+                    target_weight=0.05,
+                    stop_loss=105.0,
+                    reasoning="trim short",
+                )
+            ],
+            portfolio,
+            {"SPY": 100.0},
+            date(2020, 1, 6),
+            _zero_cost_model(),
+            1.0,
+            {},
+            {},
+        )
+
+        assert len(trades) == 1
+        assert trades[0].action == "cover"
+        assert trades[0].shares == 50
+        assert trades[0].pnl == 0.0
+        assert portfolio.cash == 105_000.0
+        assert portfolio.positions["SPY"].shares == -50
+        assert portfolio.positions["SPY"].short_proceeds == 5_000.0
+
+    def test_cover_below_entry_realizes_profitable_short_pnl(self):
+        engine = BacktestEngine(
+            strategy=NeverTradeStrategy(StrategyConfig(name="no_trade")),
+            initial_capital=100_000.0,
+        )
+
+        portfolio = Portfolio(initial_capital=100_000.0)
+        portfolio.positions["SPY"] = Position(
+            symbol="SPY",
+            shares=-100,
+            avg_cost=100.0,
+            current_price=100.0,
+            stop_loss=105.0,
+            short_proceeds=10_000.0,
+        )
+        portfolio.cash = 110_000.0
+
+        trades = engine._execute_signals(
+            [
+                TradeSignal(
+                    symbol="SPY",
+                    action=Action.COVER,
+                    conviction=Conviction.HIGH,
+                    target_weight=0.0,
+                    stop_loss=0.0,
+                    reasoning="take profit",
+                )
+            ],
+            portfolio,
+            {"SPY": 90.0},
+            date(2020, 1, 6),
+            _zero_cost_model(),
+            1.0,
+            {},
+            {},
+        )
+
+        assert len(trades) == 1
+        assert trades[0].action == "cover"
+        assert trades[0].shares == 100
+        assert trades[0].pnl == 1_000.0
+        assert portfolio.cash == 101_000.0
+        assert "SPY" not in portfolio.positions
+
+    def test_cover_above_entry_realizes_losing_short_pnl(self):
+        engine = BacktestEngine(
+            strategy=NeverTradeStrategy(StrategyConfig(name="no_trade")),
+            initial_capital=100_000.0,
+        )
+
+        portfolio = Portfolio(initial_capital=100_000.0)
+        portfolio.positions["SPY"] = Position(
+            symbol="SPY",
+            shares=-100,
+            avg_cost=100.0,
+            current_price=100.0,
+            stop_loss=105.0,
+            short_proceeds=10_000.0,
+        )
+        portfolio.cash = 110_000.0
+
+        trades = engine._execute_signals(
+            [
+                TradeSignal(
+                    symbol="SPY",
+                    action=Action.COVER,
+                    conviction=Conviction.HIGH,
+                    target_weight=0.0,
+                    stop_loss=0.0,
+                    reasoning="stop out",
+                )
+            ],
+            portfolio,
+            {"SPY": 110.0},
+            date(2020, 1, 6),
+            _zero_cost_model(),
+            1.0,
+            {},
+            {},
+        )
+
+        assert len(trades) == 1
+        assert trades[0].action == "cover"
+        assert trades[0].shares == 100
+        assert trades[0].pnl == -1_000.0
+        assert portfolio.cash == 99_000.0
+        assert "SPY" not in portfolio.positions
+
+    def test_close_signal_fully_covers_short_position(self):
+        engine = BacktestEngine(
+            strategy=NeverTradeStrategy(StrategyConfig(name="no_trade")),
+            initial_capital=100_000.0,
+        )
+
+        portfolio = Portfolio(initial_capital=100_000.0)
+        portfolio.positions["SPY"] = Position(
+            symbol="SPY",
+            shares=-10,
+            avg_cost=100.0,
+            current_price=100.0,
+            stop_loss=105.0,
+            short_proceeds=1_000.0,
+        )
+        portfolio.cash = 101_000.0
+
+        trades = engine._execute_signals(
+            [
+                TradeSignal(
+                    symbol="SPY",
+                    action=Action.CLOSE,
+                    conviction=Conviction.HIGH,
+                    target_weight=0.0,
+                    stop_loss=0.0,
+                    reasoning="full short close",
+                    exit_reason="rebalance_close",
+                )
+            ],
+            portfolio,
+            {"SPY": 95.0},
+            date(2020, 1, 6),
+            _zero_cost_model(),
+            1.0,
+            {},
+            {},
+        )
+
+        assert len(trades) == 1
+        assert trades[0].action == "close"
+        assert trades[0].shares == 10
+        assert trades[0].pnl == 50.0
+        assert portfolio.cash == 100_050.0
+        assert "SPY" not in portfolio.positions
 
 
 class TestEngineIntegration:

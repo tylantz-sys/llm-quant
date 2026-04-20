@@ -72,21 +72,53 @@ def _require_complete_telemetry_snapshot(snapshot: object | None) -> dict[str, A
     missing = [
         field
         for field in _REQUIRED_TELEMETRY_SNAPSHOT_FIELDS
-        if not any(normalized.get(key) is not None for key in _snapshot_key_variants(field))
+        if not any(
+            normalized.get(key) is not None for key in _snapshot_key_variants(field)
+        )
     ]
     if missing:
-        raise RuntimeError("INCOMPLETE TELEMETRY SNAPSHOT")
+        msg = "INCOMPLETE TELEMETRY SNAPSHOT"
+        raise RuntimeError(msg)
     return normalized
 
 
 def _snapshot_reasoning_suffix(snapshot: dict[str, Any]) -> str:
     payload = {
         "intraday_position_state": snapshot.get("intraday_position_state"),
-        "order_state": snapshot.get("order_state", snapshot.get("intraday_order_state")),
+        "order_state": snapshot.get(
+            "order_state", snapshot.get("intraday_order_state")
+        ),
         "lifecycle_state": snapshot.get("lifecycle_state"),
         "exit_policy_state": snapshot.get("exit_policy_state"),
     }
     return json.dumps(payload, sort_keys=True, default=str)
+
+
+def _normalize_broker_fill_semantic_action(
+    side: str,
+    intent_type: object | None,
+    lifecycle_state: object | None,
+) -> str:
+    """Return a semantic action label that preserves short lifecycle intent."""
+    normalized_side = (side or "").strip().lower()
+    intent = str(intent_type).strip().lower() if intent_type is not None else ""
+    lifecycle = (
+        str(lifecycle_state).strip().lower() if lifecycle_state is not None else ""
+    )
+
+    if normalized_side == "sell_short":
+        return "short_entry"
+    if normalized_side == "buy_to_cover":
+        return "short_cover"
+    if normalized_side == "buy":
+        if "cover" in intent or "cover" in lifecycle:
+            return "short_cover"
+        return "long_entry"
+    if normalized_side == "sell":
+        if "entry" in intent or "open" in lifecycle:
+            return "short_entry"
+        return "long_exit"
+    return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +199,9 @@ def log_trades(
         if "strategy_id" in trade_cols:
             insert_cols.append("strategy_id")
             insert_vals.append(trade.strategy_id or None)
+        if "semantic_action" in trade_cols:
+            insert_cols.append("semantic_action")
+            insert_vals.append(None)
         if "entry_batch" in trade_cols:
             insert_cols.append("entry_batch")
             insert_vals.append(trade.entry_batch)
@@ -176,7 +211,9 @@ def log_trades(
             insert_vals.append(normalized_exit_reason)
         if "source_decision_id" in trade_cols:
             insert_cols.append("source_decision_id")
-            insert_vals.append(source_decision_id if source_decision_id is not None else decision_id)
+            insert_vals.append(
+                source_decision_id if source_decision_id is not None else decision_id
+            )
         if "decision_source" in trade_cols:
             insert_cols.append("decision_source")
             insert_vals.append(decision_source)
@@ -189,7 +226,9 @@ def log_trades(
         if "profit_take_reason" in trade_cols:
             insert_cols.append("profit_take_reason")
             insert_vals.append(
-                normalized_exit_reason if is_profit_take_reason(normalized_exit_reason) else None
+                normalized_exit_reason
+                if is_profit_take_reason(normalized_exit_reason)
+                else None
             )
 
         cols_sql = ", ".join(insert_cols)
@@ -259,7 +298,9 @@ def log_broker_fills(
     sleeve: str | None,
     source_decision_id: int | None,
     snapshot: object | None = None,
-    exit_policy_state: dict | None = None,
+    exit_policy_state: (  # noqa: ARG001 — interface for callers via **kwargs
+        dict[str, Any] | None
+    ) = None,
 ) -> list[int]:
     """Persist broker-authoritative fills into the existing ``trades`` table.
 
@@ -296,7 +337,8 @@ def log_broker_fills(
 
         if shares <= 0.0 or price <= 0.0 or not symbol:
             logger.warning(
-                "Skipping invalid broker fill: symbol=%s side=%s qty=%.6f price=%.4f order_id=%s",
+                "Skipping invalid broker fill: symbol=%s side=%s "
+                "qty=%.6f price=%.4f order_id=%s",
                 symbol,
                 side,
                 shares,
@@ -309,7 +351,12 @@ def log_broker_fills(
         assert row is not None
         trade_id: int = row[0]
 
-        action = "buy" if side == "buy" else "sell"
+        action = "buy" if side in {"buy", "buy_to_cover"} else "sell"
+        semantic_action = _normalize_broker_fill_semantic_action(
+            side,
+            intent_type,
+            lifecycle_state,
+        )
         normalized_exit_reason = normalize_profit_take_reason(
             str(exit_reason) if exit_reason is not None else None
         )
@@ -364,6 +411,28 @@ def log_broker_fills(
         if "strategy_id" in trade_cols:
             insert_cols.append("strategy_id")
             insert_vals.append(None)
+        if "semantic_action" in trade_cols:
+            insert_cols.append("semantic_action")
+            insert_vals.append(semantic_action)
+        if "broker_side" in trade_cols:
+            insert_cols.append("broker_side")
+            insert_vals.append(side)
+        if "intent_type" in trade_cols:
+            insert_cols.append("intent_type")
+            insert_vals.append(str(intent_type) if intent_type is not None else None)
+        if "lifecycle_state" in trade_cols:
+            insert_cols.append("lifecycle_state")
+            insert_vals.append(
+                str(lifecycle_state) if lifecycle_state is not None else None
+            )
+        if "order_id" in trade_cols:
+            insert_cols.append("order_id")
+            insert_vals.append(str(order_id) if order_id is not None else None)
+        if "parent_order_id" in trade_cols:
+            insert_cols.append("parent_order_id")
+            insert_vals.append(
+                str(parent_order_id) if parent_order_id is not None else None
+            )
         if "entry_batch" in trade_cols:
             insert_cols.append("entry_batch")
             insert_vals.append(None)
@@ -372,7 +441,9 @@ def log_broker_fills(
             insert_vals.append(normalized_exit_reason)
         if "source_decision_id" in trade_cols:
             insert_cols.append("source_decision_id")
-            insert_vals.append(source_decision_id if source_decision_id is not None else decision_id)
+            insert_vals.append(
+                source_decision_id if source_decision_id is not None else decision_id
+            )
         if "decision_source" in trade_cols:
             insert_cols.append("decision_source")
             insert_vals.append(decision_source)
@@ -385,7 +456,9 @@ def log_broker_fills(
         if "profit_take_reason" in trade_cols:
             insert_cols.append("profit_take_reason")
             insert_vals.append(
-                normalized_exit_reason if is_profit_take_reason(normalized_exit_reason) else None
+                normalized_exit_reason
+                if is_profit_take_reason(normalized_exit_reason)
+                else None
             )
 
         cols_sql = ", ".join(insert_cols)
@@ -424,7 +497,8 @@ def log_broker_fills(
         prev_hash = row_hash
         trade_ids.append(trade_id)
         logger.debug(
-            "Logged broker fill %d: %s %s %.4f shares @ %.4f order_id=%s intent_type=%s lifecycle_state=%s",
+            "Logged broker fill %d: %s %s %.4f shares @ %.4f "
+            "order_id=%s intent_type=%s lifecycle_state=%s",
             trade_id,
             action,
             symbol,
@@ -453,7 +527,7 @@ def log_broker_fills(
 
 
 def persist_reconciliation_snapshot(
-    conn: duckdb.DuckDBPyConnection,
+    _conn: duckdb.DuckDBPyConnection,
     *,
     pod_id: str,
     snapshot_date: date,
@@ -503,7 +577,9 @@ def save_portfolio_snapshot(
         pos.market_value for pos in portfolio.positions.values() if pos.market_value > 0
     )
     short_exposure = sum(
-        abs(pos.market_value) for pos in portfolio.positions.values() if pos.market_value < 0
+        abs(pos.market_value)
+        for pos in portfolio.positions.values()
+        if pos.market_value < 0
     )
 
     snap_cols = [c[0] for c in conn.execute("DESCRIBE portfolio_snapshots").fetchall()]

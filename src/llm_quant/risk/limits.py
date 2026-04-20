@@ -380,9 +380,14 @@ def check_margin_buffer(
 
 def check_locate_availability(
     require_locate: bool,
-    locate_available: bool = True,
+    locate_available: bool | None = None,
 ) -> RiskCheckResult:
-    """Paper-trading locate stub; live integration can replace this later."""
+    """Validate locate availability for short entries.
+
+    When locate is required, callers must provide an explicit locate decision.
+    Missing locate state is treated as a failure so the gate cannot silently
+    degrade into a hardcoded pass.
+    """
     if not require_locate:
         return RiskCheckResult(
             passed=True,
@@ -390,6 +395,15 @@ def check_locate_availability(
             message="Locate not required by policy.",
             current_value=1.0,
             limit_value=0.0,
+        )
+
+    if locate_available is None:
+        return RiskCheckResult(
+            passed=False,
+            rule="locate_availability",
+            message="Locate required but no locate status was provided for short entry.",
+            current_value=0.0,
+            limit_value=1.0,
         )
 
     return RiskCheckResult(

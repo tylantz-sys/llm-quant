@@ -204,7 +204,9 @@ def _validate_telemetry_snapshot(snapshot: object | None) -> dict[str, Any]:
     missing = [
         field
         for field in _REQUIRED_TELEMETRY_SNAPSHOT_FIELDS
-        if not any(normalized.get(key) is not None for key in _snapshot_key_variants(field))
+        if not any(
+            normalized.get(key) is not None for key in _snapshot_key_variants(field)
+        )
     ]
     if missing:
         raise ReconciliationError("INCOMPLETE TELEMETRY SNAPSHOT")
@@ -212,119 +214,9 @@ def _validate_telemetry_snapshot(snapshot: object | None) -> dict[str, Any]:
 
 
 def _ensure_reconciliation_tables(conn: duckdb.DuckDBPyConnection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS broker_submitted_orders (
-            order_id VARCHAR PRIMARY KEY,
-            pod_id VARCHAR NOT NULL DEFAULT 'default',
-            symbol VARCHAR NOT NULL,
-            side VARCHAR NOT NULL,
-            qty DOUBLE,
-            order_type VARCHAR,
-            time_in_force VARCHAR,
-            intent_type VARCHAR,
-            parent_order_id VARCHAR,
-            exit_reason VARCHAR,
-            client_order_id VARCHAR,
-            status VARCHAR,
-            submitted_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            raw_json TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS broker_fill_events (
-            order_id VARCHAR NOT NULL,
-            symbol VARCHAR NOT NULL,
-            side VARCHAR NOT NULL,
-            fill_qty DOUBLE NOT NULL,
-            fill_price DOUBLE NOT NULL,
-            fill_time TIMESTAMP NOT NULL,
-            intent_type VARCHAR,
-            parent_order_id VARCHAR,
-            exit_reason VARCHAR,
-            lifecycle_state VARCHAR,
-            is_forced_liquidation BOOLEAN NOT NULL DEFAULT FALSE,
-            commission DOUBLE NOT NULL DEFAULT 0.0,
-            execution_id VARCHAR,
-            execution_ref VARCHAR,
-            execution_action VARCHAR,
-            corrected_execution_id VARCHAR,
-            reversal_execution_id VARCHAR,
-            broker_fill_key VARCHAR,
-            is_correction BOOLEAN NOT NULL DEFAULT FALSE,
-            is_reversal BOOLEAN NOT NULL DEFAULT FALSE,
-            pod_id VARCHAR NOT NULL DEFAULT 'default',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (order_id, fill_time, fill_qty, fill_price)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS broker_position_lifecycle (
-            pod_id VARCHAR NOT NULL DEFAULT 'default',
-            symbol VARCHAR NOT NULL,
-            state VARCHAR NOT NULL,
-            entry_order_id VARCHAR,
-            exit_order_id VARCHAR,
-            position_qty DOUBLE NOT NULL DEFAULT 0,
-            has_entry_fill BOOLEAN NOT NULL DEFAULT FALSE,
-            has_exit_orders BOOLEAN NOT NULL DEFAULT FALSE,
-            has_open_position BOOLEAN NOT NULL DEFAULT FALSE,
-            is_flat BOOLEAN NOT NULL DEFAULT TRUE,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (pod_id, symbol)
-        )
-        """
-    )
-    columns = {
-        row[1]
-        for row in conn.execute("PRAGMA table_info('broker_fill_events')").fetchall()
-    }
-    if "execution_id" not in columns:
-        conn.execute("ALTER TABLE broker_fill_events ADD COLUMN execution_id VARCHAR")
-    if "execution_ref" not in columns:
-        conn.execute("ALTER TABLE broker_fill_events ADD COLUMN execution_ref VARCHAR")
-    if "execution_action" not in columns:
-        conn.execute("ALTER TABLE broker_fill_events ADD COLUMN execution_action VARCHAR")
-    if "corrected_execution_id" not in columns:
-        conn.execute("ALTER TABLE broker_fill_events ADD COLUMN corrected_execution_id VARCHAR")
-    if "reversal_execution_id" not in columns:
-        conn.execute("ALTER TABLE broker_fill_events ADD COLUMN reversal_execution_id VARCHAR")
-    if "broker_fill_key" not in columns:
-        conn.execute("ALTER TABLE broker_fill_events ADD COLUMN broker_fill_key VARCHAR")
-    if "is_correction" not in columns:
-        conn.execute("ALTER TABLE broker_fill_events ADD COLUMN is_correction BOOLEAN NOT NULL DEFAULT FALSE")
-    if "is_reversal" not in columns:
-        conn.execute("ALTER TABLE broker_fill_events ADD COLUMN is_reversal BOOLEAN NOT NULL DEFAULT FALSE")
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_broker_submitted_orders_pod_status
-            ON broker_submitted_orders (pod_id, status, symbol)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_broker_fill_events_pod_time
-            ON broker_fill_events (pod_id, fill_time DESC, symbol)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_broker_fill_events_identity
-            ON broker_fill_events (pod_id, order_id, execution_id, execution_ref, broker_fill_key)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_broker_position_lifecycle_pod_state
-            ON broker_position_lifecycle (pod_id, state, symbol)
-        """
-    )
+    from llm_quant.db.schema import ensure_broker_reconciliation_schema
+
+    ensure_broker_reconciliation_schema(conn)
     conn.commit()
 
 
@@ -373,7 +265,9 @@ def _execution_identity(fill: BrokerFillEvent) -> str:
     )
 
 
-def _canonical_fill_economic_key(fill: BrokerFillEvent) -> tuple[str, str, str, float, float, str]:
+def _canonical_fill_economic_key(
+    fill: BrokerFillEvent,
+) -> tuple[str, str, str, float, float, str]:
     return (
         fill.order_id,
         fill.symbol,
@@ -384,7 +278,9 @@ def _canonical_fill_economic_key(fill: BrokerFillEvent) -> tuple[str, str, str, 
     )
 
 
-def _canonical_lineage_identity(status: BrokerOrderStatus) -> tuple[str, str, str | None]:
+def _canonical_lineage_identity(
+    status: BrokerOrderStatus,
+) -> tuple[str, str, str | None]:
     return (
         status.symbol,
         status.side.lower(),
@@ -419,7 +315,11 @@ def _validate_submitted_order_identity(
     candidate_identity = (
         str(record.get("symbol") or ""),
         str(record.get("side") or "").lower(),
-        str(record.get("parent_order_id")) if record.get("parent_order_id") is not None else None,
+        (
+            str(record.get("parent_order_id"))
+            if record.get("parent_order_id") is not None
+            else None
+        ),
     )
     if existing_identity != candidate_identity:
         raise OrderingError("UNKNOWN_SUBMITTED_ORDER_LINEAGE")
@@ -427,8 +327,18 @@ def _validate_submitted_order_identity(
 
 def _signed_fill_qty(fill: BrokerFillEvent) -> float:
     base_qty = _parse_float(fill.fill_qty)
-    if fill.side.lower() == "sell":
+    normalized_side = (fill.side or "").strip().lower()
+    if normalized_side in {"sell", "sell_short"}:
         base_qty = -base_qty
+    elif normalized_side in {"buy", "buy_to_cover"}:
+        pass
+    else:
+        logger.warning(
+            "Unknown broker fill side %r for %s (%s); defaulting to buy semantics.",
+            fill.side,
+            fill.symbol,
+            fill.order_id,
+        )
     if fill.is_reversal:
         return -base_qty
     return base_qty
@@ -448,7 +358,10 @@ def _status_from_order_record(
         qty=_parse_float(record.get("qty")),
         filled_qty=_parse_float(record.get("filled_qty")),
         remaining_qty=_parse_float(record.get("remaining_qty"))
-        or max(_parse_float(record.get("qty")) - _parse_float(record.get("filled_qty")), 0.0),
+        or max(
+            _parse_float(record.get("qty")) - _parse_float(record.get("filled_qty")),
+            0.0,
+        ),
         filled_avg_price=(
             _parse_float(record.get("filled_avg_price"))
             if record.get("filled_avg_price") not in (None, "")
@@ -465,18 +378,26 @@ def _status_from_order_record(
         intent_type=record.get("intent_type"),
         parent_order_id=record.get("parent_order_id"),
         exit_reason=record.get("exit_reason"),
-        replaced_by_order_id=record.get("replaced_by") or record.get("replaced_by_order_id"),
+        replaced_by_order_id=record.get("replaced_by")
+        or record.get("replaced_by_order_id"),
         rejection_reason=record.get("rejection_reason"),
         fill_events=[
             BrokerFillEvent(
-                order_id=str(fill.get("order_id") or record.get("id") or record.get("order_id") or ""),
+                order_id=str(
+                    fill.get("order_id")
+                    or record.get("id")
+                    or record.get("order_id")
+                    or ""
+                ),
                 symbol=str(fill.get("symbol") or record.get("symbol") or ""),
                 side=str(fill.get("side") or record.get("side") or ""),
                 fill_qty=_parse_float(fill.get("fill_qty") or fill.get("qty")),
                 fill_price=_parse_float(fill.get("fill_price") or fill.get("price")),
-                fill_time=_parse_dt(fill.get("fill_time") or fill.get("timestamp")) or datetime.now(tz=UTC),
+                fill_time=_parse_dt(fill.get("fill_time") or fill.get("timestamp"))
+                or datetime.now(tz=UTC),
                 intent_type=fill.get("intent_type") or record.get("intent_type"),
-                parent_order_id=fill.get("parent_order_id") or record.get("parent_order_id"),
+                parent_order_id=fill.get("parent_order_id")
+                or record.get("parent_order_id"),
                 exit_reason=fill.get("exit_reason") or record.get("exit_reason"),
                 lifecycle_state=fill.get("lifecycle_state"),
                 is_forced_liquidation=bool(fill.get("is_forced_liquidation", False)),
@@ -487,11 +408,19 @@ def _status_from_order_record(
                     else None
                 ),
                 execution_ref=(
-                    str(fill.get("execution_ref") or fill.get("trade_id") or fill.get("id"))
-                    if fill.get("execution_ref") not in (None, "") or fill.get("trade_id") not in (None, "") or fill.get("id") not in (None, "")
+                    str(
+                        fill.get("execution_ref")
+                        or fill.get("trade_id")
+                        or fill.get("id")
+                    )
+                    if fill.get("execution_ref") not in (None, "")
+                    or fill.get("trade_id") not in (None, "")
+                    or fill.get("id") not in (None, "")
                     else None
                 ),
-                execution_action=_normalized_execution_action(fill.get("execution_action") or fill.get("event")),
+                execution_action=_normalized_execution_action(
+                    fill.get("execution_action") or fill.get("event")
+                ),
                 corrected_execution_id=(
                     str(fill.get("corrected_execution_id"))
                     if fill.get("corrected_execution_id") not in (None, "")
@@ -504,7 +433,8 @@ def _status_from_order_record(
                 ),
                 broker_fill_key=(
                     str(fill.get("broker_fill_key") or fill.get("fill_id"))
-                    if fill.get("broker_fill_key") not in (None, "") or fill.get("fill_id") not in (None, "")
+                    if fill.get("broker_fill_key") not in (None, "")
+                    or fill.get("fill_id") not in (None, "")
                     else None
                 ),
                 is_correction=bool(fill.get("is_correction", False)),
@@ -545,7 +475,9 @@ def _event_type_for_submission(intent_type: str | None) -> BrokerEventType:
     return BrokerEventType.ORDER_SUBMITTED
 
 
-def _event_type_for_fill(status: BrokerOrderStatus, fill: BrokerFillEvent) -> BrokerEventType:
+def _event_type_for_fill(
+    status: BrokerOrderStatus, fill: BrokerFillEvent
+) -> BrokerEventType:
     normalized_intent = (fill.intent_type or status.intent_type or "").strip().lower()
     if status.remaining_qty > 1e-9 or status.status == "partially_filled":
         return BrokerEventType.ORDER_PARTIALLY_FILLED
@@ -558,8 +490,16 @@ def _event_type_for_fill(status: BrokerOrderStatus, fill: BrokerFillEvent) -> Br
     return BrokerEventType.ORDER_FILLED
 
 
-def _event_type_for_terminal_status(status: BrokerOrderStatus) -> BrokerEventType | None:
-    if status.status in {"canceled", "cancelled", "expired", "rejected", "done_for_day"}:
+def _event_type_for_terminal_status(
+    status: BrokerOrderStatus,
+) -> BrokerEventType | None:
+    if status.status in {
+        "canceled",
+        "cancelled",
+        "expired",
+        "rejected",
+        "done_for_day",
+    }:
         return BrokerEventType.ORDER_CANCELED
     if status.status == "replaced":
         return BrokerEventType.ORDER_CANCELED
@@ -620,7 +560,9 @@ def _append_replacement_event(
         return
     metadata_json = None
     if status.replaced_by_order_id:
-        metadata_json = _metadata_json({"replaced_by_order_id": status.replaced_by_order_id})
+        metadata_json = _metadata_json(
+            {"replaced_by_order_id": status.replaced_by_order_id}
+        )
     append_event(
         conn,
         BrokerLedgerEvent(
@@ -725,7 +667,9 @@ def _rebuild_portfolio_from_reconciliation(
         for sym, pos in portfolio.positions.items()
     }
 
-    initial_capital = float(getattr(portfolio, "initial_capital", float(getattr(portfolio, "cash", 0.0))))
+    initial_capital = float(
+        getattr(portfolio, "initial_capital", float(getattr(portfolio, "cash", 0.0)))
+    )
     portfolio.positions.clear()
     portfolio.cash = initial_capital
 
@@ -741,7 +685,16 @@ def _rebuild_portfolio_from_reconciliation(
 
     applied = 0
     for row in rows:
-        symbol, side, fill_qty, fill_price, fill_time, order_id, intent_type, is_reversal = row
+        (
+            symbol,
+            side,
+            fill_qty,
+            fill_price,
+            fill_time,
+            order_id,
+            intent_type,
+            is_reversal,
+        ) = row
         effective_side = str(side)
         effective_qty = _parse_float(fill_qty)
         if bool(is_reversal):
@@ -795,12 +748,13 @@ def _persist_lifecycle_snapshot(
             entry_order_id,
             exit_order_id,
             position_qty,
+            is_short,
             has_entry_fill,
             has_exit_orders,
             has_open_position,
             is_flat,
             updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             pod_id,
@@ -809,6 +763,7 @@ def _persist_lifecycle_snapshot(
             snapshot.entry_order_id,
             snapshot.exit_order_id,
             snapshot.position_qty,
+            snapshot.is_short,
             snapshot.has_entry_fill,
             snapshot.has_exit_orders,
             snapshot.has_open_position,
@@ -855,10 +810,7 @@ def _effective_broker_qtys(
     if broker_qtys:
         return broker_qtys
     rebuilt = rebuild_position_state_from_events(conn, pod_id=pod_id)
-    return {
-        symbol: state.position_qty
-        for symbol, state in rebuilt.items()
-    }
+    return {symbol: state.position_qty for symbol, state in rebuilt.items()}
 
 
 def _validate_event_ledger_rebuild(
@@ -871,14 +823,18 @@ def _validate_event_ledger_rebuild(
 ) -> None:
     rebuilt = rebuild_position_state_from_events(conn, pod_id=pod_id)
     broker_qtys = _broker_qtys_from_snapshot(broker_positions)
-    portfolio_qtys = _portfolio_position_qtys(portfolio) if portfolio is not None else {}
+    portfolio_qtys = (
+        _portfolio_position_qtys(portfolio) if portfolio is not None else {}
+    )
     symbols = set(rebuilt) | set(lifecycle) | set(broker_qtys) | set(portfolio_qtys)
 
     for symbol in symbols:
         rebuilt_state = rebuilt.get(symbol)
         rebuilt_qty = rebuilt_state.position_qty if rebuilt_state is not None else 0.0
         lifecycle_snapshot = lifecycle.get(symbol)
-        lifecycle_qty = lifecycle_snapshot.position_qty if lifecycle_snapshot is not None else 0.0
+        lifecycle_qty = (
+            lifecycle_snapshot.position_qty if lifecycle_snapshot is not None else 0.0
+        )
         portfolio_qty = portfolio_qtys.get(symbol, rebuilt_qty)
 
         if abs(rebuilt_qty - lifecycle_qty) > 1e-9:
@@ -915,8 +871,7 @@ def _build_reconciliation_snapshot(
         if str(item.get("symbol") or "")
     }
     lifecycle_state = {
-        symbol: snapshot.state.value
-        for symbol, snapshot in lifecycle.items()
+        symbol: snapshot.state.value for symbol, snapshot in lifecycle.items()
     }
     exit_policy_state = dict((log_kwargs or {}).get("exit_policy_state") or {})
     snapshot = {
@@ -1043,7 +998,9 @@ def _classify_status(
         if fill.intent_type in _EXIT_INTENT_TYPES and not fill.parent_order_id:
             entry_order_id = symbol_entry_orders.get(fill.symbol)
             if entry_order_id is None:
-                fatal_reasons.append(f"EXIT_FILL_WITHOUT_PARENT:{fill.symbol}:{fill.order_id}")
+                fatal_reasons.append(
+                    f"EXIT_FILL_WITHOUT_PARENT:{fill.symbol}:{fill.order_id}"
+                )
 
     if fatal_reasons:
         return ReconciliationStatus.FATAL, ";".join(sorted(set(fatal_reasons)))
@@ -1071,7 +1028,9 @@ def _validate_bracket_invariants(
             symbol,
             _symbol_position_qty_from_fills(conn=conn, pod_id=pod_id, symbol=symbol),
         )
-        open_exit_intents = {str(status.intent_type or "") for status in open_exit_statuses}
+        open_exit_intents = {
+            str(status.intent_type or "") for status in open_exit_statuses
+        }
         if broker_qty <= 1e-9:
             if open_exit_statuses:
                 raise ReconciliationError("OPEN_PROTECTION_WITH_FLAT_POSITION")
@@ -1107,7 +1066,9 @@ def _resolve_fill_decisions(status: BrokerOrderStatus) -> list[ReconciledFillDec
         ),
     )
     decisions_by_identity: dict[str, ReconciledFillDecision] = {}
-    applied_identity_by_economic_key: dict[tuple[str, str, str, float, float, str], str] = {}
+    applied_identity_by_economic_key: dict[
+        tuple[str, str, str, float, float, str], str
+    ] = {}
     for fill in raw_fills:
         identity = _execution_identity(fill)
         action = _normalized_execution_action(fill.execution_action) or "apply"
@@ -1201,7 +1162,9 @@ def _validate_partial_fill_consistency(
         )
 
 
-def _advisory_canceled_oco_fills(statuses: list[BrokerOrderStatus]) -> dict[str, list[BrokerOrderStatus]]:
+def _advisory_canceled_oco_fills(
+    statuses: list[BrokerOrderStatus],
+) -> dict[str, list[BrokerOrderStatus]]:
     by_parent: dict[str, list[BrokerOrderStatus]] = {}
     for status in statuses:
         if status.intent_type not in _PROTECTION_INTENT_TYPES:
@@ -1227,10 +1190,17 @@ def _post_facto_oco_arbitration(
         intents = {str(fill.intent_type or "") for fill in parent_fills}
         if len(intents) <= 1:
             continue
-        if "stop_loss" in intents and ("take_profit_1" in intents or "take_profit_2" in intents):
-            earliest = min(parent_fills, key=lambda fill: (fill.fill_time, fill.order_id))
+        if "stop_loss" in intents and (
+            "take_profit_1" in intents or "take_profit_2" in intents
+        ):
+            earliest = min(
+                parent_fills, key=lambda fill: (fill.fill_time, fill.order_id)
+            )
             latest = max(parent_fills, key=lambda fill: (fill.fill_time, fill.order_id))
-            if earliest.order_id == latest.order_id and earliest.intent_type == latest.intent_type:
+            if (
+                earliest.order_id == latest.order_id
+                and earliest.intent_type == latest.intent_type
+            ):
                 continue
             raise OCOConflictError(
                 f"OCO_POST_FACTO_ARBITRATION_REQUIRED: parent_order_id={parent_order_id} winning_order_id={earliest.order_id} losing_order_id={latest.order_id}"
@@ -1239,14 +1209,18 @@ def _post_facto_oco_arbitration(
     grouped_statuses = _advisory_canceled_oco_fills(statuses)
     for parent_order_id, child_statuses in sorted(grouped_statuses.items()):
         filled_children = [
-            status for status in child_statuses if status.filled_qty > 0 or status.status == "filled"
+            status
+            for status in child_statuses
+            if status.filled_qty > 0 or status.status == "filled"
         ]
         if len(filled_children) <= 1:
             continue
         ordered = sorted(
             filled_children,
             key=lambda status: (
-                status.updated_at or status.submitted_at or datetime.min.replace(tzinfo=UTC),
+                status.updated_at
+                or status.submitted_at
+                or datetime.min.replace(tzinfo=UTC),
                 status.order_id,
             ),
         )
@@ -1289,31 +1263,60 @@ def _validate_reconciliation_invariants(
     ).fetchall():
         known_submitted_orders.add(str(row[0]))
 
-    for order_id, symbol, side, fill_qty, intent_type, parent_order_id, is_reversal in fill_rows:
+    for (
+        order_id,
+        symbol,
+        side,
+        fill_qty,
+        intent_type,
+        parent_order_id,
+        is_reversal,
+    ) in fill_rows:
         if str(order_id) not in known_submitted_orders:
             raise OrderingError("FILL_WITHOUT_KNOWN_SUBMITTED_ORDER")
         normalized_intent = str(intent_type or "")
-        normalized_parent = str(parent_order_id) if parent_order_id is not None else None
+        normalized_parent = (
+            str(parent_order_id) if parent_order_id is not None else None
+        )
         if normalized_intent in _EXIT_INTENT_TYPES and not normalized_parent:
             raise OrderingError("FILL_WITHOUT_PARENT_ORDER")
-        if normalized_parent is not None and normalized_parent not in known_submitted_orders:
+        if (
+            normalized_parent is not None
+            and normalized_parent not in known_submitted_orders
+        ):
             raise OrderingError("FILL_WITH_UNKNOWN_PARENT_ORDER")
-        signed_qty = _parse_float(fill_qty) if str(side).lower() == "buy" else -_parse_float(fill_qty)
+        signed_qty = (
+            _parse_float(fill_qty)
+            if str(side).lower() == "buy"
+            else -_parse_float(fill_qty)
+        )
         if bool(is_reversal):
             signed_qty = -signed_qty
-        fill_position_qtys[str(symbol)] = fill_position_qtys.get(str(symbol), 0.0) + signed_qty
+        fill_position_qtys[str(symbol)] = (
+            fill_position_qtys.get(str(symbol), 0.0) + signed_qty
+        )
 
     broker_qtys = _broker_qtys_from_snapshot(broker_positions)
     rebuilt = rebuild_position_state_from_events(conn, pod_id=pod_id)
-    portfolio_qtys = _portfolio_position_qtys(portfolio) if portfolio is not None else {}
-    symbols = set(fill_position_qtys) | set(broker_qtys) | set(rebuilt) | set(lifecycle) | set(portfolio_qtys)
+    portfolio_qtys = (
+        _portfolio_position_qtys(portfolio) if portfolio is not None else {}
+    )
+    symbols = (
+        set(fill_position_qtys)
+        | set(broker_qtys)
+        | set(rebuilt)
+        | set(lifecycle)
+        | set(portfolio_qtys)
+    )
 
     for symbol in symbols:
         fill_qty = fill_position_qtys.get(symbol, 0.0)
         rebuilt_state = rebuilt.get(symbol)
         rebuilt_qty = rebuilt_state.position_qty if rebuilt_state is not None else 0.0
         lifecycle_state = lifecycle.get(symbol)
-        lifecycle_qty = lifecycle_state.position_qty if lifecycle_state is not None else 0.0
+        lifecycle_qty = (
+            lifecycle_state.position_qty if lifecycle_state is not None else 0.0
+        )
         portfolio_qty = portfolio_qtys.get(symbol, rebuilt_qty)
 
         if abs(fill_qty - rebuilt_qty) > 1e-9:
@@ -1330,7 +1333,9 @@ def _validate_reconciliation_invariants(
             continue
         if status.order_id not in known_submitted_orders:
             raise OrderingError("OPEN_ORDER_WITHOUT_VALID_ORIGIN_INTENT")
-        lineage = _require_submitted_order_lineage(conn, pod_id=pod_id, order_id=status.order_id)
+        lineage = _require_submitted_order_lineage(
+            conn, pod_id=pod_id, order_id=status.order_id
+        )
         if not lineage.get("intent_type"):
             raise OrderingError("OPEN_ORDER_WITHOUT_VALID_ORIGIN_INTENT")
         if status.intent_type in _EXIT_INTENT_TYPES and not (
@@ -1338,7 +1343,9 @@ def _validate_reconciliation_invariants(
         ):
             raise OrderingError("OPEN_EXIT_ORDER_WITHOUT_PARENT_INTENT")
         if status.intent_type in _EXIT_INTENT_TYPES:
-            parent_order_id = str(status.parent_order_id or lineage.get("parent_order_id") or "")
+            parent_order_id = str(
+                status.parent_order_id or lineage.get("parent_order_id") or ""
+            )
             if parent_order_id not in known_submitted_orders:
                 raise OrderingError("OPEN_EXIT_ORDER_WITH_UNKNOWN_PARENT_INTENT")
 
@@ -1541,7 +1548,9 @@ def reconcile_broker_orders(
                     order_id=order_id,
                     reason=str(exc),
                 )
-                logger.warning("Skipping reconciliation fetch failure for %s: %s", order_id, exc)
+                logger.warning(
+                    "Skipping reconciliation fetch failure for %s: %s", order_id, exc
+                )
                 continue
             status = _status_from_order_record(order, fallback)
             statuses.append(status)
@@ -1617,7 +1626,9 @@ def reconcile_broker_orders(
 
             for decision in decisions:
                 fill = decision.fill
-                lineage = _require_submitted_order_lineage(conn, pod_id=pod_id, order_id=fill.order_id)
+                lineage = _require_submitted_order_lineage(
+                    conn, pod_id=pod_id, order_id=fill.order_id
+                )
                 if fill.fill_time is not None:
                     candidate_submitted_times = [
                         submitted_time
@@ -1628,24 +1639,42 @@ def reconcile_broker_orders(
                         if submitted_time is not None
                     ]
                     earliest_submitted_at = (
-                        min(candidate_submitted_times) if candidate_submitted_times else None
+                        min(candidate_submitted_times)
+                        if candidate_submitted_times
+                        else None
                     )
-                    if earliest_submitted_at is not None and fill.fill_time < earliest_submitted_at:
+                    if (
+                        earliest_submitted_at is not None
+                        and fill.fill_time < earliest_submitted_at
+                    ):
                         raise OrderingError("FILL_WITHOUT_KNOWN_SUBMITTED_ORDER")
                 if _canonical_lineage_identity(status) != (
                     str(lineage.get("symbol") or ""),
                     str(lineage.get("side") or "").lower(),
-                    str(lineage.get("parent_order_id")) if lineage.get("parent_order_id") is not None else None,
+                    (
+                        str(lineage.get("parent_order_id"))
+                        if lineage.get("parent_order_id") is not None
+                        else None
+                    ),
                 ):
                     raise OrderingError("UNKNOWN_SUBMITTED_ORDER_LINEAGE")
-                if fill.parent_order_id and fill.parent_order_id not in fallback_records:
-                    parent_lineage = _require_submitted_order_lineage(conn, pod_id=pod_id, order_id=fill.parent_order_id)
+                if (
+                    fill.parent_order_id
+                    and fill.parent_order_id not in fallback_records
+                ):
+                    parent_lineage = _require_submitted_order_lineage(
+                        conn, pod_id=pod_id, order_id=fill.parent_order_id
+                    )
                     if fill.fill_time is not None:
                         parent_candidate_submitted_times = [
                             submitted_time
                             for submitted_time in (
                                 _parse_dt(parent_lineage.get("submitted_at")),
-                                _parse_dt(fallback_records.get(fill.parent_order_id, {}).get("submitted_at")),
+                                _parse_dt(
+                                    fallback_records.get(fill.parent_order_id, {}).get(
+                                        "submitted_at"
+                                    )
+                                ),
                             )
                             if submitted_time is not None
                         ]
@@ -1754,15 +1783,15 @@ def reconcile_broker_orders(
             broker_positions=broker_positions,
         )
         rebuilt_positions = rebuild_position_state_from_events(conn, pod_id=pod_id)
-        lifecycle_symbols = {
-            status.symbol
-            for status in statuses
-            if status.symbol
-        } | {
-            str(item.get("symbol") or "")
-            for item in (broker_positions or [])
-            if str(item.get("symbol") or "")
-        } | set(rebuilt_positions)
+        lifecycle_symbols = (
+            {status.symbol for status in statuses if status.symbol}
+            | {
+                str(item.get("symbol") or "")
+                for item in (broker_positions or [])
+                if str(item.get("symbol") or "")
+            }
+            | set(rebuilt_positions)
+        )
         for symbol in lifecycle_symbols:
             symbol_statuses = [status for status in statuses if status.symbol == symbol]
             entry_status = next(
@@ -1797,17 +1826,26 @@ def reconcile_broker_orders(
                     broker_position_qty=broker_position_qty,
                     rebuilt_position_qty=rebuilt_position_qty,
                 )
-            closed_by_event = abs(current_position_qty) <= 1e-9 and _position_was_closed_by_event(
+            closed_by_event = abs(
+                current_position_qty
+            ) <= 1e-9 and _position_was_closed_by_event(
                 conn=conn,
                 pod_id=pod_id,
                 symbol=symbol,
             )
             snapshot = snapshot_from_broker_state(
                 symbol=symbol,
-                entry_order_id=entry_status.order_id if entry_status is not None else None,
+                entry_order_id=(
+                    entry_status.order_id if entry_status is not None else None
+                ),
                 entry_status=entry_status.status if entry_status is not None else None,
-                entry_filled_qty=entry_status.filled_qty if entry_status is not None else None,
+                entry_filled_qty=(
+                    entry_status.filled_qty if entry_status is not None else None
+                ),
                 position_qty=0.0 if closed_by_event else current_position_qty,
+                entry_intent_type=(
+                    entry_status.intent_type if entry_status is not None else None
+                ),
                 exit_order_id=exit_statuses[0].order_id if exit_statuses else None,
                 has_exit_orders=bool(exit_statuses) and not closed_by_event,
                 exit_statuses=[status.status for status in exit_statuses],
@@ -1831,13 +1869,15 @@ def reconcile_broker_orders(
             if (
                 closed_by_event
                 and rebuilt_position is not None
-                and rebuilt_position.last_event_type is not BrokerEventType.POSITION_CLOSED
+                and rebuilt_position.last_event_type
+                is not BrokerEventType.POSITION_CLOSED
             ):
                 closed_at = max(
                     [
                         fill.fill_time
                         for fill in fills
-                        if fill.symbol == symbol and (fill.intent_type or "") not in _ENTRY_INTENT_TYPES
+                        if fill.symbol == symbol
+                        and (fill.intent_type or "") not in _ENTRY_INTENT_TYPES
                     ]
                     or [datetime.now(tz=UTC)]
                 )
@@ -1971,10 +2011,20 @@ def reconcile_broker_orders(
                 pod_id=pod_id,
                 reason=status_reason,
             )
-            raise ReconciliationError(status_reason or "RECOVERABLE_RECONCILIATION_STATE")
+            raise ReconciliationError(
+                status_reason or "RECOVERABLE_RECONCILIATION_STATE"
+            )
 
-        open_order_ids = [status.order_id for status in statuses if status.status in _ACTIVE_ORDER_STATUSES]
-        terminal_order_ids = [status.order_id for status in statuses if status.status in _TERMINAL_ORDER_STATUSES]
+        open_order_ids = [
+            status.order_id
+            for status in statuses
+            if status.status in _ACTIVE_ORDER_STATUSES
+        ]
+        terminal_order_ids = [
+            status.order_id
+            for status in statuses
+            if status.status in _TERMINAL_ORDER_STATUSES
+        ]
 
         return ReconciliationResult(
             statuses=statuses,
@@ -1988,7 +2038,13 @@ def reconcile_broker_orders(
             persisted_fill_count=persisted_fill_count,
             snapshot=reconciliation_snapshot,
         )
-    except (CausalIntegrityError, OCOConflictError, OrderingError, PositionInvariantError, ReconciliationError):
+    except (
+        CausalIntegrityError,
+        OCOConflictError,
+        OrderingError,
+        PositionInvariantError,
+        ReconciliationError,
+    ):
         raise
     except Exception as exc:  # pragma: no cover - defensive fatal conversion
         _log_reconciliation_event(

@@ -20,6 +20,9 @@ from llm_quant.trading.portfolio import Portfolio
 logger = logging.getLogger(__name__)
 
 
+_OPEN_ACTIONS = {Action.BUY, Action.SHORT}
+
+
 PROMOTED_DEFAULT_STRATEGY_SLUGS: list[str] = [
     "lqd-spy-credit-lead",
     "agg-spy-credit-lead",
@@ -221,15 +224,7 @@ def merge_strategy_signals(
 
     merged: list[TradeSignal] = []
     for symbol, group in by_symbol.items():
-        actions = [g.action for g in group]
-        if Action.CLOSE in actions:
-            action = Action.CLOSE
-        elif Action.SELL in actions:
-            action = Action.SELL
-        elif Action.BUY in actions:
-            action = Action.BUY
-        else:
-            action = Action.HOLD
+        action = _resolve_merged_action([g.action for g in group])
 
         if action == Action.CLOSE:
             target_weight = 0.0
@@ -237,9 +232,17 @@ def merge_strategy_signals(
             target_weight = min(
                 g.target_weight for g in group if g.action == Action.SELL
             )
+        elif action == Action.COVER:
+            target_weight = min(
+                g.target_weight for g in group if g.action == Action.COVER
+            )
         elif action == Action.BUY:
             target_weight = sum(
                 g.target_weight for g in group if g.action == Action.BUY
+            )
+        elif action == Action.SHORT:
+            target_weight = sum(
+                g.target_weight for g in group if g.action == Action.SHORT
             )
         else:
             target_weight = 0.0
@@ -275,12 +278,12 @@ def apply_regime_multipliers(
     regime_mults: dict[str, dict[str, float]],
     market_regime: str,
 ) -> list[TradeSignal]:
-    """Scale BUY weights by group/regime multipliers."""
+    """Scale opening-risk weights by group/regime multipliers."""
     if not regime_mults:
         return signals
 
     for sig in signals:
-        if sig.action != Action.BUY:
+        if sig.action not in _OPEN_ACTIONS:
             continue
         group = sig.metadata.get("strategy_group", "ungrouped")
         group_mults = regime_mults.get(group, {})
@@ -294,13 +297,13 @@ def apply_group_caps(
     signals: list[TradeSignal],
     group_caps: dict[str, float],
 ) -> list[TradeSignal]:
-    """Scale BUY weights so each strategy group respects its cap."""
+    """Scale opening-risk weights so each strategy group respects its cap."""
     if not group_caps:
         return signals
 
     totals: dict[str, float] = {}
     for sig in signals:
-        if sig.action != Action.BUY:
+        if sig.action not in _OPEN_ACTIONS:
             continue
         groups = sig.metadata.get("strategy_groups") or [
             sig.metadata.get("strategy_group", "ungrouped")
@@ -320,7 +323,7 @@ def apply_group_caps(
         return signals
 
     for sig in signals:
-        if sig.action != Action.BUY:
+        if sig.action not in _OPEN_ACTIONS:
             continue
         groups = sig.metadata.get("strategy_groups") or [
             sig.metadata.get("strategy_group", "ungrouped")
@@ -337,18 +340,18 @@ def apply_max_position_cap(
     signals: list[TradeSignal],
     max_position_weight: float,
 ) -> list[TradeSignal]:
-    """Proportional scaling: if any BUY exceeds cap, scale all BUY weights."""
-    max_buy_weight = max(
-        (s.target_weight for s in signals if s.action == Action.BUY),
+    """Proportional scaling for opening-risk weights when any exceeds the cap."""
+    max_open_weight = max(
+        (s.target_weight for s in signals if s.action in _OPEN_ACTIONS),
         default=0.0,
     )
-    if max_buy_weight > max_position_weight and max_buy_weight > 0:
-        scale = max_position_weight / max_buy_weight
+    if max_open_weight > max_position_weight and max_open_weight > 0:
+        scale = max_position_weight / max_open_weight
         for sig in signals:
-            if sig.action == Action.BUY:
+            if sig.action in _OPEN_ACTIONS:
                 sig.target_weight = round(sig.target_weight * scale, 4)
         logger.info(
-            "Scaled BUY weights by %.3f to fit max_position_weight=%.2f",
+            "Scaled opening-risk weights by %.3f to fit max_position_weight=%.2f",
             scale,
             max_position_weight,
         )
@@ -367,3 +370,22 @@ def aggregate_strategy_signals(
 def _max_conviction(convictions: list[Conviction]) -> Conviction:
     rank = {Conviction.HIGH: 3, Conviction.MEDIUM: 2, Conviction.LOW: 1}
     return max(convictions, key=lambda c: rank.get(c, 0), default=Conviction.MEDIUM)
+
+
+def _resolve_merged_action(actions: list[Action]) -> Action:
+    unique_actions = set(actions)
+    if Action.CLOSE in unique_actions:
+        return Action.CLOSE
+    if Action.SELL in unique_actions and Action.COVER in unique_actions:
+        return Action.CLOSE
+    if Action.BUY in unique_actions and Action.SHORT in unique_actions:
+        return Action.CLOSE
+    if Action.COVER in unique_actions:
+        return Action.COVER
+    if Action.SELL in unique_actions:
+        return Action.SELL
+    if Action.SHORT in unique_actions:
+        return Action.SHORT
+    if Action.BUY in unique_actions:
+        return Action.BUY
+    return Action.HOLD

@@ -27,6 +27,7 @@ class BrokerLifecycleSnapshot:
     entry_order_id: str | None = None
     exit_order_id: str | None = None
     position_qty: float = 0.0
+    is_short: bool = False
     has_entry_fill: bool = False
     has_exit_orders: bool = False
     has_open_position: bool = False
@@ -257,6 +258,7 @@ def advance_to_bracket_attached(
         entry_order_id=snapshot.entry_order_id,
         exit_order_id=snapshot.exit_order_id,
         position_qty=snapshot.position_qty,
+        is_short=snapshot.is_short,
         has_entry_fill=snapshot.has_entry_fill,
         has_exit_orders=True,
         has_open_position=snapshot.has_open_position,
@@ -276,6 +278,7 @@ def advance_to_active_monitoring(
         entry_order_id=snapshot.entry_order_id,
         exit_order_id=snapshot.exit_order_id,
         position_qty=snapshot.position_qty,
+        is_short=snapshot.is_short,
         has_entry_fill=snapshot.has_entry_fill,
         has_exit_orders=snapshot.has_exit_orders,
         has_open_position=snapshot.has_open_position,
@@ -295,6 +298,7 @@ def advance_to_exit_pending(
         entry_order_id=snapshot.entry_order_id,
         exit_order_id=exit_order_id or snapshot.exit_order_id,
         position_qty=snapshot.position_qty,
+        is_short=snapshot.is_short,
         has_entry_fill=snapshot.has_entry_fill,
         has_exit_orders=True,
         has_open_position=snapshot.has_open_position,
@@ -313,6 +317,7 @@ def advance_to_closed(
         entry_order_id=snapshot.entry_order_id,
         exit_order_id=exit_order_id or snapshot.exit_order_id,
         position_qty=0.0,
+        is_short=snapshot.is_short,
         has_entry_fill=snapshot.has_entry_fill,
         has_exit_orders=snapshot.has_exit_orders,
         has_open_position=False,
@@ -329,6 +334,7 @@ def snapshot_from_broker_state(
     entry_status: str | None,
     entry_filled_qty: float | int | str | None,
     position_qty: float | int | str | None,
+    entry_intent_type: str | None = None,
     exit_order_id: str | None = None,
     has_exit_orders: bool = False,
     exit_statuses: list[str] | tuple[str, ...] | None = None,
@@ -341,12 +347,17 @@ def snapshot_from_broker_state(
         exit_statuses=exit_statuses,
         position_qty=current_position_qty,
     )
+    normalized_intent_type = (entry_intent_type or "").strip().lower()
+    is_short = normalized_intent_type == "entry_short"
+    if not normalized_intent_type and abs(current_position_qty) > 1e-9:
+        is_short = current_position_qty < 0
     return BrokerLifecycleSnapshot(
         symbol=symbol,
         state=state,
         entry_order_id=entry_order_id,
         exit_order_id=exit_order_id,
         position_qty=current_position_qty,
+        is_short=is_short,
         has_entry_fill=order_has_fill(status=entry_status, filled_qty=entry_filled_qty),
         has_exit_orders=has_exit_orders,
         has_open_position=abs(current_position_qty) > 1e-9,

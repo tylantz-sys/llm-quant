@@ -6,7 +6,9 @@ import pytest
 from llm_quant.broker.event_ledger import ledger_ordering_digest, rebuild_position_state_from_events
 from llm_quant.broker.exceptions import PositionInvariantError, ReconciliationError
 from llm_quant.broker.reconciliation import (
+    BrokerFillEvent,
     ReconciliationStatus,
+    _signed_fill_qty,
     persist_submitted_orders,
     reconcile_broker_orders,
 )
@@ -326,6 +328,7 @@ def test_reconciliation_requires_event_confirmed_position_close() -> None:
 
     assert result.status is ReconciliationStatus.SUCCESS
     assert result.lifecycle["TSLA"].state is BrokerLifecycleState.CLOSED
+    assert result.lifecycle["TSLA"].is_short is False
     assert "TSLA" not in portfolio.positions
 
     fill_rows = conn.execute(
@@ -410,6 +413,7 @@ def test_reconcile_short_entry_and_cover_rebuilds_flat_portfolio() -> None:
 
     assert result.status is ReconciliationStatus.SUCCESS
     assert result.lifecycle["SPY"].state is BrokerLifecycleState.CLOSED
+    assert result.lifecycle["SPY"].is_short is True
     assert "SPY" not in portfolio.positions
     assert portfolio.cash == 1_020.0
 
@@ -636,3 +640,42 @@ def test_reconciliation_rebuild_on_valid_persisted_history_does_not_regress() ->
     rebuilt = rebuild_position_state_from_events(conn)
     assert rebuilt["AMD"].position_qty == 2.0
     assert rebuilt["AMD"].last_sequence_id == 4
+
+
+def _make_fill(side: str, qty: float, *, is_reversal: bool = False) -> BrokerFillEvent:
+    return BrokerFillEvent(
+        order_id="ord-1",
+        symbol="SPY",
+        side=side,
+        fill_qty=qty,
+        fill_price=100.0,
+        fill_time=datetime(2026, 4, 7, 14, 30, tzinfo=UTC),
+        is_reversal=is_reversal,
+    )
+
+
+def test_signed_fill_qty_sell_is_negative() -> None:
+    assert _signed_fill_qty(_make_fill("sell", 5.0)) == -5.0
+
+
+def test_signed_fill_qty_sell_short_is_negative() -> None:
+    assert _signed_fill_qty(_make_fill("sell_short", 5.0)) == -5.0
+
+
+def test_signed_fill_qty_buy_is_positive() -> None:
+    assert _signed_fill_qty(_make_fill("buy", 5.0)) == 5.0
+
+
+def test_signed_fill_qty_buy_to_cover_is_positive() -> None:
+    assert _signed_fill_qty(_make_fill("buy_to_cover", 5.0)) == 5.0
+
+
+def test_signed_fill_qty_unknown_side_warns_and_defaults_positive(caplog: pytest.LogCaptureFixture) -> None:
+    qty = _signed_fill_qty(_make_fill("mystery_side", 5.0))
+
+    assert qty == 5.0
+    assert "Unknown broker fill side" in caplog.text
+
+
+def test_signed_fill_qty_reversal_inverts_sign() -> None:
+    assert _signed_fill_qty(_make_fill("sell_short", 5.0, is_reversal=True)) == 5.0

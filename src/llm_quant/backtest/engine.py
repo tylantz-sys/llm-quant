@@ -893,14 +893,19 @@ class BacktestEngine:
                 record_noop("missing_or_invalid_price")
                 continue
 
+            existing = portfolio.positions.get(signal.symbol)
+
             if signal.action == Action.HOLD:
                 record_noop("hold_signal")
                 continue
 
             if signal.action == Action.BUY:
+                if existing is not None and existing.is_short:
+                    record_noop("buy_against_short_position")
+                    continue
+
                 target_notional = signal.target_weight * nav
                 current_notional = 0.0
-                existing = portfolio.positions.get(signal.symbol)
                 if existing:
                     current_notional = existing.market_value
                 additional = target_notional - current_notional
@@ -975,9 +980,133 @@ class BacktestEngine:
                     )
                 )
 
+            elif signal.action == Action.SHORT:
+                if existing is not None and not existing.is_short:
+                    record_noop("short_against_long_position")
+                    continue
+
+                target_notional = signal.target_weight * nav
+                current_notional = 0.0
+                if existing is not None and existing.is_short:
+                    current_notional = abs(existing.market_value)
+                additional = target_notional - current_notional
+                if additional <= 0:
+                    record_noop("short_target_at_or_below_current")
+                    continue
+                shares = (
+                    additional / price if fractional else math.floor(additional / price)
+                )
+                if shares <= 0:
+                    record_noop("short_target_below_share_floor")
+                    continue
+
+                notional = shares * price
+                cost = cost_model.compute_cost(
+                    notional,
+                    shares,
+                    volume_stats.get(signal.symbol),
+                    vol_stats.get(signal.symbol),
+                    cost_multiplier,
+                )
+
+                portfolio.cash += notional - cost
+                if existing is not None:
+                    existing_short_shares = abs(existing.shares)
+                    total_shares = existing_short_shares + shares
+                    existing.avg_cost = (
+                        existing_short_shares * existing.avg_cost + shares * price
+                    ) / total_shares
+                    existing.shares = -total_shares
+                    existing.current_price = price
+                    existing.stop_loss = signal.stop_loss
+                    existing.short_proceeds = total_shares * existing.avg_cost
+                else:
+                    from llm_quant.trading.portfolio import Position
+
+                    portfolio.positions[signal.symbol] = Position(
+                        symbol=signal.symbol,
+                        shares=-shares,
+                        avg_cost=price,
+                        current_price=price,
+                        stop_loss=signal.stop_loss,
+                        short_proceeds=notional,
+                    )
+
+                records.append(
+                    TradeRecord(
+                        date=trade_date,
+                        symbol=signal.symbol,
+                        action="short",
+                        shares=shares,
+                        price=price,
+                        notional=notional,
+                        cost=cost,
+                        reasoning=signal.reasoning,
+                        exit_reason=signal.exit_reason,
+                    )
+                )
+
             elif signal.action in (Action.SELL, Action.CLOSE):
-                existing = portfolio.positions.get(signal.symbol)
-                if existing is None or existing.shares <= 0:
+                if existing is None:
+                    record_noop("sell_without_position")
+                    continue
+
+                if signal.action == Action.SELL and existing.is_short:
+                    record_noop("sell_against_short_position")
+                    continue
+
+                if signal.action == Action.CLOSE and existing.is_short:
+                    shares = abs(existing.shares)
+                    notional = shares * price
+                    cost = cost_model.compute_cost(
+                        notional,
+                        shares,
+                        volume_stats.get(signal.symbol),
+                        vol_stats.get(signal.symbol),
+                        cost_multiplier,
+                    )
+
+                    pnl = (existing.avg_cost - price) * shares - cost
+                    portfolio.cash -= notional + cost
+                    existing.shares += shares
+                    if existing.shares >= 0:
+                        del portfolio.positions[signal.symbol]
+                    else:
+                        existing.current_price = price
+                        existing.short_proceeds = abs(existing.shares) * existing.avg_cost
+
+                    is_synthetic_exit = bool(signal.exit_reason)
+                    records.append(
+                        TradeRecord(
+                            date=trade_date,
+                            symbol=signal.symbol,
+                            action=signal.action.value,
+                            shares=shares,
+                            price=price,
+                            notional=notional,
+                            cost=cost,
+                            pnl=pnl,
+                            reasoning=signal.reasoning,
+                            is_synthetic_exit=is_synthetic_exit,
+                            exit_parity_mode=(
+                                self.backtest_exit_parity_mode if is_synthetic_exit else ""
+                            ),
+                            exit_execution_assumption=(
+                                self.backtest_exit_execution_assumption
+                                if is_synthetic_exit
+                                else ""
+                            ),
+                            exit_reason=signal.exit_reason,
+                            exit_parity_tier=(
+                                self.backtest_exit_parity_tier
+                                if is_synthetic_exit
+                                else "tier1_close_only"
+                            ),
+                        )
+                    )
+                    continue
+
+                if existing.shares <= 0:
                     record_noop("sell_without_position")
                     continue
 
@@ -1018,6 +1147,78 @@ class BacktestEngine:
                     del portfolio.positions[signal.symbol]
                 else:
                     existing.current_price = price
+
+                is_synthetic_exit = bool(signal.exit_reason)
+                records.append(
+                    TradeRecord(
+                        date=trade_date,
+                        symbol=signal.symbol,
+                        action=signal.action.value,
+                        shares=shares,
+                        price=price,
+                        notional=notional,
+                        cost=cost,
+                        pnl=pnl,
+                        reasoning=signal.reasoning,
+                        is_synthetic_exit=is_synthetic_exit,
+                        exit_parity_mode=(
+                            self.backtest_exit_parity_mode if is_synthetic_exit else ""
+                        ),
+                        exit_execution_assumption=(
+                            self.backtest_exit_execution_assumption
+                            if is_synthetic_exit
+                            else ""
+                        ),
+                        exit_reason=signal.exit_reason,
+                        exit_parity_tier=(
+                            self.backtest_exit_parity_tier
+                            if is_synthetic_exit
+                            else "tier1_close_only"
+                        ),
+                    )
+                )
+
+            elif signal.action == Action.COVER:
+                if existing is None or not existing.is_short:
+                    record_noop("cover_without_short_position")
+                    continue
+
+                target_notional = signal.target_weight * nav
+                current_notional = abs(existing.shares * price)
+                reduce = current_notional - target_notional
+                if reduce <= 0:
+                    record_noop("cover_target_at_or_above_current")
+                    continue
+
+                shares = min(
+                    reduce / price if fractional else math.floor(reduce / price),
+                    abs(existing.shares),
+                )
+                if shares <= 0:
+                    residual_notional = abs(current_notional - target_notional)
+                    if residual_notional < price:
+                        record_noop("cover_residual_below_share_floor")
+                    else:
+                        record_noop("cover_target_below_share_floor")
+                    continue
+
+                notional = shares * price
+                cost = cost_model.compute_cost(
+                    notional,
+                    shares,
+                    volume_stats.get(signal.symbol),
+                    vol_stats.get(signal.symbol),
+                    cost_multiplier,
+                )
+
+                pnl = (existing.avg_cost - price) * shares - cost
+                portfolio.cash -= notional + cost
+                existing.shares += shares
+                if existing.shares >= 0:
+                    del portfolio.positions[signal.symbol]
+                else:
+                    existing.current_price = price
+                    existing.short_proceeds = abs(existing.shares) * existing.avg_cost
 
                 is_synthetic_exit = bool(signal.exit_reason)
                 records.append(

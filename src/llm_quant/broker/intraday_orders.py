@@ -59,6 +59,7 @@ def _extract_order_id(order: dict[str, Any] | None) -> str | None:
 @dataclass
 class IntradayOrderState:
     symbol: str
+    position_side: str = "long"
     partial_tp_order_id: str | None = None
     oco_order_id: str | None = None
     oco_tp_order_id: str | None = None
@@ -266,12 +267,21 @@ def _is_crypto(asset_class: str) -> bool:
     return asset_class.lower() == "crypto"
 
 
+def _protective_side_for_position(position_side: str) -> str:
+    return "buy" if position_side == "short" else "sell"
+
+
+def _position_side_from_trade_action(action: str) -> str:
+    return "short" if action == "short" else "long"
+
+
 def _submit_partial_tp(
     client: AlpacaClient,
     *,
     symbol: str,
     qty_tp: float,
     partial_tp_price: float,
+    exit_side: str = "sell",
     asset_class: str = "equity",
     time_in_force: str = "day",
 ) -> str:
@@ -280,7 +290,7 @@ def _submit_partial_tp(
     order = client.submit_limit_order(
         symbol=symbol,
         qty=qty_tp,
-        side="sell",
+        side=exit_side,
         limit_price=partial_tp_price,
         time_in_force=tif,
         allow_fractional=allow_frac,
@@ -298,6 +308,7 @@ def _submit_oco_protection(
     qty_remainder: float,
     remainder_tp_price: float,
     stop_price: float,
+    exit_side: str = "sell",
     asset_class: str = "equity",
     time_in_force: str = "day",
 ) -> tuple[str | None, str | None, str | None]:
@@ -319,7 +330,7 @@ def _submit_oco_protection(
         tp_resp = client.submit_limit_order(
             symbol=symbol,
             qty=qty_remainder,
-            side="sell",
+            side=exit_side,
             limit_price=remainder_tp_price,
             time_in_force=tif,
             allow_fractional=True,
@@ -328,11 +339,15 @@ def _submit_oco_protection(
         if not oco_tp_order_id:
             raise AlpacaError(f"Crypto TP submission missing order id for {symbol}")
 
-        sl_limit_price = round(stop_price * 0.98, 2)  # 2% buffer for crypto gap risk
+        # For buy-stops (short protection), limit must be above stop.
+        sl_limit_price = round(
+            stop_price * (1.02 if exit_side == "buy" else 0.98),
+            2,
+        )
         stop_resp = client.submit_stop_limit_order(
             symbol=symbol,
             qty=qty_remainder,
-            side="sell",
+            side=exit_side,
             stop_price=stop_price,
             limit_price=sl_limit_price,
             time_in_force=tif,
@@ -348,7 +363,7 @@ def _submit_oco_protection(
     order = client.submit_oco_order(
         symbol=symbol,
         qty=qty_remainder,
-        side="sell",
+        side=exit_side,
         take_profit=remainder_tp_price,
         stop_loss=stop_price,
         time_in_force=tif,
@@ -366,17 +381,21 @@ def _submit_stop_protection(
     symbol: str,
     qty: float,
     stop_price: float,
+    exit_side: str = "sell",
     asset_class: str = "equity",
     time_in_force: str = "day",
 ) -> str:
     allow_frac = _is_crypto(asset_class)
     tif = "gtc" if allow_frac else time_in_force
     if allow_frac:
-        sl_limit_price = round(stop_price * 0.98, 2)  # 2% buffer for crypto gap risk
+        sl_limit_price = round(
+            stop_price * (1.02 if exit_side == "buy" else 0.98),
+            2,
+        )
         stop_order = client.submit_stop_limit_order(
             symbol=symbol,
             qty=qty,
-            side="sell",
+            side=exit_side,
             stop_price=stop_price,
             limit_price=sl_limit_price,
             time_in_force=tif,
@@ -386,7 +405,7 @@ def _submit_stop_protection(
         stop_order = client.submit_stop_order(
             symbol=symbol,
             qty=qty,
-            side="sell",
+            side=exit_side,
             stop_price=stop_price,
             time_in_force=tif,
         )
@@ -409,14 +428,14 @@ def place_oco_exits_for_buys(
     fill_prices: dict[str, float] | None = None,
     asset_class_map: dict[str, str] | None = None,
 ) -> None:
-    """Submit partial TP + OCO remainder orders for newly bought positions."""
+    """Submit partial TP + OCO remainder orders for newly opened positions."""
     for trade in trades:
-        if trade.action != "buy":
+        if trade.action not in {"buy", "short"}:
             continue
 
         symbol = trade.symbol
         try:
-            _place_oco_exits_for_single_buy(
+            _place_oco_exits_for_single_entry(
                 client=client,
                 states=states,
                 trade=trade,
@@ -431,13 +450,14 @@ def place_oco_exits_for_buys(
             )
         except AlpacaError as exc:
             logger.warning(
-                "OCO/stop placement failed for %s (non-fatal, continuing other symbols): %s",
+                "OCO/stop placement failed for %s action=%s (non-fatal, continuing other symbols): %s",
                 symbol,
+                trade.action,
                 exc,
             )
 
 
-def _place_oco_exits_for_single_buy(
+def _place_oco_exits_for_single_entry(
     client: AlpacaClient,
     states: dict[str, IntradayOrderState],
     trade: Any,
@@ -450,8 +470,10 @@ def _place_oco_exits_for_single_buy(
     fill_prices: dict[str, float] | None = None,
     asset_class_map: dict[str, str] | None = None,
 ) -> None:
-    """Place OCO/stop exits for a single buy trade. Raises AlpacaError on failure."""
+    """Place OCO/stop exits for a single entry trade. Raises AlpacaError on failure."""
     symbol = trade.symbol
+    position_side = _position_side_from_trade_action(str(trade.action or ""))
+    exit_side = _protective_side_for_position(position_side)
     asset_class = (asset_class_map or {}).get(symbol, "equity")
     qty = _normalize_order_qty(float(trade.shares))
     if qty <= 0:
@@ -464,16 +486,28 @@ def _place_oco_exits_for_single_buy(
 
     stop_price = stop_losses.get(symbol, 0.0)
     if stop_price <= 0:
-        stop_price = effective_price * (1.0 - default_stop_loss_pct)
+        if position_side == "short":
+            stop_price = effective_price * (1.0 + default_stop_loss_pct)
+        else:
+            stop_price = effective_price * (1.0 - default_stop_loss_pct)
     if stop_price <= 0:
         raise AlpacaError(f"Missing stop price for {symbol} after entry fill")
 
-    partial_tp_price = effective_price * (1.0 + partial_tp_pct)
+    if position_side == "short":
+        partial_tp_price = effective_price * (1.0 - partial_tp_pct)
+    else:
+        partial_tp_price = effective_price * (1.0 + partial_tp_pct)
     remainder_tp_pct = partial_tp_pct * max(remainder_tp_mult, 0.0)
-    remainder_tp_price = effective_price * (1.0 + remainder_tp_pct)
-    min_remainder_tp = partial_tp_price + 0.01
-    if remainder_tp_price < min_remainder_tp:
-        remainder_tp_price = min_remainder_tp
+    if position_side == "short":
+        remainder_tp_price = effective_price * (1.0 - remainder_tp_pct)
+        max_remainder_tp = max(partial_tp_price - 0.01, 0.01)
+        if remainder_tp_price > max_remainder_tp:
+            remainder_tp_price = max_remainder_tp
+    else:
+        remainder_tp_price = effective_price * (1.0 + remainder_tp_pct)
+        min_remainder_tp = partial_tp_price + 0.01
+        if remainder_tp_price < min_remainder_tp:
+            remainder_tp_price = min_remainder_tp
 
     qty_tp, qty_remainder = _required_tp_qty(qty, partial_tp_size)
     if qty_tp <= 0:
@@ -484,6 +518,7 @@ def _place_oco_exits_for_single_buy(
         symbol=symbol,
         qty_tp=qty_tp,
         partial_tp_price=partial_tp_price,
+        exit_side=exit_side,
         asset_class=asset_class,
     )
 
@@ -497,12 +532,14 @@ def _place_oco_exits_for_single_buy(
             symbol=symbol,
             qty=qty,
             stop_price=stop_price,
+            exit_side=exit_side,
             asset_class=asset_class,
         )
         if fail_on_unprotected and not oco_stop_order_id:
             raise AlpacaError(f"Protective stop missing for {symbol} after crypto entry")
         states[symbol] = IntradayOrderState(
             symbol=symbol,
+            position_side=position_side,
             partial_tp_order_id=partial_tp_order_id,
             oco_order_id=None,
             oco_tp_order_id=None,   # TP2 deferred until TP1 fills
@@ -514,9 +551,9 @@ def _place_oco_exits_for_single_buy(
         )
         return
 
-    oco_order_id = None
-    oco_tp_order_id = None
-    oco_stop_order_id = None
+    oco_order_id: str | None = None
+    oco_tp_order_id: str | None = None
+    oco_stop_order_id: str | None = None
     if qty_remainder > 0:
         oco_order_id, oco_tp_order_id, oco_stop_order_id = _submit_oco_protection(
             client,
@@ -524,6 +561,7 @@ def _place_oco_exits_for_single_buy(
             qty_remainder=qty_remainder,
             remainder_tp_price=remainder_tp_price,
             stop_price=stop_price,
+            exit_side=exit_side,
             asset_class=asset_class,
         )
         if fail_on_unprotected and not oco_stop_order_id:
@@ -534,11 +572,13 @@ def _place_oco_exits_for_single_buy(
             symbol=symbol,
             qty=qty,
             stop_price=stop_price,
+            exit_side=exit_side,
             asset_class=asset_class,
         )
 
     states[symbol] = IntradayOrderState(
         symbol=symbol,
+        position_side=position_side,
         partial_tp_order_id=partial_tp_order_id,
         oco_order_id=oco_order_id,
         oco_tp_order_id=oco_tp_order_id,
@@ -569,9 +609,17 @@ def update_trailing_stops(
             raise AlpacaError(f"Missing initial stop price for trailing stop update on {symbol}")
 
         state.trailing_active = True
-        new_hwm = max(float(state.hwm or 0.0), float(price))
-        state.hwm = new_hwm
-        new_stop_price = max(new_hwm * (1.0 - trailing_pct), state.initial_stop_price)
+        if state.position_side == "short":
+            anchor = float(state.hwm or 0.0)
+            if anchor <= 0:
+                anchor = float(price)
+            new_anchor = min(anchor, float(price))
+            state.hwm = new_anchor
+            new_stop_price = min(new_anchor * (1.0 + trailing_pct), state.initial_stop_price)
+        else:
+            new_anchor = max(float(state.hwm or 0.0), float(price))
+            state.hwm = new_anchor
+            new_stop_price = max(new_anchor * (1.0 - trailing_pct), state.initial_stop_price)
 
         try:
             replacement = client.replace_order(
@@ -587,7 +635,7 @@ def update_trailing_stops(
             logger.info(
                 "Trailing stop updated for %s: hwm=%.2f stop=%.2f",
                 symbol,
-                new_hwm,
+                new_anchor,
                 new_stop_price,
             )
         except AlpacaError as exc:
@@ -692,7 +740,13 @@ def reconcile_orders(
 
     for symbol, state in states.items():
         asset_class = (asset_class_map or {}).get(symbol, "equity")
-        remaining_qty = _normalize_order_qty(float(positions.get(symbol, 0.0) or 0.0))
+        raw_position_qty = float(positions.get(symbol, 0.0) or 0.0)
+        if raw_position_qty < 0:
+            state.position_side = "short"
+        elif raw_position_qty > 0:
+            state.position_side = "long"
+        remaining_qty = _normalize_order_qty(abs(raw_position_qty))
+        exit_side = _protective_side_for_position(state.position_side)
         state.remaining_qty = float(remaining_qty or 0.0)
         partial_order = None
         oco_tp_order = None
@@ -773,17 +827,26 @@ def reconcile_orders(
         replacement_stop_price = state.initial_stop_price
         if state.tp_status == "filled":
             if trailing_pct > 0 and state.hwm > 0:
-                replacement_stop_price = max(
-                    state.hwm * (1.0 - trailing_pct),
-                    state.initial_stop_price,
-                )
+                if state.position_side == "short":
+                    replacement_stop_price = min(
+                        state.hwm * (1.0 + trailing_pct),
+                        state.initial_stop_price,
+                    )
+                else:
+                    replacement_stop_price = max(
+                        state.hwm * (1.0 - trailing_pct),
+                        state.initial_stop_price,
+                    )
             elif state.initial_stop_price <= 0:
                 raise AlpacaError(
                     f"Cannot compute replacement stop for {symbol}: trailing_pct={trailing_pct}, hwm={state.hwm}"
                 )
         elif replacement_stop_price <= 0:
             if state.hwm > 0:
-                replacement_stop_price = state.hwm * (1.0 - max(partial_tp_pct, 0.0))
+                if state.position_side == "short":
+                    replacement_stop_price = state.hwm * (1.0 + max(partial_tp_pct, 0.0))
+                else:
+                    replacement_stop_price = state.hwm * (1.0 - max(partial_tp_pct, 0.0))
             elif (
                 state.partial_tp_order_id
                 or state.oco_order_id
@@ -824,13 +887,17 @@ def reconcile_orders(
             stop_is_filled = False
 
             remainder_tp_pct = partial_tp_pct * max(remainder_tp_mult, 0.0)
-            remainder_tp_price = state.hwm * (1.0 + remainder_tp_pct)
+            if state.position_side == "short":
+                remainder_tp_price = state.hwm * (1.0 - remainder_tp_pct)
+            else:
+                remainder_tp_price = state.hwm * (1.0 + remainder_tp_pct)
 
             state.oco_stop_order_id = _submit_stop_protection(
                 client,
                 symbol=symbol,
                 qty=remaining_qty,
                 stop_price=replacement_stop_price,
+                exit_side=exit_side,
                 asset_class=asset_class,
             )
             state.stop_status = None
@@ -842,6 +909,7 @@ def reconcile_orders(
                 symbol=symbol,
                 qty_tp=remaining_qty,
                 partial_tp_price=remainder_tp_price,
+                exit_side=exit_side,
                 asset_class=asset_class,
             )
             state.oco_tp_status = None
@@ -865,6 +933,7 @@ def reconcile_orders(
                 symbol=symbol,
                 qty=remaining_qty,
                 stop_price=replacement_stop_price,
+                exit_side=exit_side,
                 asset_class=asset_class,
             )
             state.protection_qty = float(remaining_qty)
@@ -886,12 +955,16 @@ def reconcile_orders(
             if outstanding_tp_qty > 0:
                 if state.hwm <= 0:
                     raise AlpacaError(f"Missing broker-confirmed entry/high water mark for {symbol}")
-                tp_price = state.hwm * (1.0 + partial_tp_pct)
+                if state.position_side == "short":
+                    tp_price = state.hwm * (1.0 - partial_tp_pct)
+                else:
+                    tp_price = state.hwm * (1.0 + partial_tp_pct)
                 state.partial_tp_order_id = _submit_partial_tp(
                     client,
                     symbol=symbol,
                     qty_tp=outstanding_tp_qty,
                     partial_tp_price=tp_price,
+                    exit_side=exit_side,
                     asset_class=asset_class,
                 )
                 state.tp_status = None
@@ -917,10 +990,16 @@ def reconcile_orders(
         ):
             if state.hwm <= 0:
                 raise AlpacaError(f"Missing broker-confirmed price anchor for {symbol}")
-            remainder_tp_price = state.hwm * (1.0 + (partial_tp_pct * max(remainder_tp_mult, 0.0)))
-            min_remainder_tp = state.hwm * (1.0 + partial_tp_pct) + 0.01
-            if remainder_tp_price < min_remainder_tp:
-                remainder_tp_price = min_remainder_tp
+            if state.position_side == "short":
+                remainder_tp_price = state.hwm * (1.0 - (partial_tp_pct * max(remainder_tp_mult, 0.0)))
+                max_remainder_tp = max((state.hwm * (1.0 - partial_tp_pct)) - 0.01, 0.01)
+                if remainder_tp_price > max_remainder_tp:
+                    remainder_tp_price = max_remainder_tp
+            else:
+                remainder_tp_price = state.hwm * (1.0 + (partial_tp_pct * max(remainder_tp_mult, 0.0)))
+                min_remainder_tp = state.hwm * (1.0 + partial_tp_pct) + 0.01
+                if remainder_tp_price < min_remainder_tp:
+                    remainder_tp_price = min_remainder_tp
 
             if _cancel_order_safe(
                 client,
@@ -946,6 +1025,7 @@ def reconcile_orders(
                             qty_remainder=expected_remainder_qty,
                             remainder_tp_price=remainder_tp_price,
                             stop_price=replacement_stop_price,
+                            exit_side=exit_side,
                             asset_class=asset_class,
                         )
                     )
@@ -961,6 +1041,7 @@ def reconcile_orders(
                         symbol=symbol,
                         qty=expected_remainder_qty,
                         stop_price=replacement_stop_price,
+                        exit_side=exit_side,
                         asset_class=asset_class,
                     )
                     state.protection_qty = float(expected_remainder_qty)
@@ -974,6 +1055,7 @@ def reconcile_orders(
                     symbol=symbol,
                     qty=expected_remainder_qty,
                     stop_price=replacement_stop_price,
+                    exit_side=exit_side,
                     asset_class=asset_class,
                 )
                 state.protection_qty = float(expected_remainder_qty)

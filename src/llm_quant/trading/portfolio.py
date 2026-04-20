@@ -246,7 +246,8 @@ class Portfolio:
         fill_px = float(fill_price)
         if fill_qty <= 0.0:
             logger.warning(
-                "Ignoring non-positive broker fill qty for %s: qty=%.6f side=%s order_id=%s",
+                "Ignoring non-positive broker fill qty for %s: "
+                "qty=%.6f side=%s order_id=%s",
                 symbol,
                 fill_qty,
                 normalized_side,
@@ -283,7 +284,8 @@ class Portfolio:
                     position.stop_loss = stop_loss
 
             logger.info(
-                "Applied broker BUY fill: %s qty=%.6f price=%.4f stop_loss=%.4f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+                "Applied broker BUY fill: %s qty=%.6f price=%.4f stop_loss=%.4f "
+                "cash=%.2f order_id=%s intent_type=%s fill_time=%s",
                 symbol,
                 fill_qty,
                 fill_px,
@@ -311,7 +313,8 @@ class Portfolio:
             else:
                 if position.shares > 0.0:
                     logger.warning(
-                        "Applied broker SELL_SHORT fill against long position: %s qty=%.6f price=%.4f order_id=%s intent_type=%s",
+                        "Applied broker SELL_SHORT fill against long position: "
+                        "%s qty=%.6f price=%.4f order_id=%s intent_type=%s",
                         symbol,
                         fill_qty,
                         fill_px,
@@ -330,7 +333,8 @@ class Portfolio:
                     position.stop_loss = stop_loss
 
             logger.info(
-                "Applied broker SELL_SHORT fill: %s qty=%.6f price=%.4f stop_loss=%.4f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+                "Applied broker SELL_SHORT fill: %s qty=%.6f price=%.4f stop_loss=%.4f "
+                "cash=%.2f order_id=%s intent_type=%s fill_time=%s",
                 symbol,
                 fill_qty,
                 fill_px,
@@ -348,7 +352,8 @@ class Portfolio:
 
             if position is None or position.shares >= 0.0:
                 logger.warning(
-                    "Applied broker BUY_TO_COVER fill for missing short position: %s qty=%.6f price=%.4f order_id=%s intent_type=%s",
+                    "Applied broker BUY_TO_COVER fill for missing short position: "
+                    "%s qty=%.6f price=%.4f order_id=%s intent_type=%s",
                     symbol,
                     fill_qty,
                     fill_px,
@@ -363,7 +368,9 @@ class Portfolio:
             if remaining_shares >= -1e-9:
                 del self.positions[symbol]
                 logger.info(
-                    "Applied broker BUY_TO_COVER fill and closed short: %s qty=%.6f price=%.4f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+                    "Applied broker BUY_TO_COVER fill and closed short: "
+                    "%s qty=%.6f price=%.4f cash=%.2f "
+                    "order_id=%s intent_type=%s fill_time=%s",
                     symbol,
                     fill_qty,
                     fill_px,
@@ -379,7 +386,8 @@ class Portfolio:
                 position.stop_loss = stop_loss
 
             logger.info(
-                "Applied broker BUY_TO_COVER fill: %s qty=%.6f price=%.4f remaining=%.6f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+                "Applied broker BUY_TO_COVER fill: %s qty=%.6f price=%.4f "
+                "remaining=%.6f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
                 symbol,
                 fill_qty,
                 fill_px,
@@ -397,7 +405,8 @@ class Portfolio:
 
         if position is None:
             logger.warning(
-                "Applied broker SELL fill for missing position: %s qty=%.6f price=%.4f order_id=%s intent_type=%s",
+                "Applied broker SELL fill for missing position: "
+                "%s qty=%.6f price=%.4f order_id=%s intent_type=%s",
                 symbol,
                 fill_qty,
                 fill_px,
@@ -412,7 +421,9 @@ class Portfolio:
         if remaining_shares <= 1e-9:
             del self.positions[symbol]
             logger.info(
-                "Applied broker SELL fill and closed position: %s qty=%.6f price=%.4f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+                "Applied broker SELL fill and closed position: "
+                "%s qty=%.6f price=%.4f cash=%.2f "
+                "order_id=%s intent_type=%s fill_time=%s",
                 symbol,
                 fill_qty,
                 fill_px,
@@ -428,7 +439,8 @@ class Portfolio:
             position.stop_loss = stop_loss
 
         logger.info(
-            "Applied broker SELL fill: %s qty=%.6f price=%.4f remaining=%.6f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
+            "Applied broker SELL fill: %s qty=%.6f price=%.4f "
+            "remaining=%.6f cash=%.2f order_id=%s intent_type=%s fill_time=%s",
             symbol,
             fill_qty,
             fill_px,
@@ -493,24 +505,48 @@ class Portfolio:
         portfolio = cls(initial_capital=initial_capital, pod_id=pod_id)
         portfolio.cash = cash_db
 
-        # Load positions attached to this snapshot
-        pos_rows = conn.execute(
-            """
-            SELECT symbol, shares, avg_cost, current_price, stop_loss
-            FROM positions
-            WHERE snapshot_id = ?
-            """,
-            [snapshot_id],
-        ).fetchall()
+        # Load positions attached to this snapshot.
+        pos_cols = {
+            row[0]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'positions'"
+            ).fetchall()
+        }
+        has_short_proceeds = "short_proceeds" in pos_cols
+        if has_short_proceeds:
+            pos_rows = conn.execute(
+                """
+                SELECT symbol, shares, avg_cost, current_price,
+                stop_loss, short_proceeds
+                FROM positions
+                WHERE snapshot_id = ?
+                """,
+                [snapshot_id],
+            ).fetchall()
+        else:
+            pos_rows = conn.execute(
+                """
+                SELECT symbol, shares, avg_cost, current_price, stop_loss
+                FROM positions
+                WHERE snapshot_id = ?
+                """,
+                [snapshot_id],
+            ).fetchall()
 
         for pr in pos_rows:
-            symbol, shares, avg_cost, current_price, stop_loss = pr
+            if has_short_proceeds:
+                symbol, shares, avg_cost, current_price, stop_loss, short_proceeds = pr
+            else:
+                symbol, shares, avg_cost, current_price, stop_loss = pr
+                short_proceeds = 0.0
             portfolio.positions[symbol] = Position(
                 symbol=symbol,
                 shares=shares,
                 avg_cost=avg_cost,
                 current_price=current_price,
                 stop_loss=stop_loss if stop_loss is not None else 0.0,
+                short_proceeds=short_proceeds if short_proceeds is not None else 0.0,
             )
 
         logger.info(

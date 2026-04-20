@@ -147,6 +147,49 @@ ignore = [
 "src/llm_quant/db/integrity.py" = [
   "PLR0913", # compute_trade_hash needs all trade fields for hash input
 ]
+"src/llm_quant/risk/manager.py" = [
+  "PLR0913", # filter_signals and check_trade need many required params by design
+  "PLR0915", # check_trade has many guard statements for comprehensive risk coverage
+]
+"src/llm_quant/trading/exits.py" = [
+  "PLR0913", # exit evaluation functions need all position/policy/state params
+  "PLR0912", # evaluate_broker_exit_status has many status checks by design
+]
+"src/llm_quant/trading/intraday.py" = [
+  "PLR0913", # generate_profit_taking_signals needs all position/portfolio params
+]
+"src/llm_quant/trading/ledger.py" = [
+  "PLR0913", # log_trades and log_broker_fills need all trade fields
+  "PLR0912", # log_broker_fills has many fill-type branches by design
+  "PLR0915", # log_broker_fills has many statements for comprehensive field mapping
+  "C901",    # log_broker_fills is inherently complex for fill normalization
+  "PLR0911", # _normalize_broker_fill_semantic_action has many action types
+]
+"src/llm_quant/trading/portfolio.py" = [
+  "PLR0913", # apply_broker_fill needs all fill fields for position management
+  "PLR0912", # apply_broker_fill has many fill-type branches by design
+  "PLR0915", # apply_broker_fill has many statements for position state transitions
+  "C901",    # apply_broker_fill is inherently complex for broker fill semantics
+  "PLR0911", # apply_broker_fill has many early-return error paths
+]
+"tests/test_broker/**/*.py" = [
+  "FBT002",  # test client stubs mirror broker API signature with boolean defaults
+  "EM101",   # test exception messages are inline for readability
+  "E501",    # long method signatures in test stubs are acceptable
+  "INP001",  # test directories without __init__.py are intentional
+  "RET501",  # explicit return None in test stubs aids readability
+  "RET504",  # intermediate assignment in stubs mirrors broker interface pattern
+  "PLR1711", # useless return in test stubs mirrors broker interface
+]
+"tests/test_reporting/**/*.py" = [
+  "DTZ001",  # test datetimes without timezone are intentional for test simplicity
+  "E501",    # SQL insert statements in tests allow long lines for clarity
+  "INP001",  # test directories without __init__.py are intentional
+]
+  "tests/test_trading/**/*.py" = [
+    "E501",    # long constructor calls in test fixtures are acceptable
+    "EM101",   # test assertion messages are inline for readability
+  ]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 13

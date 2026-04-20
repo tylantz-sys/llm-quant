@@ -12,7 +12,7 @@ activate the corresponding limit set.  Default is Track A.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from llm_quant.brain.models import Action, TradeSignal
 from llm_quant.config import AppConfig, TrackCLimits
@@ -141,7 +141,8 @@ def _check_funding_reversal(
             rule="tc_funding_reversal",
             message=(
                 f"{symbol}: funding rate {rate:.2f} bps/day "
-                f"{'<=' if passed else '>'} threshold {max_funding_rate_pct:.2f} bps/day."
+                f"{'<=' if passed else '>'} "
+                f"threshold {max_funding_rate_pct:.2f} bps/day."
             ),
             current_value=abs(rate),
             limit_value=max_funding_rate_pct,
@@ -296,6 +297,7 @@ class RiskManager:
         db_conn: Any | None = None,
         exchange: str = "UNKNOWN",
         spy_beta: float | None = None,
+        locate_lookup: Callable[[str], bool | None] | None = None,
     ) -> list[RiskCheckResult]:
         """Run **all** risk checks on a single proposed trade.
 
@@ -345,7 +347,14 @@ class RiskManager:
         is_buy = signal.action == Action.BUY
         is_short = signal.action == Action.SHORT
         is_cover = signal.action == Action.COVER
+        is_close = signal.action == Action.CLOSE
         is_open_risk = is_buy or is_short
+        existing_position = portfolio.positions.get(signal.symbol)
+        is_short_close = bool(
+            is_close
+            and existing_position is not None
+            and existing_position.shares < 0.0
+        )
 
         # ---- Trade notional estimation --------------------------------
         # For buys and shorts: target_weight * nav is the desired position size;
@@ -364,12 +373,14 @@ class RiskManager:
         else:
             # Sells / closes free up capital; compute notional for
             # informational checks but don't block on cash/exposure.
-            existing = portfolio.positions.get(signal.symbol)
+            existing = existing_position
             if existing is not None and price > 0:
-                if signal.action == Action.CLOSE:
+                if is_close:
                     trade_notional = abs(existing.market_value)
                 elif is_cover:
-                    reduce_weight = max(current_short_weight - signal.target_weight, 0.0)
+                    reduce_weight = max(
+                        current_short_weight - signal.target_weight, 0.0
+                    )
                     trade_notional = reduce_weight * nav
                 else:
                     reduce_weight = max(current_long_weight - signal.target_weight, 0.0)
@@ -378,17 +389,19 @@ class RiskManager:
                 trade_notional = 0.0
 
         # 1. Position size (single-trade cap)
-        results.append(
-            check_position_size(trade_notional, nav, limits.max_trade_size)
-        )
+        results.append(check_position_size(trade_notional, nav, limits.max_trade_size))
 
         # 2. Position weight
         # Determine per-asset-class position weight limit
         asset_class = self.asset_class_map.get(signal.symbol, "equity")
         if asset_class == "crypto":
-            max_weight = getattr(limits, "crypto_max_position_weight", limits.max_position_weight)
+            max_weight = getattr(
+                limits, "crypto_max_position_weight", limits.max_position_weight
+            )
         elif asset_class == "forex":
-            max_weight = getattr(limits, "forex_max_position_weight", limits.max_position_weight)
+            max_weight = getattr(
+                limits, "forex_max_position_weight", limits.max_position_weight
+            )
         else:
             max_weight = limits.max_position_weight
 
@@ -397,13 +410,18 @@ class RiskManager:
 
         if is_buy or is_short:
             target_position_weight = signal.target_weight
-            current_position_weight = current_long_weight if is_buy else current_short_weight
+            current_position_weight = (
+                current_long_weight if is_buy else current_short_weight
+            )
         elif is_cover:
             current_position_weight = current_short_weight
             target_position_weight = max(
                 current_short_weight - (trade_notional / nav if nav else 0.0),
                 0.0,
             )
+        elif is_short_close:
+            current_position_weight = current_short_weight
+            target_position_weight = 0.0
         else:
             current_position_weight = current_long_weight
             target_position_weight = max(
@@ -444,10 +462,10 @@ class RiskManager:
             signed_notional = trade_notional
         elif is_short:
             signed_notional = -trade_notional
+        elif is_short_close or is_cover:
+            signed_notional = trade_notional
         elif signal.action in (Action.SELL, Action.CLOSE):
             signed_notional = -trade_notional
-        elif is_cover:
-            signed_notional = trade_notional
         else:
             signed_notional = 0.0
 
@@ -509,6 +527,21 @@ class RiskManager:
         )
 
         if is_short:
+            locate_available = _coerce_locate_availability(
+                signal.metadata.get(
+                    "locate_available",
+                    signal.metadata.get("short_locate_available"),
+                )
+            )
+            if locate_available is None and locate_lookup is not None:
+                try:
+                    locate_available = _coerce_locate_availability(
+                        locate_lookup(signal.symbol)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Locate lookup failed for %s: %s", signal.symbol, exc
+                    )
             results.append(
                 check_short_exposure(
                     current_short_notional,
@@ -527,18 +560,24 @@ class RiskManager:
             results.append(
                 check_locate_availability(
                     getattr(limits, "require_locate", False),
-                    locate_available=True,
+                    locate_available=locate_available,
                 )
             )
         else:
-            for rule in ("short_exposure", "margin_buffer", "locate_availability"):
-                results.append(
-                    RiskCheckResult(
-                        passed=True,
-                        rule=rule,
-                        message=f"{rule} not applicable for action {signal.action.value}.",
-                    )
+            results.extend(
+                RiskCheckResult(
+                    passed=True,
+                    rule=rule,
+                    message=(
+                        f"{rule} not applicable for action " f"{signal.action.value}."
+                    ),
                 )
+                for rule in (
+                    "short_exposure",
+                    "margin_buffer",
+                    "locate_availability",
+                )
+            )
 
         # 7. Stop-loss (buys only — close/sell actions don't need a stop-loss)
         if is_open_risk:
@@ -577,7 +616,9 @@ class RiskManager:
                 RiskCheckResult(
                     passed=True,
                     rule="short_stop_direction",
-                    message="short_stop_direction not applicable for non-short actions.",
+                    message=(
+                        "short_stop_direction not applicable for non-short actions."
+                    ),
                 )
             )
 
@@ -617,7 +658,10 @@ class RiskManager:
                     RiskCheckResult(
                         passed=True,
                         rule="volatility_sizing",
-                        message=f"{signal.symbol}: ATR unavailable — skipping volatility sizing check.",
+                        message=(
+                            f"{signal.symbol}: ATR unavailable "
+                            "— skipping volatility sizing check."
+                        ),
                     )
                 )
         else:
@@ -625,19 +669,17 @@ class RiskManager:
                 RiskCheckResult(
                     passed=True,
                     rule="volatility_sizing",
-                    message="Volatility sizing check skipped (risk-reducing action or no ATR data).",
+                    message=(
+                        "Volatility sizing check skipped "
+                        "(risk-reducing action or no ATR data)."
+                    ),
                 )
             )
 
         # 10. ATR-calibrated stop-loss validation (buys only, when ATR data available)
         if is_open_risk and atrs is not None:
             atr = atrs.get(signal.symbol)
-            if (
-                atr is not None
-                and atr > 0.0
-                and price > 0.0
-                and signal.stop_loss > 0.0
-            ):
+            if atr is not None and atr > 0.0 and price > 0.0 and signal.stop_loss > 0.0:
                 # Select multiplier based on asset class
                 if asset_class == "crypto":
                     multiplier = getattr(limits, "atr_stop_multiplier_crypto", 2.5)
@@ -659,17 +701,12 @@ class RiskManager:
                     RiskCheckResult(
                         passed=True,
                         rule="atr_stop_loss",
-                        message=f"{signal.symbol}: ATR or stop price unavailable — skipping ATR stop check.",
+                        message=(
+                            f"{signal.symbol}: ATR or stop price unavailable "
+                            "— skipping ATR stop check."
+                        ),
                     )
                 )
-        else:
-            results.append(
-                RiskCheckResult(
-                    passed=True,
-                    rule="atr_stop_loss",
-                    message="ATR stop-loss check skipped (risk-reducing action or no ATR data).",
-                )
-            )
 
         # 11-14. Track C kill-switch checks (structural arb / event-driven only)
         if track == "C":
@@ -701,19 +738,21 @@ class RiskManager:
         else:
             # Emit pass placeholders so downstream code sees a consistent
             # result count regardless of track.
-            for rule in (
-                "tc_exchange_outage",
-                "tc_funding_reversal",
-                "tc_spread_collapse",
-                "tc_beta_breach",
-            ):
-                results.append(
-                    RiskCheckResult(
-                        passed=True,
-                        rule=rule,
-                        message=f"Track C check '{rule}' not applicable for track '{track}'.",
-                    )
+            results.extend(
+                RiskCheckResult(
+                    passed=True,
+                    rule=rule,
+                    message=(
+                        f"Track C check '{rule}' not applicable for track '{track}'."
+                    ),
                 )
+                for rule in (
+                    "tc_exchange_outage",
+                    "tc_funding_reversal",
+                    "tc_spread_collapse",
+                    "tc_beta_breach",
+                )
+            )
 
         return results
 
@@ -731,6 +770,7 @@ class RiskManager:
         db_conn: Any | None = None,
         exchange: str = "UNKNOWN",
         spy_beta: float | None = None,
+        locate_lookup: Callable[[str], bool | None] | None = None,
     ) -> tuple[list[TradeSignal], list[tuple[TradeSignal, list[RiskCheckResult]]]]:
         """Filter a batch of signals through the risk gate.
 
@@ -795,6 +835,7 @@ class RiskManager:
                 db_conn=db_conn,
                 exchange=exchange,
                 spy_beta=spy_beta,
+                locate_lookup=locate_lookup,
             )
             failures = [c for c in checks if not c.passed]
 
@@ -851,7 +892,9 @@ class RiskManager:
                 keep_ids = {id(s) for s in new_buys[: max(available_slots, 0)]}
                 dropped = [s for s in new_buys if id(s) not in keep_ids]
 
-                approved = [s for s in approved if id(s) not in {id(d) for d in dropped}]
+                approved = [
+                    s for s in approved if id(s) not in {id(d) for d in dropped}
+                ]
                 for sig in dropped:
                     rejected.append(
                         (
@@ -861,10 +904,13 @@ class RiskManager:
                                     passed=False,
                                     rule="max_positions",
                                     message=(
-                                        f"Open positions cap reached ({max_positions}). "
+                                        f"Open positions cap reached "
+                                        f"({max_positions}). "
                                         f"Signal for {sig.symbol} dropped."
                                     ),
-                                    current_value=float(len(projected_open) + len(new_buys)),
+                                    current_value=float(
+                                        len(projected_open) + len(new_buys)
+                                    ),
                                     limit_value=float(max_positions),
                                 )
                             ],
@@ -930,3 +976,19 @@ class RiskManager:
         )
 
         return approved, rejected
+
+
+def _coerce_locate_availability(value: object) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "available"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "unavailable", "missing"}:
+            return False
+    return None

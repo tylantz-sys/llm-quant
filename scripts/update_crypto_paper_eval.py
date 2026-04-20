@@ -10,7 +10,7 @@ import tomllib
 from datetime import UTC, date, datetime
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import duckdb
 import yaml
@@ -118,20 +118,24 @@ def _load_db_telemetry(
                     [pod],
                 ).fetchall()
                 closed_trades = int(
-                    conn.execute(
+                    _first_count(
+                        conn.execute(
                         """
                         SELECT COUNT(*)
                         FROM trades
-                        WHERE pod_id = ? AND lower(action) IN ('sell', 'close')
+                        WHERE pod_id = ? AND lower(action) IN ('sell', 'cover', 'close')
                         """,
                         [pod],
-                    ).fetchone()[0]
+                        ).fetchone()
+                    )
                 )
                 decisions = int(
-                    conn.execute(
-                        "SELECT COUNT(*) FROM llm_decisions WHERE pod_id = ?",
-                        [pod],
-                    ).fetchone()[0]
+                    _first_count(
+                        conn.execute(
+                            "SELECT COUNT(*) FROM llm_decisions WHERE pod_id = ?",
+                            [pod],
+                        ).fetchone()
+                    )
                 )
             finally:
                 conn.close()
@@ -178,12 +182,19 @@ def _update_operational_checks(
     has_activity: bool,
     has_nav: bool,
 ) -> dict[str, Any]:
-    checks = paper.setdefault("operational_checks", {})
+    checks = cast(dict[str, Any], dict(paper.setdefault("operational_checks", {})))
     checks["timer_healthy"] = has_nav
     checks["decision_logging"] = decisions > 0
     checks["order_flow_healthy"] = has_activity
     checks.setdefault("db_lock_errors_last_24h", None)
+    paper["operational_checks"] = checks
     return checks
+
+
+def _first_count(row: tuple[Any, ...] | None) -> int:
+    if row is None:
+        return 0
+    return int(row[0])
 
 
 def _evaluate_gate(

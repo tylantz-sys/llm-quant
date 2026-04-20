@@ -90,6 +90,9 @@ class AlpacaClient:
     def list_positions(self) -> list[dict[str, Any]]:
         return self._request("GET", "/v2/positions")
 
+    def get_asset(self, symbol: str) -> dict[str, Any]:
+        return self._request("GET", f"/v2/assets/{symbol}")
+
     def get_account(self) -> dict[str, Any]:
         return self._request("GET", "/v2/account")
 
@@ -134,9 +137,7 @@ class AlpacaClient:
         if notional is not None:
             payload["notional"] = f"{notional:.2f}"
         else:
-            payload["qty"] = (
-                str(qty) if allow_fractional else str(int(qty))
-            )
+            payload["qty"] = str(qty) if allow_fractional else str(int(qty))
         return self._request("POST", "/v2/orders", json=payload)
 
     def submit_limit_order(

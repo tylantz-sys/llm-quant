@@ -88,7 +88,8 @@ class ExecutionConfig(BaseModel):
     crypto_order_sizing: str = "qty"
     crypto_time_in_force: str = "gtc"
     crypto_symbol_map: dict[str, str] = Field(default_factory=dict)
-    # Symbols explicitly excluded from trade execution (e.g. to avoid cross-pod conflicts)
+    # Symbols explicitly excluded from trade execution
+    # (e.g. to avoid cross-pod conflicts)
     symbol_exclude: list[str] = Field(default_factory=list)
 
 
@@ -122,18 +123,18 @@ class RiskLimits(BaseModel):
     default_stop_loss_pct: float = 0.05
     max_drawdown_pct: float = 0.15  # Portfolio drawdown circuit breaker
     # ATR-calibrated stop-loss multipliers
-    atr_stop_multiplier: float = 2.0          # 2x ATR for equities (Turtle Traders)
-    atr_stop_multiplier_crypto: float = 2.5   # wider for crypto overnight gaps
+    atr_stop_multiplier: float = 2.0  # 2x ATR for equities (Turtle Traders)
+    atr_stop_multiplier_crypto: float = 2.5  # wider for crypto overnight gaps
     atr_stop_multiplier_commodity: float = 2.5  # wider for volatile commodities
     # ATR-based position sizing
-    target_risk_pct: float = 0.01    # fraction of NAV to risk per trade
-    deviation_buffer: float = 0.20   # buffer before triggering rebalance alert
-    atr_period: int = 14             # ATR lookback for equities / fixed income
-    atr_period_crypto: int = 7       # shorter ATR lookback for crypto
+    target_risk_pct: float = 0.01  # fraction of NAV to risk per trade
+    deviation_buffer: float = 0.20  # buffer before triggering rebalance alert
+    atr_period: int = 14  # ATR lookback for equities / fixed income
+    atr_period_crypto: int = 7  # shorter ATR lookback for crypto
     # Take-profit defaults (configurable, overrides LLM when mode = pct)
-    take_profit_mode: str = "pct"    # pct | rr
-    take_profit_pct: float = 0.03    # fixed take-profit percent (3%)
-    take_profit_rr: float = 2.0      # risk-reward multiple (if mode = rr)
+    take_profit_mode: str = "pct"  # pct | rr
+    take_profit_pct: float = 0.03  # fixed take-profit percent (3%)
+    take_profit_rr: float = 2.0  # risk-reward multiple (if mode = rr)
     partial_take_profit_enabled: bool = True
     partial_take_profit_pct: float = 0.02
     partial_take_profit_size: float = 0.50
@@ -210,15 +211,15 @@ class TrackCLimits(BaseModel):
     market-neutrality.  A higher cash reserve supports event-driven staging.
     """
 
-    max_position_weight: float = 0.20           # 20% per strategy
+    max_position_weight: float = 0.20  # 20% per strategy
     max_positions: int = 8
-    max_trade_size: float = 0.05                # 5% per trade
-    max_gross_exposure: float = 2.0             # 200% (both legs summed)
-    max_net_exposure: float = 0.30              # 30% — enforces near-zero beta
+    max_trade_size: float = 0.05  # 5% per trade
+    max_gross_exposure: float = 2.0  # 200% (both legs summed)
+    max_net_exposure: float = 0.30  # 30% — enforces near-zero beta
     max_sector_concentration: float = 0.30
-    max_exchange_concentration: float = 0.25    # 25% on any single exchange
+    max_exchange_concentration: float = 0.25  # 25% on any single exchange
     max_trades_per_session: int = 5
-    min_cash_reserve: float = 0.10              # 10% — hold dry powder for events
+    min_cash_reserve: float = 0.10  # 10% — hold dry powder for events
     require_stop_loss: bool = True
     default_stop_loss_pct: float = 0.05
     atr_stop_multiplier: float = 2.0
@@ -226,12 +227,13 @@ class TrackCLimits(BaseModel):
     atr_stop_multiplier_commodity: float = 2.5
     target_risk_pct: float = 0.01
     deviation_buffer: float = 0.20
-    max_drawdown_pct: float = 0.10              # 10% — tighter; drawdown signals leg break
+    # 10% — tighter; drawdown signals leg break
+    max_drawdown_pct: float = 0.10
 
     # Kill-switch thresholds (Track C-specific)
-    max_beta_to_spy: float = 0.25               # rolling-30d SPY beta limit
-    min_spread_bps: float = 5.0                 # spread collapse threshold (bps)
-    max_funding_rate_pct: float = 0.50          # funding reversal threshold (bps/day)
+    max_beta_to_spy: float = 0.25  # rolling-30d SPY beta limit
+    min_spread_bps: float = 5.0  # spread collapse threshold (bps)
+    max_funding_rate_pct: float = 0.50  # funding reversal threshold (bps/day)
 
 
 class RegimeDriftConfig(BaseModel):
@@ -433,6 +435,15 @@ class ProfitTakingConfig(BaseModel):
     )
 
 
+class GovernanceHaltPolicyConfig(BaseModel):
+    # "short_rollout_only" = freeze entries only when short_rollout detector halts
+    # "any_halt"           = freeze all new risk-opening entries on ANY halt detector
+    # "specific_detectors" = freeze entries when any listed detector halts
+    entry_freeze_mode: str = "short_rollout_only"
+    # Used only when entry_freeze_mode == "specific_detectors"
+    entry_freeze_detectors: list[str] = Field(default_factory=lambda: ["short_rollout"])
+
+
 class GovernanceConfig(BaseModel):
     regime_drift: RegimeDriftConfig = Field(default_factory=RegimeDriftConfig)
     alpha_decay: AlphaDecayConfig = Field(default_factory=AlphaDecayConfig)
@@ -445,6 +456,9 @@ class GovernanceConfig(BaseModel):
     kill_switches: KillSwitchConfig = Field(default_factory=KillSwitchConfig)
     promotion: PromotionConfig = Field(default_factory=PromotionConfig)
     profit_taking: ProfitTakingConfig = Field(default_factory=ProfitTakingConfig)
+    halt_policy: GovernanceHaltPolicyConfig = Field(
+        default_factory=GovernanceHaltPolicyConfig
+    )
 
 
 class StrategyMetadataConfig(BaseModel):

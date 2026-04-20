@@ -48,10 +48,12 @@ Action semantics:
 - `buy`: open/increase a long position.
 - `sell`: reduce an existing long position.
 - `short`: open/increase a short position.
-- `cover` or `close`: reduce/exit an existing short position.
+- `cover`: **standard short exit** — reduce or fully exit an existing short position. Use this whenever exiting a short.
+- `close`: full exit when direction is implied by context (e.g. a strategy-generated flatten signal). Do NOT use `close` as a substitute for `cover` on short positions — the audit trail will lose short-cover semantics.
 - `hold`: no trade.
 
 Short/cover safety rules:
 - For `short`, `target_weight` is the absolute short weight (positive number) and must respect position/trade caps.
 - For `short`, `stop_loss` must be above the current market price.
-- For `cover` and `close`, size only against currently open shares; do not imply net long reversal in one step.
+- For `cover`, size only against currently open short shares; do not imply net long reversal in one step.
+- **Preferred action for short exits is `cover`.** Only use `close` when the signal source explicitly provides a direction-agnostic flatten.

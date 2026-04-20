@@ -1,6 +1,8 @@
 from datetime import date, datetime
 
 from scripts.generate_report import (
+    _get_trades_for_date,
+    _semantic_action_label,
     generate_daily_report,
     generate_monthly_report,
     generate_weekly_report,
@@ -99,11 +101,60 @@ def _insert_profit_take_event(tmp_db, *, event_time: datetime, reason: str):
     )
 
 
+def _insert_trade(
+    tmp_db,
+    *,
+    trade_id: int,
+    trade_date: date,
+    symbol: str,
+    action: str,
+    semantic_action: str | None,
+    broker_side: str | None,
+    intent_type: str | None,
+):
+    tmp_db.execute(
+        """
+        INSERT INTO trades (
+            trade_id,
+            date,
+            pod_id,
+            symbol,
+            action,
+            semantic_action,
+            broker_side,
+            intent_type,
+            shares,
+            price,
+            notional,
+            conviction,
+            reasoning,
+            llm_decision_id,
+            prev_hash,
+            row_hash
+        )
+        VALUES (?, ?, 'default', ?, ?, ?, ?, ?, 1.0, 100.0, 100.0, 'medium', 'test', 1, 'prev', 'row')
+        """,
+        [
+            trade_id,
+            trade_date,
+            symbol,
+            action,
+            semantic_action,
+            broker_side,
+            intent_type,
+        ],
+    )
+
+
 def test_generate_reports_include_harvest_metrics_section_when_telemetry_exists(tmp_db):
     report_date = date(2026, 3, 31)
     _insert_snapshot(tmp_db, snapshot_id=1, snapshot_date=report_date, nav=101000.0)
-    _insert_snapshot(tmp_db, snapshot_id=2, snapshot_date=date(2026, 3, 30), nav=100500.0)
-    _insert_snapshot(tmp_db, snapshot_id=3, snapshot_date=date(2026, 3, 1), nav=100000.0)
+    _insert_snapshot(
+        tmp_db, snapshot_id=2, snapshot_date=date(2026, 3, 30), nav=100500.0
+    )
+    _insert_snapshot(
+        tmp_db, snapshot_id=3, snapshot_date=date(2026, 3, 1), nav=100000.0
+    )
     _insert_decision(tmp_db, decision_id=1, decision_date=report_date)
     _insert_profit_take_event(
         tmp_db,
@@ -119,3 +170,34 @@ def test_generate_reports_include_harvest_metrics_section_when_telemetry_exists(
         assert "## Harvest Metrics" in report
         assert "| Executed Harvest Events | 1 |" in report
         assert "| take_profit_partial | 1 |" in report
+
+
+def test_trade_reader_renders_short_lifecycle_actions(tmp_db):
+    report_date = date(2026, 3, 31)
+    _insert_trade(
+        tmp_db,
+        trade_id=1,
+        trade_date=report_date,
+        symbol="SPY",
+        action="sell",
+        semantic_action="short_entry",
+        broker_side="sell_short",
+        intent_type="entry",
+    )
+    _insert_trade(
+        tmp_db,
+        trade_id=2,
+        trade_date=report_date,
+        symbol="SPY",
+        action="buy",
+        semantic_action="short_cover",
+        broker_side="buy_to_cover",
+        intent_type="cover",
+    )
+
+    trades = _get_trades_for_date(tmp_db, report_date)
+
+    labels = [_semantic_action_label(trade) for trade in trades]
+    assert labels == ["SHORT_ENTRY", "SHORT_COVER"]
+    assert trades[0]["broker_side"] == "sell_short"
+    assert trades[1]["broker_side"] == "buy_to_cover"
