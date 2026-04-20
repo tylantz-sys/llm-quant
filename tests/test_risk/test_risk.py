@@ -2,6 +2,7 @@
 
 from llm_quant.brain.models import Action, Conviction, TradeSignal
 from llm_quant.risk.limits import (
+    check_atr_stop_loss,
     check_cash_reserve,
     check_drawdown_limit,
     check_gross_exposure,
@@ -122,6 +123,28 @@ def test_stop_loss_required_missing() -> None:
 def test_stop_loss_not_required() -> None:
     result = check_stop_loss(has_stop_loss=False, require=False)
     assert result.passed
+
+
+def test_atr_stop_loss_short_direction_pass() -> None:
+    result = check_atr_stop_loss(
+        stop_loss_price=105.0,
+        entry_price=100.0,
+        atr=2.0,
+        atr_multiplier=2.0,
+        is_short=True,
+    )
+    assert result.passed
+
+
+def test_atr_stop_loss_short_direction_fail() -> None:
+    result = check_atr_stop_loss(
+        stop_loss_price=102.0,
+        entry_price=100.0,
+        atr=2.0,
+        atr_multiplier=2.0,
+        is_short=True,
+    )
+    assert not result.passed
 
 
 def test_locate_required_missing_status_fails() -> None:
@@ -663,6 +686,60 @@ def test_risk_manager_rejects_short_without_stop_above_price(
     stop_checks = [c for c in rejected[0][1] if c.rule == "short_stop_direction"]
     assert stop_checks
     assert stop_checks[0].passed is False
+
+
+def test_risk_manager_enforces_short_atr_stop_distance(
+    sample_portfolio: object,
+    sample_prices: object,
+    sample_config: object,
+) -> None:
+    mgr = RiskManager(sample_config)
+    signal = TradeSignal(
+        symbol="GLD",
+        action=Action.SHORT,
+        conviction=Conviction.MEDIUM,
+        target_weight=0.02,
+        stop_loss=186.0,
+        take_profit=175.0,
+        reasoning="Short with too-tight ATR stop",
+    )
+
+    checks = mgr.check_trade(
+        signal,
+        sample_portfolio,
+        sample_prices,
+        atrs={"GLD": 1.0},
+    )
+    atr_checks = [c for c in checks if c.rule == "atr_stop_loss"]
+    assert atr_checks
+    assert atr_checks[0].passed is False
+
+
+def test_risk_manager_accepts_short_atr_stop_when_distance_sufficient(
+    sample_portfolio: object,
+    sample_prices: object,
+    sample_config: object,
+) -> None:
+    mgr = RiskManager(sample_config)
+    signal = TradeSignal(
+        symbol="GLD",
+        action=Action.SHORT,
+        conviction=Conviction.MEDIUM,
+        target_weight=0.02,
+        stop_loss=188.0,
+        take_profit=175.0,
+        reasoning="Short with sufficient ATR stop",
+    )
+
+    checks = mgr.check_trade(
+        signal,
+        sample_portfolio,
+        sample_prices,
+        atrs={"GLD": 1.0},
+    )
+    atr_checks = [c for c in checks if c.rule == "atr_stop_loss"]
+    assert atr_checks
+    assert atr_checks[0].passed is True
 
 
 def test_risk_manager_cover_not_blocked_by_drawdown(

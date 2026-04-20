@@ -138,5 +138,28 @@ def test_execute_signals_close_short_sets_short_close_marker() -> None:
     )
 
     assert len(closed) == 1
-    assert closed[0].action == "close"
+    assert closed[0].action == "cover"
     assert closed[0].is_short_close is True
+
+
+def test_execute_signals_blocks_buy_when_short_position_exists() -> None:
+    portfolio = Portfolio(initial_capital=1_000.0)
+
+    execute_signals(
+        portfolio,
+        [_short_signal()],
+        {"SPY": 100.0},
+        portfolio.nav,
+        mode=ExecutionMode.PAPER,
+    )
+
+    buy_attempt = execute_signals(
+        portfolio,
+        [_buy_signal()],
+        {"SPY": 100.0},
+        portfolio.nav,
+        mode=ExecutionMode.PAPER,
+    )
+
+    assert buy_attempt == []
+    assert portfolio.positions["SPY"].shares == -1
